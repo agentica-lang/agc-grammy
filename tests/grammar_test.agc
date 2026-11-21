@@ -121,6 +121,25 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("the atomic modifiers combine with > and _") do
+      grammar = try Grammar.compile("a = >_@{ \"x\" }")
+      rule = grammar.rules[0]
+      try Test.eq(rule.indents, true)
+      try Test.eq(rule.silent, true)
+      Test.eq(rule.atomicity, Atomicity.Atomic)
+    end,
+    Test.test("two atomic modifiers fail") do
+      case Grammar.compile("a = @${ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a repeated silent modifier fails") do
+      case Grammar.compile("a = __{ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a tag wraps the term it names") do
       grammar = try Grammar.compile("a = { #key = word }\nword = { ASCII_ALPHA }")
       Test.eq(grammar.rules[0].body, Expr.Tagged("key", Expr.RuleRef("word")))

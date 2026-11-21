@@ -53,17 +53,18 @@ its tests in `tests/`, so always pass the folder.
 - Silent rules (`= _{ ... }`) build no node; the start rule still gets one.
 - `WHITESPACE`/`COMMENT`, when defined, are skipped between the parts of a
   sequence and between iterations of a repetition (`skip`), and once after the
-  start rule. They are matched atomically, so they never build nodes nor skip
-  themselves; `Ctx.skips` short-circuits the whole thing for grammars without
-  them.
+  start rule. `Ctx` carries the two rules resolved once by `run`, so the hot
+  path does no lookup. They are matched atomically with skipping disabled, so
+  they never build nodes nor re-enter `skip`.
 - Atomicity flows down: `@` (`Atomic`) drops the nodes of everything it calls
   and skips nothing, `$` (`Compound`) keeps the nodes, `!` (`NonAtomic`)
   restores normal behaviour, and a plain rule inherits from its caller
   (`effective_atomicity`). A rule still builds its own node unless its caller
   was atomic (`creates_node?`).
-- A tag (`#name = term`) lands on the last node its term built, or on every
-  node when the term is a repetition or an optional. The validator refuses a tag
-  on an expression that builds no node.
+- A tag (`#name = term`) lands on the last node its term built, and over `*` or
+  `?` on the last node of every iteration. The validator refuses a tag on an
+  expression that builds no node. `run` applies the start rule's own atomicity
+  through `body_ctx`, so an `@`/`$` start rule behaves like any other.
 - The engine has no memoization and no left-recursion guard: a left-recursive
   grammar never terminates.
 - Errors are `Result` values with lowercase messages that include the bad

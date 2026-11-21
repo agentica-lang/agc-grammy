@@ -198,7 +198,7 @@ struct ParsedFlags
 end
 
 struct ParsedTag
-  name: String
+  name: Optional[String]
   pos: Int
 end
 
@@ -336,22 +336,22 @@ def parse_term(chars: List[String], pos: Int) -> Result[ParsedExpr]
   base = try parse_primary(chars, prefixes.pos)
   applied = try apply_postfix(chars, base)
   expr = wrap_prefixes(prefixes.ops, applied.expr)
-  return ok(ParsedExpr(expr: expr, pos: applied.pos)) if tag.name.empty?
-
-  ok(ParsedExpr(expr: Expr.Tagged(tag.name, expr), pos: applied.pos))
+  case tag.name
+    none -> ok(ParsedExpr(expr: expr, pos: applied.pos))
+    some(name) -> ok(ParsedExpr(expr: Expr.Tagged(name, expr), pos: applied.pos))
+  end
 end
 
-# `#name = term` tags the node the term builds. The name is empty when the term
-# carries no tag.
+# `#name = term` tags the node the term builds.
 def read_tag(chars: List[String], pos: Int) -> Result[ParsedTag]
   at = skip_blanks(chars, pos)
-  return ok(ParsedTag(name: "", pos: pos)) if char_at(chars, at) != "#"
+  return ok(ParsedTag(name: none, pos: pos)) if char_at(chars, at) != "#"
   ident = try read_ident(chars, skip_blanks(chars, at + 1)).to_result(
     "grammar: expected a tag name at character #{at}",
   )
 
   equals = try expect_char(chars, skip_blanks(chars, ident.pos), "=")
-  ok(ParsedTag(name: ident.name, pos: skip_blanks(chars, equals)))
+  ok(ParsedTag(name: some(ident.name), pos: skip_blanks(chars, equals)))
 end
 
 # Reads the `!` and `&` before a term, as pest does: they bind looser than `*`.

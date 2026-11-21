@@ -259,6 +259,58 @@ def main() -> Void
       try Test.eq(tree.children.size, 1)
       Test.eq(Tree.children_of(tree.children[0], "inner").size, 1)
     end,
+    Test.test("an atomic start rule skips nothing inside it") do
+      try Test.error?(parse("WHITESPACE = _{ \" \" }\np = @{ \"a\" ~ \"b\" }", "p", "a b"))
+      tree = try parse("WHITESPACE = _{ \" \" }\np = @{ \"a\" ~ \"b\" }", "p", "ab")
+      try Test.eq(tree.stop, 2)
+      Test.eq(tree.children.size, 0)
+    end,
+    Test.test("an atomic start rule drops the nodes inside it") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = @{ inner }\ninner = { ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "abc")
+      try Test.eq(tree.children.size, 0)
+      Test.eq(Tree.text(tree, "abc"), "abc")
+    end,
+    Test.test("a compound start rule keeps its children and skips nothing") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = ${ inner ~ \"!\" }\ninner = { ASCII_ALPHA+ }"
+      try Test.error?(parse(grammar_text, "p", "a b!"))
+      tree = try parse(grammar_text, "p", "ab!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(tree.stop, 3)
+    end,
+    Test.test("a non-atomic start rule skips whitespace") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = !{ \"a\" ~ \"b\" }", "p", "a b")
+      try Test.eq(tree.stop, 3)
+      Test.eq(tree.children.size, 0)
+    end,
+    Test.test("leading whitespace is not skipped") do
+      Test.error?(parse("WHITESPACE = _{ \" \" }\np = { \"a\" }", "p", " a"))
+    end,
+    Test.test("COMMENT works without WHITESPACE") do
+      grammar_text = "COMMENT = _{ \"/*\" ~ (!\"*/\" ~ ANY)* ~ \"*/\" }\np = { \"a\" ~ \"b\" }"
+      tree = try parse(grammar_text, "p", "a/*x*/b")
+      Test.eq(tree.stop, 7)
+    end,
+    Test.test("a compound rule inside an atomic one keeps its nodes") do
+      grammar_text = "p = { outer }\nouter = @{ inner ~ \"!\" }\ninner = ${ ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "ab!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.children_of(tree.children[0], "inner").size, 1)
+    end,
+    Test.test("a tag inside an atomic rule tags nothing") do
+      grammar_text = "p = { outer }\nouter = @{ #v = inner }\ninner = { ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "ab")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.tagged(tree, "v").size, 0)
+    end,
+    Test.test("a tag over a multi-node iteration tags its last node") do
+      grammar_text = "p = { #kv = (key ~ \":\" ~ value)* }\nkey = { ASCII_ALPHA }\nvalue = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "a:1b:2")
+      tagged = Tree.tagged(tree, "kv")
+      try Test.eq(tagged.size, 2)
+      try Test.eq(tagged[0].rule, "value")
+      Test.eq(Tree.text(tagged[1], "a:1b:2"), "2")
+    end,
     Test.test("a tag names the node its term built") do
       grammar_text = "p = { #left = digit ~ \",\" ~ #right = digit }\ndigit = { ASCII_DIGIT }"
       tree = try parse(grammar_text, "p", "1,2")

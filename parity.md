@@ -73,8 +73,8 @@ as aliases so existing grammars keep working.
 | expression that cannot fail inside a repetition (`("")*`) | yes | yes | done |
 | non-progressing expression inside a repetition (`&""*`) | yes | yes | done |
 | unreachable choice arm (a non-failing arm before others) | yes | yes | done |
-| `WHITESPACE`/`COMMENT` must fail and progress | yes | n/a | later (with implicit skipping) |
-| tags on silent rules | yes | n/a | later |
+| `WHITESPACE`/`COMMENT` must not fail and must progress | yes | yes | done |
+| tags on silent rules | yes | yes (also on literals and builtins) | done |
 | stack-only loops | yes | n/a | later |
 | Rust keyword rule names | deprecated | n/a | no |
 
@@ -115,7 +115,7 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 | flattened traversal | `Pairs::flatten` | `Tree.find_all` | — |
 | all tokens of a rule | `Pair::tokens`, `Pairs::tokens` | `Tree.find_all` / `children_of` | — |
 | JSON dump of the tree | `Pairs::to_json` | CLI renders text | later |
-| node tags | `Pair::as_node_tag`, `find_tagged` | missing | later |
+| node tags | `Pair::as_node_tag`, `find_tagged` | `Node.tag`, `Tree.tagged`/`first_tagged` | done |
 | parse entry point | `Pest::parse(Rule, input)` | `Engine.run(grammar, rule, input)` | — |
 | grammar compiled ahead of time | `#[derive(Parser)]` | `Grammar.load` at run time | no (see §6) |
 | typed stack | `pest::Stack` | missing | later |
@@ -174,12 +174,17 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
    and once after the start rule, as `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`;
    atomic rules skip nothing and `@` drops the nodes of everything it calls.
    The validator refuses a skipped rule that can fail or cannot consume input.
+   Deviation: a skip rule is matched atomically, so it never builds nodes even
+   when it is not declared silent; pest inserts those nodes into the tree.
 5. **Node tags** — done: `#name = term` parses to `Expr.Tagged`, `Node.tag`
-   carries it, `Tree.tagged`/`first_tagged` query it. Over a repetition or an
-   optional the tag names every node they build; elsewhere it names the last
-   node the term built. Deviation: a tag on an expression that builds no node
-   (a literal, a class, a builtin, a silent rule) is a compile error, where
-   pest leaves it pending and drops it.
+   carries it, `Tree.tagged`/`first_tagged` query it. A tag names the last node
+   its term built, and over `*` or `?` the last node of every iteration, which
+   is what pest's `tag_node` does after each iteration. Deviations: `+` tags
+   every iteration too, where pest falls through to the default arm and tags
+   only the final node of the whole repetition (a pest inconsistency we do not
+   copy); and a tag on an expression that builds no node (a literal, a class, a
+   builtin, a silent rule) is a compile error, where pest leaves it pending and
+   drops it.
 
 ### Milestone 3 — power and speed
 

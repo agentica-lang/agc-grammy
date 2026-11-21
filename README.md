@@ -101,7 +101,7 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
-| `#name = a` | names the node `a` builds (queries: `Grammy.tagged`) |
+| `#name = a` | names the last node `a` builds, or every iteration's last for `a*`/`a?` |
 | `( ... )` | grouping |
 
 Single-character builtins, all matching one character: `ASCII_DIGIT`,
@@ -119,8 +119,9 @@ most one of `_ @ $ !` may repeat).
 Define `WHITESPACE` and/or `COMMENT` and they are matched implicitly between the
 parts of a sequence, between the iterations of a repetition, and after the start
 rule — exactly `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. They are ordinary rules,
-so they are declared like any other, and the compiler refuses one that can fail
-or that cannot consume input:
+so they are declared like any other (write them silent, `= _{ ... }`: a skip rule
+is matched atomically and never builds nodes), and the compiler refuses one that
+can fail or that cannot consume input:
 
 ```
 WHITESPACE = _{ " " | "	" | NEWLINE }

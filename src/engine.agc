@@ -26,14 +26,16 @@ def run(grammar: Grammar.Grammar, rule_name: String, text: String) -> Result[Tre
     chars: text.split(""),
     base: 0,
     atomicity: Grammar.Atomicity.Plain,
-    skips: has_skip_rules(grammar),
+    whitespace: Grammar.find(grammar, "WHITESPACE"),
+    comment: Grammar.find(grammar, "COMMENT"),
   )
 
-  outcome = match(ctx, rule.body, 0)
+  inner = body_ctx(ctx, rule, 0)
+  outcome = match(inner, rule.body, 0)
   case outcome.found
     none -> error(failure(text, rule_name, outcome.attempt))
     some(found) ->
-      stop = skip(ctx.with(atomicity: effective_atomicity(ctx.atomicity, rule.atomicity)), found.pos)
+      stop = skip(inner, found.pos)
       return error(unconsumed(text, stop)) if stop < ctx.chars.size
 
       ok(Tree.Node(rule: rule_name, start: 0, stop: stop, children: found.nodes, tag: none))
@@ -46,14 +48,15 @@ private
 LABEL_LIMIT = 6
 
 # Everything matching needs: the grammar, the input characters, the indentation
-# of the block being matched (0 at the top level) and how the enclosing rule
-# treats whitespace.
+# of the block being matched (0 at the top level), how the enclosing rule treats
+# whitespace, and the two rules to skip (resolved once, as it is a hot path).
 struct Ctx
   grammar: Grammar.Grammar
   chars: List[String]
   base: Int
   atomicity: Grammar.Atomicity
-  skips: Bool
+  whitespace: Optional[Grammar.Rule]
+  comment: Optional[Grammar.Rule]
 end
 
 # What one expression matched: where it stopped and the nodes it built.
@@ -91,7 +94,7 @@ def match(ctx: Ctx, expr: Grammar.Expr, pos: Int) -> Outcome
     Expr.RuleRef(name) -> match_ref(ctx, name, pos)
     Expr.Seq(parts) -> match_seq(ctx, parts, pos)
     Expr.Choice(options) -> match_choice(ctx, options, pos)
-    Expr.Repeat(inner, min, max) -> match_repeat(ctx, inner, min, max, pos, "")
+    Expr.Repeat(inner, min, max) -> match_repeat(ctx, inner, min, max, pos, none)
     Expr.Lookahead(inner) -> match_lookahead(ctx, inner, pos)
     Expr.Negative(inner) -> match_negative(ctx, inner, pos)
     Expr.Tagged(name, inner) -> match_tagged(ctx, name, inner, pos)
@@ -193,7 +196,7 @@ def match_choice(ctx: Ctx, options: List[Grammar.Expr], pos: Int) -> Outcome
 end
 
 # Stops on no progress, so a repetition of a nullable expression terminates.
-def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, tag: String) -> Outcome
+def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, tag: Optional[String]) -> Outcome
   nodes: List[Tree.Node] = []
   attempt: Optional[Attempt] = none
   count = 0
@@ -217,7 +220,8 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
         count += 1
         if stuck and max >= 0
           # A zero-width iteration repeats the same empty match, so the rest of
-          # a bounded repetition is known without matching again.
+          # a bounded repetition is known without matching again. The end stays
+          # after any skipped space, as in pest.
           while count < max
             nodes = append(nodes, tag_nodes(found.nodes, tag))
             count += 1
@@ -236,11 +240,11 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
   Outcome(found: some(Progress(pos: at, nodes: nodes)), attempt: attempt)
 end
 
-# A tag lands on the last node its term built, except over a repetition or an
-# optional, where it names every node they build (as pest does).
+# A tag names the last node its term built, and over a repetition or an
+# optional the last node of every iteration (as pest tags each iteration).
 def match_tagged(ctx: Ctx, name: String, inner: Grammar.Expr, pos: Int) -> Outcome
   case inner
-    Expr.Repeat(each, min, max) -> match_repeat(ctx, each, min, max, pos, name)
+    Expr.Repeat(each, min, max) -> match_repeat(ctx, each, min, max, pos, some(name))
     _ -> last_tagged(match(ctx, inner, pos), name)
   end
 end
@@ -248,11 +252,12 @@ end
 def last_tagged(outcome: Outcome, name: String) -> Outcome
   case outcome.found
     none -> outcome
-    some(found) -> matched(Progress(pos: found.pos, nodes: tag_nodes(found.nodes, name)))
+    some(found) -> matched(Progress(pos: found.pos, nodes: tag_nodes(found.nodes, some(name))))
   end
 end
 
-def tag_nodes(nodes: List[Tree.Node], name: String) -> List[Tree.Node]
+def tag_nodes(nodes: List[Tree.Node], tag: Optional[String]) -> List[Tree.Node]
+  name = tag.unwrap_or("")
   return nodes if nodes.empty? or name.empty?
 
   last = nodes[nodes.size - 1]
@@ -456,31 +461,37 @@ end
 # Whitespace and comments between two expressions:
 # `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. Atomic rules skip nothing.
 def skip(ctx: Ctx, pos: Int) -> Int
-  return pos if !ctx.skips or ctx.atomicity != Grammar.Atomicity.Plain
+  return pos if !skips_here?(ctx)
 
-  at = skip_while(ctx, "WHITESPACE", pos)
+  at = skip_while(ctx, ctx.whitespace, pos)
   looping = true
   while looping
-    after = skip_once(ctx, "COMMENT", at)
+    after = skip_once(ctx, ctx.comment, at)
     if after == at
       looping = false
     else
-      at = skip_while(ctx, "WHITESPACE", after)
+      at = skip_while(ctx, ctx.whitespace, after)
     end
   end
 
   at
 end
 
-def has_skip_rules(grammar: Grammar.Grammar) -> Bool
-  Grammar.find(grammar, "WHITESPACE").some? or Grammar.find(grammar, "COMMENT").some?
+# Skipping is on unless the enclosing rule is atomic; `NonAtomic` is what a
+# declaration says, and it means normal behaviour.
+def skips_here?(ctx: Ctx) -> Bool
+  case ctx.atomicity
+    Grammar.Atomicity.Atomic -> false
+    Grammar.Atomicity.Compound -> false
+    _ -> ctx.whitespace.some? or ctx.comment.some?
+  end
 end
 
-def skip_while(ctx: Ctx, name: String, pos: Int) -> Int
+def skip_while(ctx: Ctx, rule: Optional[Grammar.Rule], pos: Int) -> Int
   at = pos
   looping = true
   while looping
-    after = skip_once(ctx, name, at)
+    after = skip_once(ctx, rule, at)
     if after == at
       looping = false
     else
@@ -491,16 +502,18 @@ def skip_while(ctx: Ctx, name: String, pos: Int) -> Int
   at
 end
 
-def skip_once(ctx: Ctx, name: String, pos: Int) -> Int
-  case Grammar.find(ctx.grammar, name)
+def skip_once(ctx: Ctx, rule: Optional[Grammar.Rule], pos: Int) -> Int
+  case rule
     none -> pos
-    some(rule) -> skipped(ctx, rule, pos)
+    some(found) -> skipped(ctx, found, pos)
   end
 end
 
-# A skipped rule runs atomically: it builds no nodes and skips nothing itself.
+# A skipped rule runs atomically and without skipping, so it builds no nodes and
+# cannot re-enter `skip` through a `!` rule of its own.
 def skipped(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Int
-  outcome = match(ctx.with(atomicity: Grammar.Atomicity.Atomic), rule.body, pos)
+  inner = body_ctx(ctx, rule, pos).with(atomicity: Grammar.Atomicity.Atomic, whitespace: none, comment: none)
+  outcome = match(inner, rule.body, pos)
   case outcome.found
     none -> pos
     some(found) -> found.pos

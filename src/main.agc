@@ -54,7 +54,11 @@ def render(node: Tree.Node, input: String, depth: Int = 0) -> String
 end
 
 def label(node: Tree.Node, input: String, depth: Int) -> String
-  "#{"  " * depth}#{node.rule} #{Tree.snippet(node, input).inspect}"
+  name = node.rule
+  case node.tag
+    none -> "#{"  " * depth}#{name} #{Tree.snippet(node, input).inspect}"
+    some(tag) -> "#{"  " * depth}#{name} ##{tag} #{Tree.snippet(node, input).inspect}"
+  end
 end
 
 def fail(message: String) -> Void
