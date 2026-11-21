@@ -31,7 +31,11 @@
 ## refused. The helpers live in `helpers`: prepend it to any checked program.
 ## Temps are `py_tN` lines in `Out.pre`, in evaluation order; the ternary
 ## evaluates its guard first but both branches eagerly (no closures exist to
-## defer one), and a chained middle operand exactly once.
+## defer one), and a chained middle operand exactly once. The ternary emits
+## the `then` branch before the `else` branch, so `then`-side temps precede
+## `else`-side ones in `pre`.
+## TODO(phase-3c): emitter errors are message-only strings; phase 3c will
+## thread node spans into rendered `Diagnostic` values.
 
 import Tree from "../../src/tree"
 
@@ -45,8 +49,36 @@ end
 
 ## Emits `node` (an expression rule) with `scope` naming every visible name.
 def emit(node: Tree.Node, source: String, scope: Map[String, String]) -> Result[Out]
+  bare = bare_builtin_name(node, source)
+  case bare
+    some(name) ->
+      return error("PY-OUT-OF-SUBSET: builtin `#{name}` is not a value = help: call it, for example `#{name}(...)`")
+    none -> bare = bare
+  end
+
   done = try emit_in(Cx(scope: scope, next_temp: 0, pre: []), node, source)
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
+end
+
+# A bare builtin through single-child chain nodes: `len` alone is a value,
+# while `len(...)` is a call and `map(len, xs)` stays a map-specific
+# `PY-OPERATOR` (its `len` never reaches here as the top node).
+def bare_builtin_name(node: Tree.Node, source: String) -> Optional[String]
+  cur = node
+  while single_chain?(cur.rule) and cur.children.size == 1
+    cur = List.first(cur.children)
+  end
+
+  if cur.rule == "term" and cur.children.size == 1
+    cur = List.first(cur.children)
+  end
+
+  return none if cur.rule != "name"
+
+  text = Tree.text(cur, source)
+  return some(text) if BUILTINS.include?(text)
+
+  none
 end
 
 ## The helper preamble every emitted fragment may call: Python-signed `%`,
@@ -209,15 +241,24 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
 
   then_done = try emit_in(guard.cx, List.first(kids), source)
   else_done = try emit_in(then_done.cx, List.first(kids.drop(2)), source)
+  unified = then_done.type
   if then_done.type != else_done.type
-    return error(
-      "PY-TYPE-MISMATCH: ternary branches differ: #{then_done.type} vs #{else_done.type} = help: convert one side explicitly",
-    )
+    if then_done.type == "Unknown"
+      unified = else_done.type
+    else
+      if else_done.type == "Unknown"
+        unified = then_done.type
+      else
+        return error(
+          "PY-TYPE-MISMATCH: ternary branches differ: #{then_done.type} vs #{else_done.type} = help: convert one side explicitly",
+        )
+      end
+    end
   end
 
   temp = "py_t#{else_done.cx.next_temp}"
   pre = else_done.cx.pre + ["#{temp} = #{else_done.code}", "if #{guard.code}", "  #{temp} = #{then_done.code}", "end"]
-  ok(Done(code: temp, type: then_done.type, cx: else_done.cx.with(next_temp: else_done.cx.next_temp + 1, pre: pre)))
+  ok(Done(code: temp, type: unified, cx: else_done.cx.with(next_temp: else_done.cx.next_temp + 1, pre: pre)))
 end
 
 def cond_bool_error(found: String) -> Result[Done]
@@ -343,6 +384,12 @@ def emit_eq(lcode: String, ltype: String, rcode: String, rtype: String, equal: B
     return ok("#{pair[0]} #{eq_op(equal)} #{pair[1]}")
   end
 
+  if (is_num?(ltype) and rtype == "Bool") or (ltype == "Bool" and is_num?(rtype))
+    return error(
+      "PY-TYPE-MISMATCH: `==` needs same-type operands, found #{ltype} and #{rtype} = help: convert one side explicitly",
+    )
+  end
+
   return ok(eq_answer(equal, false)) if comparable_fold?(ltype, rtype)
 
   ok("#{lcode} #{eq_op(equal)} #{rcode}")
@@ -350,11 +397,15 @@ end
 
 # Two concrete, non-optional, different types are never equal: `1 == "a"`
 # is `false` without consulting the backend. `Optional` and `Unknown` stay
-# verbal (an `Optional` may hold either side at run time).
+# verbal (an `Optional` may hold either side at run time). `Bool` never
+# folds: `Int`/`Float` vs `Bool` is `PY-TYPE-MISMATCH`, other `Bool` mixes
+# stay verbal instead of guessing through the numeric tower.
 def comparable_fold?(ltype: String, rtype: String) -> Bool
   return false if ltype == "Unknown" or rtype == "Unknown"
 
   return false if base_of(ltype) == "Optional" or base_of(rtype) == "Optional"
+
+  return false if ltype == "Bool" or rtype == "Bool"
 
   return false if ltype == "List" or rtype == "List" or ltype == "Map" or rtype == "Map"
 
@@ -439,20 +490,27 @@ def emit_membership(lcode: String, ltype: String, rcode: String, rtype: String, 
   ok(test)
 end
 
-# Only `None` may follow `is`: anything else names `==`, and a bare temp
-# reads through `.none?`.
+# Only `None` may follow `is`: anything else names `==`. A concrete
+# non-optional `x is None` folds like `== None` (`false`, `true` for
+# `is not`); only `Optional`/`Unknown` read through `.none?`.
 def emit_identity(lcode: String, ltype: String, rcode: String, rtype: String, negate: Bool) -> Result[String]
   return ok(eq_answer(!negate, true)) if ltype == "none" and rtype == "none"
 
   if ltype == "none" or rtype == "none"
     other = lcode
+    other_type = ltype
     if rtype != "none"
       other = rcode
+      other_type = rtype
     end
 
-    return ok("!#{other}.none?") if negate
+    if base_of(other_type) == "Optional" or other_type == "Unknown"
+      return ok("!#{other}.none?") if negate
 
-    return ok("#{other}.none?")
+      return ok("#{other}.none?")
+    end
+
+    return ok(eq_answer(!negate, false))
   end
 
   error("PY-IS: `is` only tests None (`x is None`); compare values with ==")
@@ -499,25 +557,31 @@ def fold_add(lcode: String, ltype: String, op: String, rcode: String, rtype: Str
     if base_of(ltype) == "List" and base_of(rtype) == "List"
       return ok(["#{lcode} + #{rcode}", ltype]) if ltype == rtype
 
-      return ok(["#{lcode} + #{rcode}", "List"])
+      l_bare = ltype == "List" or elem_of(ltype) == "Unknown"
+      r_bare = rtype == "List" or elem_of(rtype) == "Unknown"
+      return ok(["#{lcode} + #{rcode}", "List"]) if l_bare and r_bare
+
+      return ok(["#{lcode} + #{rcode}", rtype]) if l_bare
+
+      return ok(["#{lcode} + #{rcode}", ltype]) if r_bare
+
+      return error(
+        "PY-TYPE-MISMATCH: `+` needs two same-typed lists, found #{ltype} and #{rtype} = help: convert one side explicitly",
+      )
     end
 
-    if ltype != "Unknown" and rtype != "Unknown"
-      return error("PY-TYPE-MISMATCH: `+` needs two numbers, two strings or two lists, found #{ltype} and #{rtype}")
-    end
+    return ok(["#{lcode} + #{rcode}", "Unknown"]) if ltype == "Unknown" or rtype == "Unknown"
 
-    return error("PY-OPERATOR: `+` has no form for #{ltype} and #{rtype}")
+    return error("PY-TYPE-MISMATCH: `+` needs two numbers, two strings or two lists, found #{ltype} and #{rtype}")
   end
 
   return ok(["#{lcode} - #{rcode}", "Int"]) if ltype == "Int" and rtype == "Int"
 
   return ok(["#{lcode} - #{rcode}", "Float"]) if ltype == "Float" and rtype == "Float"
 
-  if ltype != "Unknown" and rtype != "Unknown"
-    return error("PY-TYPE-MISMATCH: `-` needs two numbers, found #{ltype} and #{rtype}")
-  end
+  return ok(["#{lcode} - #{rcode}", "Unknown"]) if ltype == "Unknown" or rtype == "Unknown"
 
-  error("PY-OPERATOR: `-` has no form for #{ltype} and #{rtype}")
+  error("PY-TYPE-MISMATCH: `-` needs two numbers, found #{ltype} and #{rtype}")
 end
 
 def fold_mul(lcode: String, ltype: String, op: String, rcode: String, rtype: String) -> Result[List[String]]
@@ -602,6 +666,8 @@ def emit_minus(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
     return ok(Done(code: "-(#{powered.code})", type: powered.type, cx: powered.cx))
   end
 
+  return ok(Done(code: "-#{inner.code}", type: "Unknown", cx: inner.cx)) if inner.type == "Unknown"
+
   return emit_unary_mismatch(inner.type) if inner.type != "Int" and inner.type != "Float"
 
   ok(Done(code: "-#{inner.code}", type: inner.type, cx: inner.cx))
@@ -609,16 +675,21 @@ end
 
 def emit_plus(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   parts = unary_parts(node)
-  return error("PY-OPERATOR: `+` cannot carry `**`; write the power without the sign") if !parts["power"].empty?
-
   inner = try emit_group_nodes(cx, parts["base"], source)
+  if !parts["power"].empty?
+    powered = try emit_pow_base(inner, List.first(parts["power"]), source, inner.cx)
+    return ok(Done(code: powered.code, type: powered.type, cx: powered.cx))
+  end
+
+  return ok(Done(code: inner.code, type: "Unknown", cx: inner.cx)) if inner.type == "Unknown"
+
   return emit_unary_mismatch(inner.type) if inner.type != "Int" and inner.type != "Float"
 
   ok(inner)
 end
 
 def emit_unary_mismatch(found: String) -> Result[Done]
-  error("PY-OPERATOR: unary `+`/`-` needs a number, found #{found}")
+  error("PY-TYPE-MISMATCH: unary `+`/`-` needs a number, found #{found}")
 end
 
 # Splits a `minus` / `plus` node into its base operand nodes and an optional
@@ -750,29 +821,49 @@ end
 def static_neg?(nodes: List[Tree.Node]) -> Bool
   return false if nodes.size != 1
 
-  neg_single?(List.first(nodes))
+  is_literal_neg(List.first(nodes))
 end
 
-def neg_single?(node: Tree.Node) -> Bool
-  return true if node.rule == "minus"
+# Only a literal-negative exponent halts (`-1`, `-(1)` and the like,
+# matching the grammar `negative_value`): a dynamic `-x` emits as
+# `a.pow(-x)` and halts only at run time if negative.
+def is_literal_neg(node: Tree.Node) -> Bool
+  cur = pow_strip(node)
+  return false if cur.rule != "minus" or cur.children.empty?
 
-  return neg_single?(List.first(node.children)) if node.rule == "group" and node.children.size == 1
-
-  return neg_single?(List.first(node.children)) if node.rule == "plus" and node.children.size == 1
-
-  neg_chain?(node)
+  is_neg_number(List.first(cur.children))
 end
 
-def neg_chain?(node: Tree.Node) -> Bool
-  return node.children.size == 1 and neg_single?(List.first(node.children)) if single_chain?(node.rule)
+def is_neg_number(node: Tree.Node) -> Bool
+  cur = node
+  while pow_wraps?(cur)
+    cur = List.first(cur.children)
+  end
 
-  return node.children.size == 1 and neg_operand?(List.first(node.children)) if node.rule == "term"
-
-  false
+  cur.rule == "number"
 end
 
-def neg_operand?(node: Tree.Node) -> Bool
-  node.rule == "minus" or (node.rule == "group" and node.children.size == 1 and neg_single?(List.first(node.children)))
+def pow_strip(node: Tree.Node) -> Tree.Node
+  cur = node
+  while pow_plain_wraps?(cur)
+    cur = List.first(cur.children)
+  end
+
+  cur
+end
+
+def pow_plain_wraps?(node: Tree.Node) -> Bool
+  return true if node.rule == "group" and node.children.size == 1
+
+  return true if single_chain?(node.rule) and node.children.size == 1
+
+  node.rule == "term" and node.children.size == 1
+end
+
+def pow_wraps?(node: Tree.Node) -> Bool
+  return true if pow_plain_wraps?(node)
+
+  (node.rule == "minus" or node.rule == "plus") and node.children.size == 1
 end
 
 def emit_number(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
@@ -1415,7 +1506,7 @@ def emit_head_call(cx: Cx, head: Tree.Node, args: CallArgs, source: String) -> R
   mapped = try emit_builtin(name, args, source)
   case mapped
     some(done) -> ok(done)
-    none -> emit_user_call(name, args)
+    none -> emit_user_call(args.cx, name, args)
   end
 end
 
@@ -1474,7 +1565,7 @@ def emit_method_named(recv: Done, method: String, args: CallArgs) -> Result[Done
     )
   end
 
-  if method == "reverse" and base_of(recv.type) != "Unknown"
+  if method == "reverse"
     return error(
       "PY-MUTATION: `.reverse()` reverses in place; rebinding is the subset spelling = help: write `xs = reversed(xs)`",
     )
@@ -1512,7 +1603,13 @@ def emit_map_get(recv: Done, args: CallArgs) -> Result[Done]
   end
 
   if args.pos.size == 1
-    return ok(Done(code: "#{recv.code}.get(#{List.first(args.pos).code})", type: "Optional", cx: args.cx))
+    elem = elem_of(recv.type)
+    get_type = "Optional"
+    if elem != "Unknown"
+      get_type = "Optional[#{elem}]"
+    end
+
+    return ok(Done(code: "#{recv.code}.get(#{List.first(args.pos).code})", type: get_type, cx: args.cx))
   end
 
   if args.pos.size == 2
@@ -1568,7 +1665,12 @@ def format_args(args: CallArgs) -> String
   parts.join(", ")
 end
 
-def emit_user_call(name: String, args: CallArgs) -> Result[Done]
+def emit_user_call(cx: Cx, name: String, args: CallArgs) -> Result[Done]
+  found = cx.scope.get(name, "")
+  if found == "" and !BUILTINS.include?(name)
+    return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
+  end
+
   ok(Done(code: "#{name}(#{format_args(args)})", type: "Unknown", cx: args.cx))
 end
 
@@ -1636,19 +1738,41 @@ def emit_len(args: CallArgs) -> Result[Done]
 
   return ok(Done(code: "#{item.code}.length", type: "Int", cx: args.cx)) if base == "String"
 
-  error("PY-OPERATOR: `len` has no form for #{item.type} = help: use a list, string, map or range")
+  if base == "Unknown"
+    return error("PY-OPERATOR: `len` has no form for #{item.type} = help: use a list, string, map or range")
+  end
+
+  error("PY-TYPE-MISMATCH: `len` needs a list, string, map or range, found #{item.type}")
 end
 
+# TODO(catalog): arity codes drift (`range()` is `PY-OPERATOR`, 3-arg `range`
+# and `d.get` arity are `PY-OUT-OF-SUBSET`, string-method arity is
+# `PY-OPERATOR`); a later catalog pass should unify them.
 def emit_range(args: CallArgs) -> Result[Done]
   if !args.kw.empty?
     return error("PY-OUT-OF-SUBSET: `range` takes no keyword args = help: write `range(a)` or `range(a, b)`")
   end
 
-  return ok(Done(code: "0...#{List.first(args.pos).code}", type: "Range", cx: args.cx)) if args.pos.size == 1
+  if args.pos.size == 1
+    sole = List.first(args.pos)
+    if sole.type != "Int" and sole.type != "Unknown"
+      return error("PY-TYPE-MISMATCH: `range` needs int args, found #{sole.type}")
+    end
+
+    return ok(Done(code: "0...#{sole.code}", type: "Range", cx: args.cx))
+  end
 
   if args.pos.size == 2
     first = List.first(args.pos)
     second = List.first(args.pos.drop(1))
+    if first.type != "Int" and first.type != "Unknown"
+      return error("PY-TYPE-MISMATCH: `range` needs int args, found #{first.type}")
+    end
+
+    if second.type != "Int" and second.type != "Unknown"
+      return error("PY-TYPE-MISMATCH: `range` needs int args, found #{second.type}")
+    end
+
     return ok(Done(code: "#{first.code}...#{second.code}", type: "Range", cx: args.cx))
   end
 
@@ -1665,9 +1789,9 @@ def emit_int(args: CallArgs) -> Result[Done]
     return ok(Done(code: "#{item.code}.to_i", type: "Result[Int]", cx: args.cx))
   end
 
-  return error("PY-TYPE-MISMATCH: `int` converts str or float, found #{item.type}") if item.type != "Unknown"
+  return ok(Done(code: "#{item.code}.to_i", type: "Result[Int]", cx: args.cx)) if item.type == "Unknown"
 
-  error("PY-OPERATOR: `int` has no form for #{item.type}")
+  error("PY-TYPE-MISMATCH: `int` converts str or float, found #{item.type}")
 end
 
 def emit_float(args: CallArgs) -> Result[Done]
@@ -1678,9 +1802,9 @@ def emit_float(args: CallArgs) -> Result[Done]
     return ok(Done(code: "#{item.code}.to_f", type: "Result[Float]", cx: args.cx))
   end
 
-  return error("PY-TYPE-MISMATCH: `float` converts str or int, found #{item.type}") if item.type != "Unknown"
+  return ok(Done(code: "#{item.code}.to_f", type: "Result[Float]", cx: args.cx)) if item.type == "Unknown"
 
-  error("PY-OPERATOR: `float` has no form for #{item.type}")
+  error("PY-TYPE-MISMATCH: `float` converts str or int, found #{item.type}")
 end
 
 def emit_str(args: CallArgs) -> Result[Done]
@@ -1717,21 +1841,42 @@ end
 
 def emit_sorted(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "sorted")
-  return error("PY-OPERATOR: `sorted` needs a list, found #{sole.type}") if base_of(sole.type) != "List"
+  base = base_of(sole.type)
+  return ok(Done(code: "#{sole.code}.sort", type: sole.type, cx: args.cx)) if base == "Unknown"
+
+  return error("PY-TYPE-MISMATCH: `sorted` needs a list, found #{sole.type}") if base != "List"
+
+  elem = elem_of(sole.type)
+  if elem != "Unknown" and sole.type != "List"
+    if elem != "Int" and elem != "Float" and elem != "String"
+      return error("PY-TYPE-MISMATCH: `sorted` needs Int, Float or String elements, found #{elem}")
+    end
+  end
 
   ok(Done(code: "#{sole.code}.sort", type: sole.type, cx: args.cx))
 end
 
 def emit_sum_call(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "sum")
-  return error("PY-OPERATOR: `sum` needs a list, found #{sole.type}") if base_of(sole.type) != "List"
+  base = base_of(sole.type)
+  return ok(Done(code: "#{sole.code}.sum", type: "Unknown", cx: args.cx)) if base == "Unknown"
+
+  return error("PY-TYPE-MISMATCH: `sum` needs a list, found #{sole.type}") if base != "List"
+
+  elem = elem_of(sole.type)
+  if elem != "Unknown" and sole.type != "List"
+    return error("PY-TYPE-MISMATCH: `sum` needs numeric elements, found #{elem}") if elem != "Int" and elem != "Float"
+  end
 
   ok(Done(code: "#{sole.code}.sum", type: elem_of(sole.type), cx: args.cx))
 end
 
 def emit_min_max(args: CallArgs, op: String) -> Result[Done]
   sole = try sole_arg(args, op)
-  return error("PY-OPERATOR: `#{op}` needs a list, found #{sole.type}") if base_of(sole.type) != "List"
+  base = base_of(sole.type)
+  return ok(Done(code: "#{sole.code}.#{op}", type: "Optional", cx: args.cx)) if base == "Unknown"
+
+  return error("PY-TYPE-MISMATCH: `#{op}` needs a list, found #{sole.type}") if base != "List"
 
   elem = elem_of(sole.type)
   type = "Optional"
@@ -1746,9 +1891,9 @@ def emit_abs(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "abs")
   return ok(Done(code: "#{sole.code}.abs", type: sole.type, cx: args.cx)) if sole.type == "Int" or sole.type == "Float"
 
-  return error("PY-TYPE-MISMATCH: `abs` needs a number, found #{sole.type}") if sole.type != "Unknown"
+  return ok(Done(code: "#{sole.code}.abs", type: "Unknown", cx: args.cx)) if sole.type == "Unknown"
 
-  error("PY-OPERATOR: `abs` has no form for #{sole.type}")
+  error("PY-TYPE-MISMATCH: `abs` needs a number, found #{sole.type}")
 end
 
 # `round` is `Float`-only: `Int` has no `round`, an int needs no rounding.
@@ -1765,6 +1910,8 @@ end
 
 def emit_chr(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "chr")
+  return ok(Done(code: "String.from_code(#{sole.code})", type: "String", cx: args.cx)) if sole.type == "Unknown"
+
   return emit_conv_mismatch("chr", "int", sole.type) if sole.type != "Int"
 
   ok(Done(code: "String.from_code(#{sole.code})", type: "String", cx: args.cx))
@@ -1785,14 +1932,29 @@ end
 
 def emit_reversed(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "reversed")
-  return error("PY-OPERATOR: `reversed` needs a list, found #{sole.type}") if base_of(sole.type) != "List"
+  base = base_of(sole.type)
+  return ok(Done(code: "#{sole.code}.reverse", type: sole.type, cx: args.cx)) if base == "Unknown"
+
+  return error("PY-TYPE-MISMATCH: `reversed` needs a list, found #{sole.type}") if base != "List"
 
   ok(Done(code: "#{sole.code}.reverse", type: sole.type, cx: args.cx))
 end
 
 def emit_all_any(args: CallArgs, name: String, target: String) -> Result[Done]
   sole = try sole_arg(args, name)
-  return error("PY-OPERATOR: `#{name}` needs a list, found #{sole.type}") if base_of(sole.type) != "List"
+  base = base_of(sole.type)
+  if base == "Unknown"
+    temp = "py_x#{args.cx.next_temp}"
+    current = args.cx.with(next_temp: args.cx.next_temp + 1)
+    return ok(Done(code: "#{sole.code}.#{target} { |#{temp}| #{temp} }", type: "Bool", cx: current))
+  end
+
+  return error("PY-TYPE-MISMATCH: `#{name}` needs a list, found #{sole.type}") if base != "List"
+
+  elem = elem_of(sole.type)
+  if elem != "Unknown" and sole.type != "List"
+    return error("PY-TYPE-MISMATCH: `#{name}` needs Bool elements, found #{elem}") if elem != "Bool"
+  end
 
   temp = "py_x#{args.cx.next_temp}"
   current = args.cx.with(next_temp: args.cx.next_temp + 1)
@@ -1806,7 +1968,9 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
 
   func = List.first(args.pos)
   xs = List.first(args.pos.drop(1))
-  return error("PY-OPERATOR: `#{target}` needs a list, found #{xs.type}") if base_of(xs.type) != "List"
+  if base_of(xs.type) != "List" and base_of(xs.type) != "Unknown"
+    return error("PY-TYPE-MISMATCH: `#{target}` needs a list, found #{xs.type}")
+  end
 
   head = bare_name(List.first(args.raws), source)
   case head
@@ -1815,6 +1979,11 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
         return error(
           "PY-OPERATOR: `#{target}` takes a user function; `#{name}` needs its own lowering = help: wrap `#{name}` in a def first",
         )
+      end
+
+      found = args.cx.scope.get(name, "")
+      if found == ""
+        return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
       end
 
       temp = "py_x#{args.cx.next_temp}"

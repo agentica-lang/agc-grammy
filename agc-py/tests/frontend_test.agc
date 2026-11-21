@@ -296,5 +296,26 @@ def main() -> Void
         "prog.py:1:10 error[PY-NAME-UNKNOWN]\nunknown name `y`\n\n1 | x: int = y\n  |          ^\n= help: bind it first, for example `y: int = ...`",
       )
     end,
+    # TODO(PY-SLICE): stepped and literal-negative slices are grammar
+    # rejects mapped to `PY-SLICE` by the frontend fallback; phase 3c owns
+    # the emitter-side span threading.
+    Test.test("a stepped slice refuses with PY-SLICE") do
+      case check(compiled, "x: list[int] = xs[1:2:3]\n")
+        error(e) -> Test.assert(e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected PY-SLICE")
+      end
+    end,
+    Test.test("a literal-negative slice bound refuses with PY-SLICE") do
+      case check(compiled, "x: list[int] = xs[-1:2]\n")
+        error(e) -> Test.assert(e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected PY-SLICE")
+      end
+    end,
+    Test.test("a bare-step slice refuses with PY-SLICE") do
+      case check(compiled, "x: list[int] = xs[::-1]\n")
+        error(e) -> Test.assert(e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected PY-SLICE")
+      end
+    end,
   ])
 end

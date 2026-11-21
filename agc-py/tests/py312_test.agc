@@ -244,6 +244,11 @@ def main() -> Void
       try Test.error?(parse_py(compiled, "x = xs[::2]"))
       Test.error?(parse_py(compiled, "x = xs[a:b:c]"))
     end,
+    # TODO(PY-SLICE): the grammar itself rejects stepped/literal-negative
+    # slices at parse time; the frontend fallback owns the `PY-SLICE` code.
+    Test.test("raw grammar still rejects stepped slices (PY-SLICE owner is frontend)") do
+      Test.error?(parse_py(compiled, "x = xs[1:2:3]\n"))
+    end,
     Test.test("plain, raw and escaped strings parse") do
       program = (
         "x: str = \"a\\n\\r\\t\\\\\\\"\\'\\0\\a\\b\\f\\v\\x41\\u0041\"\n" +

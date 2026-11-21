@@ -151,7 +151,9 @@ def check_all(compiled: Grammar.Grammar, slug: String, cases: List[Case], errs: 
   end
 
   for i in 0...errs.size
-    try assert_err(EmitExpr.emit(List.first(nodes.drop(cases.size + i)), full, errs[i].scope), errs[i].code)
+    target = List.first(nodes.drop(cases.size + i))
+    emitted = EmitExpr.emit(target, full, errs[i].scope)
+    try assert_err(emitted, errs[i].code)
   end
 
   checkable: List[Case] = []
@@ -204,6 +206,8 @@ def check_all(compiled: Grammar.Grammar, slug: String, cases: List[Case], errs: 
   # One `agentica check` per test blows the test-runner step budget (a full
   # VM boot each), so fragments accumulate here and the final test checks
   # them all together; `slug` keeps function names unique across tests.
+  # TODO(parallel): `/tmp/agc_emit_blocks.txt` is order-dependent and fragile
+  # under parallel/sharded runners; use env-overridable accumulator paths.
   blocks = try File.read_text("/tmp/agc_emit_blocks.txt")
   try File.write_text("/tmp/agc_emit_blocks.txt", blocks + tops_text + funcs.join("\n") + "\n\n")
   calls = try File.read_text("/tmp/agc_emit_calls.txt")
@@ -449,6 +453,8 @@ def main() -> Void
           cased("x ** y", int_scope(), ["x: Int = 3", "y: Int = 4"], "Int", "x.pow(y)"),
           cased("2 ** 3 ** 4", empty_scope(), [], "Int", "2.pow(3.pow(4))"),
           cased("-2 ** 3", empty_scope(), [], "Int", "-(2.pow(3))"),
+          cased("+2 ** 3", empty_scope(), [], "Int", "2.pow(3)"),
+          cased("2 ** -x", {"x": "Int"}, ["x: Int = 1"], "Int", "2.pow(-x)"),
         ],
         [errcased("2 ** -1", empty_scope(), "PY-OPERATOR"), errcased("2.0 ** 3", empty_scope(), "PY-OPERATOR")],
       )
@@ -517,7 +523,7 @@ def main() -> Void
             tops: [],
           ),
         ],
-        [],
+        [errcased("xs + ys", {"xs": "List[Int]", "ys": "List[String]"}, "PY-TYPE-MISMATCH")],
       )
     end,
     Test.test("equality works on anything") do
@@ -532,7 +538,11 @@ def main() -> Void
           cased("1 == \"a\"", empty_scope(), [], "Bool", "false"),
           cased("1 != \"a\"", empty_scope(), [], "Bool", "true"),
         ],
-        [],
+        [
+          errcased("1 == True", empty_scope(), "PY-TYPE-MISMATCH"),
+          errcased("0 == False", empty_scope(), "PY-TYPE-MISMATCH"),
+          errcased("1 != True", empty_scope(), "PY-TYPE-MISMATCH"),
+        ],
       )
     end,
     Test.test("ordering works on numbers and strings") do
@@ -572,6 +582,25 @@ def main() -> Void
         [],
       )
     end,
+    Test.test("four-operand chains thread two middles") do
+      scope = {"a": "Int", "b": "Int", "c": "Int", "d": "Int"}
+      decls = ["a: Int = 1", "b: Int = 2", "c: Int = 3", "d: Int = 4"]
+      check_all(
+        compiled.unwrap!,
+        "chained4",
+        [
+          cased_pre(
+            "a < b < c < d",
+            scope,
+            decls,
+            "Bool",
+            "a < py_t0 and py_t0 < py_t1 and py_t1 < d",
+            ["py_t0 = b", "py_t1 = c"],
+          ),
+        ],
+        [],
+      )
+    end,
     Test.test("and or and not need bools") do
       scope = {"a": "Bool", "b": "Bool", "c": "Bool"}
       decls = ["a: Bool = true", "b: Bool = false", "c: Bool = true"]
@@ -603,6 +632,27 @@ def main() -> Void
         ],
       )
     end,
+    Test.test("ternary Unknown unifies with the concrete side") do
+      check_all(
+        compiled.unwrap!,
+        "ternary_unknown",
+        [
+          Case(
+            expr: "h(x) if c else y",
+            scope: {"h": "Unknown", "x": "Int", "c": "Bool", "y": "Int"},
+            decls: ["x: Int = 1", "y: Int = 2", "c: Bool = true"],
+            want_type: "Int",
+            want_code: "py_t0",
+            want_contains: [],
+            want_pre: ["py_t0 = y", "if c", "  py_t0 = h(x)", "end"],
+            as_type: "",
+            skip_check: false,
+            tops: ["def h(x: Int) -> Int\n  x\nend"],
+          ),
+        ],
+        [],
+      )
+    end,
     Test.test("slices clamp through helpers") do
       lscope = {"xs": "List[Int]", "x": "Int"}
       ldecls = ["xs: List[Int] = [1, 2, 3]", "x: Int = 1"]
@@ -614,6 +664,13 @@ def main() -> Void
           cased_pre("xs[x:]", lscope, ldecls, "List[Int]", "py_slice_list(py_t0, x, py_t0.size)", ["py_t0 = xs"]),
           cased("xs[:2]", lscope, ldecls, "List[Int]", "py_slice_list(xs, 0, 2)"),
           cased_pre("xs[:]", lscope, ldecls, "List[Int]", "py_slice_list(py_t0, 0, py_t0.size)", ["py_t0 = xs"]),
+          cased(
+            "xs[x:y]",
+            {"xs": "List[Int]", "x": "Int", "y": "Int"},
+            ["xs: List[Int] = [1, 2, 3]", "x: Int = 1", "y: Int = 2"],
+            "List[Int]",
+            "py_slice_list(xs, x, y)",
+          ),
           cased("\"abcd\"[1:3]", empty_scope(), [], "String", "py_slice_str(\"abcd\", 1, 3)"),
           cased_pre(
             "s[1:]",
@@ -642,6 +699,14 @@ def main() -> Void
             ["py_t0 = xs"],
           ),
           cased("s[0]", {"s": "String"}, ["s: String = \"ab\""], "String", "s.at(0)"),
+          cased_pre(
+            "s[-1]",
+            {"s": "String"},
+            ["s: String = \"ab\""],
+            "String",
+            "py_t0.at(py_t0.length - (1))",
+            ["py_t0 = s"],
+          ),
           cased("d[\"k\"]", {"d": "Map[String, Int]"}, ["d: Map[String, Int] = {\"k\": 1}"], "Int", "d[\"k\"]"),
         ],
         [],
@@ -681,6 +746,9 @@ def main() -> Void
           cased("o is not None", scope, decls, "Bool", "!o.none?"),
           cased("None is None", empty_scope(), [], "Bool", "true"),
           cased("x == None", scope, decls, "Bool", "false"),
+          cased("x is None", scope, decls, "Bool", "false"),
+          cased("x is not None", scope, decls, "Bool", "true"),
+          cased("None is not None", empty_scope(), [], "Bool", "false"),
         ],
         [errcased("x is y", {"x": "Int", "y": "Int"}, "PY-IS")],
       )
@@ -715,7 +783,11 @@ def main() -> Void
             tops: ["def add(x: Int, y: Int) -> Int\n  x + y\nend"],
           ),
         ],
-        [],
+        [
+          errcased("nosuchfn(x)", {"x": "Int"}, "PY-NAME-UNKNOWN"),
+          errcased("len", empty_scope(), "PY-OUT-OF-SUBSET"),
+          errcased("str", empty_scope(), "PY-OUT-OF-SUBSET"),
+        ],
       )
     end,
     Test.test("print joins with single spaces") do
@@ -746,7 +818,7 @@ def main() -> Void
           cased("len(d)", {"d": "Map[String, Int]"}, ["d: Map[String, Int] = {\"k\": 1}"], "Int", "d.size"),
           cased("len(r)", {"r": "Range"}, ["r: Range = 0...3"], "Int", "r.size"),
         ],
-        [errcased("len(x)", {"x": "Int"}, "PY-OPERATOR")],
+        [errcased("len(x)", {"x": "Int"}, "PY-TYPE-MISMATCH")],
       )
     end,
     Test.test("range maps to backend ranges") do
@@ -756,10 +828,13 @@ def main() -> Void
         [
           cased("range(3)", empty_scope(), [], "Range", "0...3"),
           cased("range(x, y)", {"x": "Int", "y": "Int"}, ["x: Int = 1", "y: Int = 5"], "Range", "x...y"),
+          cased("range(u)", {"u": "Unknown"}, ["u: Int = 1"], "Range", "0...u"),
         ],
         [
           errcased("range()", empty_scope(), "PY-OPERATOR"),
           errcased("range(1, 9, 2)", empty_scope(), "PY-OUT-OF-SUBSET"),
+          errcased("range(\"a\")", empty_scope(), "PY-TYPE-MISMATCH"),
+          errcased("range(x)", {"x": "String"}, "PY-TYPE-MISMATCH"),
         ],
       )
     end,
@@ -816,7 +891,15 @@ def main() -> Void
           cased("chr(x)", scope, decls, "String", "String.from_code(x)"),
           cased("ord(s)", scope, decls, "Int", "s.code"),
         ],
-        [errcased("round(x)", {"x": "Int"}, "PY-OPERATOR"), errcased("abs(s)", {"s": "String"}, "PY-TYPE-MISMATCH")],
+        [
+          errcased("round(x)", {"x": "Int"}, "PY-OPERATOR"),
+          errcased("abs(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
+          errcased("sorted(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
+          errcased("sum(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
+          errcased("min(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
+          errcased("sorted(bs)", {"bs": "List[Bool]"}, "PY-TYPE-MISMATCH"),
+          errcased("sum(ss)", {"ss": "List[String]"}, "PY-TYPE-MISMATCH"),
+        ],
       )
     end,
     Test.test("higher-order builtins map through blocks") do
@@ -857,13 +940,18 @@ def main() -> Void
         [
           errcased("map(len, xs)", {"xs": "List[Int]"}, "PY-OPERATOR"),
           errcased("enumerate(xs)", {"xs": "List[Int]"}, "PY-OUT-OF-SUBSET"),
+          errcased("map(nosuch, xs)", {"xs": "List[Int]"}, "PY-NAME-UNKNOWN"),
+          errcased("map(nosuch(x), xs)", {"xs": "List[Int]", "x": "Int"}, "PY-NAME-UNKNOWN"),
+          errcased("reversed(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
+          errcased("all(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),
+          errcased("any(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),
         ],
       )
     end,
     Test.test("d.get reads") do
       scope = {"d": "Map[String, Int]", "k": "String"}
       decls = ["d: Map[String, Int] = {\"k\": 1}", "k: String = \"k\""]
-      check_all(compiled.unwrap!, "get_read", [cased("d.get(k)", scope, decls, "Optional", "d.get(k)")], [])
+      check_all(compiled.unwrap!, "get_read", [cased("d.get(k)", scope, decls, "Optional[Int]", "d.get(k)")], [])
     end,
     Test.test("d.get with default") do
       scope = {"d": "Map[String, Int]", "k": "String"}
@@ -875,13 +963,22 @@ def main() -> Void
         compiled.unwrap!,
         "get_3args",
         [],
-        [errcased("d.get(k, 0, 1)", {"d": "Map[String, Int]", "k": "String"}, "PY-OUT-OF-SUBSET")],
+        [
+          errcased("d.get(k, 0, 1)", {"d": "Map[String, Int]", "k": "String"}, "PY-OUT-OF-SUBSET"),
+          errcased("d.get()", {"d": "Map[String, Int]"}, "PY-OUT-OF-SUBSET"),
+          errcased("d.get(k, v=1)", {"d": "Map[String, Int]", "k": "String"}, "PY-OUT-OF-SUBSET"),
+        ],
       )
     end,
     Test.test("s.strip") do
       scope = {"s": "String", "xs": "List[String]"}
       decls = ["s: String = \"  a,b  \"", "xs: List[String] = [\"a\", \"b\"]"]
-      check_all(compiled.unwrap!, "strip", [cased("s.strip()", scope, decls, "String", "s.strip()")], [])
+      check_all(
+        compiled.unwrap!,
+        "strip",
+        [cased("s.strip()", scope, decls, "String", "s.strip()")],
+        [errcased("s.strip(\",\")", scope, "PY-OPERATOR")],
+      )
     end,
     Test.test("s.split") do
       scope = {"s": "String", "xs": "List[String]"}
@@ -950,7 +1047,15 @@ def main() -> Void
       check_all(compiled.unwrap!, "ref_sort", [], [errcased("xs.sort()", {"xs": "List[Int]"}, "PY-MUTATION")])
     end,
     Test.test("xs.reverse is refused") do
-      check_all(compiled.unwrap!, "ref_reverse", [], [errcased("xs.reverse()", {"xs": "List[Int]"}, "PY-MUTATION")])
+      check_all(
+        compiled.unwrap!,
+        "ref_reverse",
+        [],
+        [
+          errcased("xs.reverse()", {"xs": "List[Int]"}, "PY-MUTATION"),
+          errcased("xs.reverse()", {"xs": "Unknown"}, "PY-MUTATION"),
+        ],
+      )
     end,
     Test.test("d.pop is refused") do
       check_all(
