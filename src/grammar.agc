@@ -269,6 +269,7 @@ def parse_seq(chars: List[String], pos: Int) -> Result[ParsedExpr]
     break if seq_end?(chars, at)
     return error("grammar: expected ~ between terms at character #{at}") if char_at(chars, at) != "~"
     at = skip_blanks(chars, at + 1)
+    return error("grammar: expected an expression after ~ at character #{at}") if seq_end?(chars, at)
   end
 
   return error("grammar: expected an expression at character #{pos}") if parts.size == 0
@@ -365,6 +366,8 @@ def parse_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
 end
 
 def parse_insensitive(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  return error("grammar: expected a string after ^ at character #{pos}") if char_at(chars, pos + 1) != "\""
+
   text = try parse_string(chars, pos + 1)
   ok(ParsedExpr(expr: Expr.Insensitive(text.text), pos: text.pos))
 end

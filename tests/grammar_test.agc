@@ -100,6 +100,30 @@ def main() -> Void
 
       Test.eq(grammar.rules[0].body, expected)
     end,
+    Test.test("modifiers combine") do
+      grammar = try Grammar.compile("a = >_{ \"x\" }")
+      rule = grammar.rules[0]
+      try Test.eq(rule.indents, true)
+      Test.eq(rule.silent, true)
+    end,
+    Test.test("an unsupported modifier fails") do
+      case Grammar.compile("a = @{ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("not supported yet"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a trailing ~ fails") do
+      case Grammar.compile("a = { \"x\" ~ }")
+        error(e) -> Test.assert(e.message.include?("expected an expression after ~"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a caret without a string fails") do
+      case Grammar.compile("a = { ^x }")
+        error(e) -> Test.assert(e.message.include?("expected a string after ^"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a rule declared twice fails") do
       case Grammar.compile("a = { \"x\" }\na = { \"y\" }")
         error(e) -> Test.assert(e.message.include?("declared twice"), e.message)
