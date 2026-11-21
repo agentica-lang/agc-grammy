@@ -56,8 +56,9 @@ it goes in as a throwaway fixture, not a merged change.
 
 ## Phase 2 — grammar of the typed subset (4 PRs)
 
-Goal: grammy parses every in-subset program to a tree. Grammar lives next to
-`grammars/python.grammar` (e.g. `grammars/py312.grammar`); `python.grammar`
+Goal: grammy parses every in-subset program to a tree. The grammar lives at
+`agc-py/grammars/py312.grammar` (owned by this package, next to
+`grammars/python.grammar` in style only); `python.grammar`
 and the interpreter keep passing untouched.
 
 - PR 2a (functions): typed `def` with params/return, annotated assignments,
