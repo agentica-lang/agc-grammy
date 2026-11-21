@@ -121,7 +121,7 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 | line/column | `Pos::line_col`, `Pair::line_col`, `Position::line_of` | `Tree.position(input, offset)` | later (add a line index; today O(n) per call) |
 | flattened traversal | `Pairs::flatten` | `Tree.find_all` | — |
 | all tokens of a rule | `Pair::tokens`, `Pairs::tokens` | `Tree.find_all` / `children_of` | — |
-| JSON dump of the tree | `Pairs::to_json` | `Tree.to_json`, CLI `--json` | done (pest shape `pos`/`rule`/`inner`, plus `tag` when set) |
+| JSON dump of the tree | `Pairs::to_json` | `Tree.to_json`, CLI `--json` | done, single pair (same `pos`/`rule`/`inner` pretty layout; `tag` is grammy-only; `pos` is char offsets, pest uses bytes; forest form open) |
 | node tags | `Pair::as_node_tag`, `find_tagged` | `Node.tag`, `Tree.tagged`/`first_tagged` | done |
 | parse entry point | `Pest::parse(Rule, input)` | `Engine.run(grammar, rule, input)` | — |
 | grammar compiled ahead of time | `#[derive(Parser)]` | `Grammar.load` at run time | no (see §6) |
@@ -135,7 +135,7 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 | runtime grammar interpretation | `pest_vm::Vm` | this is our model | — |
 | code generation | `pest_derive` proc macro | none | no (§6) |
 | optimizer (rule inlining, skipping) | `pest_generator` | none | later (perf) |
-| ready-made grammars | json, toml, sql, http | python subset + `grammars/json.grammar` (pest's `json.pest` verbatim) | done (json) |
+| ready-made grammars | json, toml, sql, http | python subset + `grammars/json.grammar` (pest 2.9.6's `json.pest` verbatim) | done (json) |
 | self-hosting grammar | `bootstrap/` | none | later (good stress test) |
 | debugger | `pest_debugger` | none | no |
 | fuzzing, benchmarks, resource limits | yes | none | later |

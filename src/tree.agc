@@ -113,16 +113,26 @@ def tagged(node: Node, name: String) -> List[Node]
   found
 end
 
-## The tree as JSON, in the style of pest's `Pair::to_json`: each node carries
-## its `pos` and `rule` (plus `tag` when the grammar set one), and `inner` is
-## the covered text for a leaf or the nested pairs for a node with children.
+## The tree as JSON, following pest's `Pair::to_json` shape: each node carries
+## `pos`/`rule` (plus grammy-only `tag` when the grammar set one), and `inner`
+## is the covered text for a leaf or the nested pairs for a node with children.
+## Array layout matches `serde_json::to_string_pretty` one element per line, so
+## an untagged tree diffs clean against pest's output. Positions are character
+## offsets into `input` (the engine is char-based), where pest reports byte
+## offsets; they agree on ASCII input.
 def to_json(node: Node, input: String) -> String = json_node(node, input, 0)
+
+# One array element per line, as `serde_json::to_string_pretty` prints them.
+def json_pos(start: Int, stop: Int, pad: String) -> String
+  content = "#{pad}  "
+  "[\n#{content}#{start},\n#{content}#{stop}\n#{pad}]"
+end
 
 def json_node(node: Node, input: String, depth: Int) -> String
   pad = "  " * depth
   inner_pad = "  " * (depth + 1)
   lines = ["#{pad}{"]
-  lines = lines.push("#{inner_pad}\"pos\": [#{node.start}, #{node.stop}],")
+  lines = lines.push("#{inner_pad}\"pos\": #{json_pos(node.start, node.stop, inner_pad)},")
   lines = lines.push("#{inner_pad}\"rule\": #{json_string(node.rule)},")
   case node.tag
     none -> lines = lines
@@ -138,13 +148,15 @@ def json_node(node: Node, input: String, depth: Int) -> String
   lines.push("#{pad}}").join("\n")
 end
 
+# `children` must not be empty; only `json_node` calls this, guarded above.
 def json_pairs(children: List[Node], input: String, depth: Int) -> String
   pad = "  " * depth
   inner_pad = "  " * (depth + 1)
   first = List.first(children)
   last = List.last(children)
   lines = ["{"]
-  lines = lines.push("#{inner_pad}\"pos\": [#{first.start}, #{last.stop}],")
+  pos = json_pos(first.start, last.stop, inner_pad)
+  lines = lines.push("#{inner_pad}\"pos\": #{pos},")
   lines = lines.push("#{inner_pad}\"pairs\": [")
   rendered = children.map { |child| json_node(child, input, depth + 2) }
   lines = lines.push(rendered.join(",\n"))
@@ -155,14 +167,7 @@ end
 ## A string as a JSON string literal, with the control characters escaped.
 def json_string(value: String) -> String = "\"#{json_escape(value)}\""
 
-def json_escape(value: String) -> String
-  out = ""
-  for ch in value.split("")
-    out = "#{out}#{json_char(ch)}"
-  end
-
-  out
-end
+def json_escape(value: String) -> String = value.split("").map { |ch| json_char(ch) }.join("")
 
 def json_char(ch: String) -> String
   case ch

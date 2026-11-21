@@ -216,7 +216,7 @@ Grammy.json_string(value) -> String                # a string as a JSON string l
 
 ```text
 agentica src/main.agc <grammar> <rule> [input-file]         # prints the tree, one node per line
-agentica src/main.agc <grammar> <rule> [input-file] --json  # prints the tree as JSON
+agentica src/main.agc <grammar> <rule> [input-file] --json  # prints the tree as JSON (`--json` only counts last)
 ```
 
 `Grammar`, `Rule`, `Expr`, `ClassItem`, `Atomicity`, `UNBOUNDED`, `Node` and

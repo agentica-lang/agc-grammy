@@ -35,11 +35,13 @@ its tests in `tests/`, so always pass the folder.
 - `src/tree.agc`: `Node(rule, start, stop, children, tag)`, `Position` and the
   queries user code calls, plus `to_json`/`json_string`: a pest-style dump where
   each node carries `pos`/`rule` (and `tag` when set) and `inner` is the covered
-  text or the nested pairs. `grammars/json.grammar` is pest's `json.pest`
+  text or the nested pairs. `grammars/json.grammar` is pest 2.9.6's `json.pest`
   byte for byte, and `tests/engine_test.agc` parses it as a parity fixture.
 - `src/grammy.agc`: re-exports; add every new public name here or importers
   cannot reach it.
-- `src/main.agc`: the CLI (`<grammar> <rule> [input-file]`).
+- `src/main.agc`: the CLI (`<grammar> <rule> [input-file] [--json]`, flag only
+  counts as the last argument; an input file literally named `--json` must come
+  through stdin).
 - `examples/python/`: the reference user of the library (grammar in
   `grammars/python.grammar`, interpreter in `interp.agc`).
 

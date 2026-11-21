@@ -7,13 +7,18 @@ import Tree from "tree"
 USAGE = "usage: agentica src/main.agc <grammar> <rule> [input-file] [--json]"
 
 def main() -> Void
-  args = System.args().select { |arg| arg != "--json" }
+  raw = System.args()
+  json = raw.size > 0 and raw[raw.size - 1] == "--json"
+  args = raw
+  if json
+    args = raw.take(raw.size - 1)
+  end
+
   if args.size < 2
     IO.warn(USAGE)
     System.exit(2)
   end
 
-  json = System.args().include?("--json")
   case read_input(args)
     error(e) -> fail(e.message)
     ok(input) -> show(args[0], args[1], input, json)
