@@ -5,7 +5,9 @@
 ## indentation scope (they combine, as in `>_{`). In a body: `"text"`,
 ## `^"text"` (insensitive), `'a'..'z'`, `[a-z]`, `[^0-9]`, `.` (any char), a
 ## rule name, a builtin (`ANY`, `SOI`, `EOI`, `NEWLINE`, `INDENT`, `SAME`, the
-## `ASCII_*` family), `~` sequence, `|` ordered choice, `*`, `+`, `?`,
+## `ASCII_*` family), the stack (`PUSH(expr)`, `PUSH_LITERAL("text")`, `POP`,
+## `POP_ALL`, `PEEK`, `PEEK_ALL`, `DROP`), `~` sequence, `|` ordered choice, `*`,
+## `+`, `?`,
 ## `{n,m}`, `!` and `&` lookahead, and `( )`. Escapes: `\"`, `\\`, `\n`,
 ## `\r`, `\t`, `\0`, `\'`, `\xNN` and `\u{2-6 hex digits}`. `//` starts a
 ## comment and `/* */` nests.
@@ -1278,10 +1280,13 @@ def nullable_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Push(inner) -> nullable_with?(inner, names)
     Expr.PushLiteral(_) -> true
     Expr.Drop -> true
-    Expr.Pop -> false
-    Expr.PopAll -> false
-    Expr.Peek -> false
-    Expr.PeekAll -> false
+    # A stack read can match without consuming input (`POP_ALL`/`PEEK_ALL` do on
+    # an empty stack, where a parse starts), so left recursion behind one is
+    # caught rather than hanging.
+    Expr.Pop -> true
+    Expr.PopAll -> true
+    Expr.Peek -> true
+    Expr.PeekAll -> true
   end
 end
 
@@ -1359,7 +1364,9 @@ def still_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Tagged(_, inner) -> still_with?(inner, names)
     Expr.Push(inner) -> still_with?(inner, names)
     Expr.PushLiteral(_) -> true
-    Expr.Drop -> true
+    # `DROP` consumes no input, but it shrinks the stack, so `DROP*` drains and
+    # stops: refusing it would contradict the engine, which drains too.
+    Expr.Drop -> false
     Expr.Pop -> false
     Expr.PopAll -> false
     Expr.Peek -> false

@@ -158,6 +158,25 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("left recursion behind a stack read is refused") do
+      # POP_ALL matches zero-width on an empty stack, where a parse starts.
+      grammar_text = "p = { POP_ALL ~ p }\nignore = _{ PUSH_LITERAL(\"x\") }"
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a DROP repetition is allowed") do
+      grammar = try Grammar.compile("a = { PUSH_LITERAL(\"x\") ~ DROP* }")
+      Test.eq(grammar.rules.size, 1)
+    end,
+    Test.test("a PUSH_LITERAL repetition is still refused") do
+      case Grammar.compile("a = { PUSH_LITERAL(\"x\")* }")
+        error(e) ->
+          Test.assert(e.message.include?("never consumes input") or e.message.include?("cannot fail"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a tag over PUSH has nothing to tag") do
       case Grammar.compile("p = { #a = PUSH(ANY) }")
         error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)

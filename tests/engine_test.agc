@@ -579,6 +579,10 @@ def main() -> Void
       grammar_text = "p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ (DROP | \"x\")* ~ POP }"
       Test.error?(parse(grammar_text, "p", "a"))
     end,
+    Test.test("a DROP repetition drains the stack") do
+      tree = try parse("p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ DROP* ~ \"x\" }", "p", "x")
+      Test.eq(tree.stop, 1)
+    end,
     Test.test("a stack operation inside an atomic rule still works") do
       tree = try parse("p = { item }\nitem = @{ PUSH_LITERAL(\"ab\") ~ \"cd\" ~ POP }", "p", "cdab")
       try Test.eq(tree.children.size, 1)
