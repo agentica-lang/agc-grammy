@@ -53,9 +53,11 @@ plain types only.
 - `//` on `int` lowers to a `floor_div` helper (truncating `/` corrected by
   one when the remainder is nonzero and the signs differ — verified:
   `-7 // 2 == -4` while the backend's `/` gives `-3`). `//` on `float` is
-  `PY-OPERATOR`. `**` is `int` base with non-negative `int` exponent only,
-  lowered to a `pow_i` loop (overflow halts like the backend); anything else
-  is `PY-OPERATOR`. `%` is `int`-only with Python signs, lowered to a
+  `PY-OPERATOR`. `**` is `int` base with `int` exponent, lowered to `a.pow(b)` (probed:
+  `2.pow(10) == 1024`; negative exponents and overflow halt). A statically
+  negative exponent is `PY-OPERATOR`; a dynamic one halts at run time where
+  Python would return a float — documented divergence, same family as
+  overflow. Anything else is `PY-OPERATOR`. `%` is `int`-only with Python signs, lowered to a
   `pymod` helper (`-7 % 2 == 1` while the backend gives `-1`); float `%` is
   `PY-OPERATOR`.
 - `+` concatenates two `str` (or two same-typed lists); `s * n` repeats a
@@ -76,10 +78,13 @@ plain types only.
 - Calls are positional or keyword (`f(x=1)` works — probed), no `*args`,
   no `**kwargs`. Subscripting `xs[i]`, `d[k]`; out-of-range or a missing key
   halts like the backend, it is not a catchable error — use `d.get(k)`,
-  which is included and yields `Optional[V]` (`none` when absent, probed).
+  which is included and yields `Optional[V]` (`none` when absent, probed);
+  `d.get(k, default)` maps to the 3-arg `Map.get` (probed).
 - Conversions and builtins, each with its lowering:
   `int(s)` → `s.to_i` (catchable `Result`, like `ValueError`),
-  `int(f)` → `f.to_i`, `float(s)` → `s.to_f`, `float(n)` → `n.to_f`,
+  `int(f)` → `f.to_i`, `float(s)` → `s.to_f`, `float(n)` → `n.to_f`
+  (`float("inf")`/`float("nan")` are catchable conversion errors in the
+  backend, unlike Python — same `Result` family, documented divergence),
   `str(x)` → interpolation, `int`/`float` of the wrong kind →
   `PY-TYPE-MISMATCH`. `bool(x)` accepts `Bool` only, else `PY-TYPE-MISMATCH`
   (there is no truthiness to convert from, §6). `len()` → `size`/`length`.
@@ -99,8 +104,7 @@ plain types only.
 
 - Expression statements, assignment, `pass` (emits `nil`, so a body never
   ends up empty), `assert c` / `assert c, msg` with `c: bool` and `msg: str`
-  (failure prints the message to stderr and exits `1` via `System.exit`;
-  it is not catchable).
+  (failure emits `IO.warn(msg)` then `System.exit(1)`; it is not catchable).
 - `if`/`elif`/`else`, `while`, `for x in ...` over `List` and `Range`.
   String iteration desugars through `split("")` (Unicode scalar values,
   and `Bytes` is not an iteration source). No `for`/`while` `else`.
@@ -171,13 +175,16 @@ is rebinding:
 - Indentation is significant (`INDENT`/`SAME` in grammy terms); tabs count as
   one character each and must not be mixed with spaces on the same block
   level (`PY-INDENT`).
-- Strings decode at the frontend to plain characters, then emit backend
-  escapes (`\" \\ \n \r \t \0 \'` and `\xNN`/`\u{...}`): `\"`, `\\`,
-  `\n`, `\r`, `\t`, `\0`, `\'` map to themselves; `\a \b \f \v` map to
-  their control codes; `\xNN`/`\uNNNN` decode the digits; `\N{...}` is
-  excluded (no Unicode tables in the frontend). `r"..."` disables escapes;
-  `f"..."` interpolates subset expressions with `{{`/`}}` for literal
-  braces. Triple-quoted strings are plain strings, not heredocs.
+- Strings decode at the frontend to plain characters, then emit with only
+  the escapes the backend lexer accepts — `\"`, `\\`, `\n`, `\r`, `\t`,
+  `\'` — and every other character raw in the UTF-8 source (verified:
+  `\0`, `\xNN`, `\u{...}` are all `LEX-INVALID-ESCAPE`, while raw
+  non-ASCII and even a raw NUL byte lex fine). So the frontend decodes the
+  whole Python set (`\a \b \f \v \0 \xNN \uNNNN`, `\n \r \t \' \"`)
+  and re-encodes minimally; `\N{...}` is excluded (no Unicode tables in the
+  frontend). `r"..."` disables escapes; `f"..."` interpolates subset
+  expressions with `{{`/`}}` for literal braces. Triple-quoted strings are
+  plain strings, not heredocs.
 
 ## 9. Excluded, each a frontend error with its own code
 
