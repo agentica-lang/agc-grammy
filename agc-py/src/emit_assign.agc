@@ -14,11 +14,19 @@
 ## carries its annotation (`x: int = 0`), rebinding keeps the type and any
 ## change is `PY-TYPE-MISMATCH`; `x += e` is sugar for `x = x OP e` (the
 ## grammar admits no `//=` or `**=` spelling, so those never reach the
-## emitter; its `aug_binop` fallback refuses them as defense-in-depth); a bare `x: T` binds with no code;
+## emitter; its `aug_combine` fallback refuses them as defense-in-depth); a bare `x: T` binds with no code;
 ## `type Alias = T` emits the backend alias; an expression statement emits
 ## and discards its value; `return` carries a value only under a non-`Void`
-## return and stands bare only under `-> None`.
-## Probed on agentica 0.35.0: `type Alias = Int` checks at the top level and
+## return and stands bare only under `-> None`. A known value landing in
+## `Optional[T]` — annotated initialization, rebinding, an unwrapped
+## `Result[T]` inside `try`, or a `return` — emits `some(value)`, while
+## `none` and an already-`Optional` value stay bare. Annotations resolve
+## capitalized aliases structurally through the scope: at the top level,
+## inside `list[..]`/`dict[..]`, inside `Optional[..]`, inside a union arm
+## and inside a quoted forward reference.
+## Probed on agentica 0.35.0: a bare scalar, string, list or map under
+## `Optional[T]` is `CHECK-TYPE-MISMATCH`, `some(try e)` checks with no
+## extra grouping, `type Alias = Int` checks at the top level and
 ## reads as an annotation (including `List` and `Optional` targets), while a
 ## lowercase alias name is `PARSE-UNEXPECTED-TOKEN` and an in-`def` alias is
 ## `PARSE-TOP-LEVEL-STATEMENT`, so both refuse with `PY-OUT-OF-SUBSET`. Bare
@@ -104,10 +112,7 @@ def emit_augassigned(
       occ.span.stop,
     )
   else
-    case aug_binop(op)
-      error(e) -> refuse_split(occ.span.start, occ.span.stop, e)
-      ok(binop) -> emit_augassigned_value(ctx, name, want, op, binop, value, source)
-    end
+    emit_augassigned_value(ctx, name, want, op, value, source)
   end
 end
 
@@ -181,6 +186,26 @@ end
 
 private
 
+# One string-aware scan answer: `wrapped` — the whole string is one outer
+# `(...)` pair — and `infix` — a depth-0 operator outside strings.
+struct GroupScan
+  wrapped: Bool
+  infix: Bool
+end
+
+# How a value of type `got` lands in the declared type `want`: `bare`
+# emits as written (equal types, `none` under `Optional`, or `Unknown`),
+# `wrap` needs `some(...)` for a known value under `Optional[T]` (probed
+# on agentica 0.35.0: a bare scalar, string, list or map there is
+# `CHECK-TYPE-MISMATCH`), `no` refuses. The non-`Optional` branch keeps
+# the plain `types_match?` rule, so `x += e` still refuses an `Optional`
+# target instead of wrapping its operand.
+enum OptFit
+  Bare
+  Wrap
+  No
+end
+
 # One emitted value with its `py_tN` temps shifted past `base`: how many
 # temps the value used, so the caller advances the supply by the same.
 struct Shifted
@@ -210,7 +235,6 @@ def emit_augassigned_value(
   name: String,
   want: String,
   op: String,
-  binop: String,
   expr: Tree.Node,
   source: String,
 ) -> EmitCtx.StmtRes
@@ -218,7 +242,7 @@ def emit_augassigned_value(
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
-      case aug_combine(name, want, binop, shifted.code, out.type)
+      case aug_combine(name, want, op, shifted.code, out.type)
         error(e) -> refuse_split(expr.start, expr.stop, e)
         ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair)
       end
@@ -317,54 +341,80 @@ def emit_value_binding(
   case EmitExpr.emit(expr, source, ctx.scope)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
-      if types_match?(want, out.type)
-        shifted = shift_out(out, ctx.next_temp)
-        line = "#{name} = #{shifted.code}"
-        if decl
-          line = "#{name}: #{want} = #{shifted.code}"
-        end
-
-        EmitCtx.StmtRes.Ok(
-          EmitCtx.StmtOut(
-            code: shifted.pre + [line],
-            scope: ctx.scope.put(name, want),
-            next_temp: ctx.next_temp + shifted.used,
-          ),
-        )
-      else
-        if ctx.in_try
-          inner = unwrap_result(out.type)
-          case inner
-            some(found) ->
-              if types_match?(want, found)
-                shifted = shift_out(out, ctx.next_temp)
-                line = "#{name} = try #{shifted.code}"
-                if decl
-                  line = "#{name}: #{want} = try #{shifted.code}"
+      shifted = shift_out(out, ctx.next_temp)
+      case bind_fit(want, out.type)
+        OptFit.Bare -> emit_bound(ctx, name, want, shifted, decl, shifted.code)
+        OptFit.Wrap -> emit_bound(ctx, name, want, shifted, decl, "some(#{shifted.code})")
+        OptFit.No ->
+          # Inside a `try` body the value may unwrap to `Result[T]`:
+          # `try value` when `T` keeps the declared type, `some(try value)`
+          # when `T` lands in an `Optional[T]`.
+          if ctx.in_try
+            inner = unwrap_result(out.type)
+            case inner
+              some(found) ->
+                case bind_fit(want, found)
+                  OptFit.Bare -> return emit_bound(ctx, name, want, shifted, decl, "try #{shifted.code}")
+                  OptFit.Wrap -> return emit_bound(ctx, name, want, shifted, decl, "some(try #{shifted.code})")
+                  OptFit.No -> found = found
                 end
 
-                return EmitCtx.StmtRes.Ok(
-                  EmitCtx.StmtOut(
-                    code: shifted.pre + [line],
-                    scope: ctx.scope.put(name, want),
-                    next_temp: ctx.next_temp + shifted.used,
-                  ),
-                )
-              end
-
-            none -> inner = inner
+              none -> inner = inner
+            end
           end
-        end
 
-        EmitCtx.refuse_at(
-          "PY-TYPE-MISMATCH",
-          "cannot bind #{out.type} to `#{name}: #{want}`",
-          some("convert the value explicitly or fix the annotation"),
-          expr.start,
-          expr.stop,
-        )
+          EmitCtx.refuse_at(
+            "PY-TYPE-MISMATCH",
+            "cannot bind #{out.type} to `#{name}: #{want}`",
+            some("convert the value explicitly or fix the annotation"),
+            expr.start,
+            expr.stop,
+          )
       end
   end
+end
+
+# Emits one binding line (`name: Want = value` declared, `name = value`
+# rebinding) with the value's temps already shifted past the supply.
+def emit_bound(
+  ctx: EmitCtx.EmitCtx,
+  name: String,
+  want: String,
+  shifted: Shifted,
+  decl: Bool,
+  value: String,
+) -> EmitCtx.StmtRes
+  line = "#{name} = #{value}"
+  if decl
+    line = "#{name}: #{want} = #{value}"
+  end
+
+  EmitCtx.StmtRes.Ok(
+    EmitCtx.StmtOut(
+      code: shifted.pre + [line],
+      scope: ctx.scope.put(name, want),
+      next_temp: ctx.next_temp + shifted.used,
+    ),
+  )
+end
+
+def bind_fit(want: String, got: String) -> OptFit
+  if ann_base(want) == "Optional"
+    return OptFit.Bare if got == "none" or got == "Unknown" or got == want
+
+    inner = ann_elem(want)
+    return OptFit.Wrap if got == inner
+
+    if ann_base(got) == ann_base(inner) and (ann_base(got) == "List" or ann_base(got) == "Map")
+      return OptFit.Wrap if inner == ann_base(inner) or got == ann_base(got)
+    end
+
+    return OptFit.No
+  end
+
+  return OptFit.Bare if types_match?(want, got)
+
+  OptFit.No
 end
 
 # The inner type of `Result[T]`, or none when not a `Result`.
@@ -417,22 +467,28 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span
 end
 
 def emit_return_line(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: EmitExpr.Out) -> EmitCtx.StmtRes
-  if types_match?(want, out.type)
-    shifted = shift_out(out, ctx.next_temp)
-    EmitCtx.StmtRes.Ok(
-      EmitCtx.StmtOut(
-        code: shifted.pre + ["return #{shifted.code}"],
-        scope: ctx.scope,
-        next_temp: ctx.next_temp + shifted.used,
-      ),
-    )
-  else
+  shifted = shift_out(out, ctx.next_temp)
+  fit = bind_fit(want, out.type)
+  if fit == OptFit.No
     EmitCtx.refuse_at(
       "PY-TYPE-MISMATCH",
       "cannot return #{out.type} under `-> #{ctx.func_ret}`",
       some("convert the value explicitly or fix the return annotation"),
       expr.start,
       expr.stop,
+    )
+  else
+    value = shifted.code
+    if fit == OptFit.Wrap
+      value = "some(#{shifted.code})"
+    end
+
+    EmitCtx.StmtRes.Ok(
+      EmitCtx.StmtOut(
+        code: shifted.pre + ["return #{value}"],
+        scope: ctx.scope,
+        next_temp: ctx.next_temp + shifted.used,
+      ),
     )
   end
 end
@@ -461,30 +517,18 @@ def single_chain?(rule: String) -> Bool
   rule == "cond_expr" or rule == "or_expr" or rule == "and_expr" or rule == "comparison" or rule == "sum"
 end
 
-# Maps an augmented operator to its plain sugar; `//=` and `**=` have no
-# spelling in the subset.
-def aug_binop(op: String) -> Result[String]
-  case op
-    "+=" -> ok("+")
-    "-=" -> ok("-")
-    "*=" -> ok("*")
-    "/=" -> ok("/")
-    "%=" -> ok("%")
-    _ ->
-      error("PY-OUT-OF-SUBSET: augmented `#{op}` has no spelling = help: write `x = x OP y` with the plain operator")
-  end
-end
-
-# Combines `x OP e` for an augmented assignment, mirroring the `EmitExpr`
-# operator rules; the caller then applies the same-type rule.
+# Combines `x OP= e` as the sugar `x OP e`, mirroring the `EmitExpr`
+# operator rules; the caller then applies the same-type rule. The fallback
+# keeps `//=` and `**=` out: they have no spelling in the subset.
 def aug_combine(xname: String, xtype: String, op: String, rcode: String, rtype: String) -> Result[List[String]]
   case op
-    "+" -> aug_add(xname, xtype, rcode, rtype)
-    "-" -> aug_minus(xname, xtype, rcode, rtype)
-    "*" -> aug_star(xname, xtype, rcode, rtype)
-    "/" -> aug_slash(xname, xtype, rcode, rtype)
-    "%" -> aug_mod(xname, xtype, rcode, rtype)
-    _ -> error("agc-py: unknown augmented operator #{op}")
+    "+=" -> aug_add(xname, xtype, rcode, rtype)
+    "-=" -> aug_minus(xname, xtype, rcode, rtype)
+    "*=" -> aug_star(xname, xtype, rcode, rtype)
+    "/=" -> aug_slash(xname, xtype, rcode, rtype)
+    "%=" -> aug_mod(xname, xtype, rcode, rtype)
+    _ ->
+      error("PY-OUT-OF-SUBSET: augmented `#{op}` has no spelling = help: write `x = x OP y` with the plain operator")
   end
 end
 
@@ -586,63 +630,23 @@ end
 # string contents, so a literal `"a + b"` stays bare while `"b" + "c"`
 # still groups.
 def group_operand(code: String) -> String
-  return code if code == ""
-
-  return code if wrapped?(code)
-
-  return "(#{code})" if needs_parens?(code)
+  scan = group_scan(code)
+  return "(#{code})" if scan.infix and !scan.wrapped
 
   code
 end
 
-# Whether `code` is one outer `(...)` pair covering the whole string, so
-# an explicit source group never doubles: `(2 + 3)` stays as emitted.
-def wrapped?(code: String) -> Bool
+# One grouping question per scan: `wrapped` — the whole string is one
+# outer `(...)` pair, so an explicit source group never doubles — and
+# `infix` — a depth-0 operator outside strings (`2 + 3`, comparisons,
+# `and`/`or`; calls, indexing, `.to_f`, helpers and temps have none at
+# depth 0). A later top-level pair never flips `wrapped` back on: the
+# first close that empties the depth decides.
+def group_scan(code: String) -> GroupScan
   chars = code.split("")
-  return false if chars.empty? or chars[0] != "("
+  scan = GroupScan(wrapped: false, infix: false)
+  return scan if chars.empty?
 
-  depth = 0
-  in_string = false
-  i = 0
-  while i < chars.size
-    ch = chars[i]
-    if in_string
-      if ch == "\\" and i + 1 < chars.size
-        i += 2
-      else
-        if ch == "\""
-          in_string = false
-        end
-
-        i += 1
-      end
-    else
-      if ch == "\""
-        in_string = true
-        i += 1
-      else
-        if ch == "("
-          depth += 1
-        else
-          if ch == ")"
-            depth -= 1
-            return i == chars.size - 1 if depth == 0
-          end
-        end
-
-        i += 1
-      end
-    end
-  end
-
-  false
-end
-
-# Whether `code` holds a depth-0 operator outside strings, so embedding it
-# as an infix operand would rebind: `2 + 3`, comparisons, `and`/`or`.
-# Calls, indexing, `.to_f`, helpers and temps have none at depth 0.
-def needs_parens?(code: String) -> Bool
-  chars = code.split("")
   depth = 0
   in_string = false
   i = 0
@@ -669,9 +673,18 @@ def needs_parens?(code: String) -> Bool
         else
           if ch == ")" or ch == "]" or ch == "}"
             depth -= 1
+            # Only a whole-string pair wraps: the first close that
+            # empties the depth decides, and only when `code` opens with
+            # that `(`; a later top-level pair never flips it back on.
+            if depth == 0 and chars[0] == "(" and !scan.wrapped
+              scan = scan.with(wrapped: i == chars.size - 1)
+            end
+
             i += 1
           else
-            return true if depth == 0 and op_at?(chars, i)
+            if depth == 0 and op_at?(chars, i)
+              scan = scan.with(infix: true)
+            end
 
             i += 1
           end
@@ -680,7 +693,7 @@ def needs_parens?(code: String) -> Bool
     end
   end
 
-  false
+  scan
 end
 
 # Whether an operator starts at `chars[i]` (depth 0, outside strings):
@@ -790,14 +803,17 @@ def map_ann_scoped(text: String, scope: Map[String, String]) -> Result[String]
     return ok(text.strip)
   end
 
-  map_ann(text.strip)
+  map_ann(text.strip, scope)
 end
 
-def map_ann(text: String) -> Result[String]
-  return ok(text.slice(1, text.length - 2)) if quoted?(text)
+# Maps an annotation to its Agentica spelling with the scope in hand, so a
+# capitalized alias resolves structurally wherever it appears: quoted, in a
+# union arm, or inside `list[..]`/`dict[..]`/`Optional[..]`.
+def map_ann(text: String, scope: Map[String, String]) -> Result[String]
+  return ok(try map_ann(text.slice(1, text.length - 2), scope)) if quoted?(text)
 
   arms = split_top(text, "|")
-  return map_union(List.first(arms).strip, List.first(arms.drop(1)).strip, text) if arms.size == 2
+  return map_union(List.first(arms).strip, List.first(arms.drop(1)).strip, text, scope) if arms.size == 2
 
   return error("PY-OUT-OF-SUBSET: union `#{text}` only allows `X | None` = help: write `Optional[X]`") if arms.size > 2
 
@@ -807,24 +823,24 @@ def map_ann(text: String) -> Result[String]
       head = text.slice(0, at).strip
       return error("PY-OUT-OF-SUBSET: annotation `#{text}` has unbalanced brackets") if !text.end_with?("]")
 
-      map_generic(head, text.slice(at + 1, text.length - at - 2))
-    none -> map_bare(text)
+      map_generic(head, text.slice(at + 1, text.length - at - 2), scope)
+    none -> map_bare(text, scope)
   end
 end
 
 # Only `X | None` unions exist in the subset; anything else refuses. An
 # already-`Optional` side stays flat: `Optional[X] | None` is
 # `Optional[X]`, never `Optional[Optional[X]]`.
-def map_union(first: String, second: String, text: String) -> Result[String]
+def map_union(first: String, second: String, text: String, scope: Map[String, String]) -> Result[String]
   if first == "None" or first == "none"
-    inner = try map_ann(second)
+    inner = try map_ann(second, scope)
     return ok(inner) if ann_base(inner) == "Optional"
 
     return ok("Optional[#{inner}]")
   end
 
   if second == "None" or second == "none"
-    inner = try map_ann(first)
+    inner = try map_ann(first, scope)
     return ok(inner) if ann_base(inner) == "Optional"
 
     return ok("Optional[#{inner}]")
@@ -833,20 +849,20 @@ def map_union(first: String, second: String, text: String) -> Result[String]
   error("PY-OUT-OF-SUBSET: union `#{text}` only allows `X | None` = help: write `Optional[X]`")
 end
 
-def map_generic(head: String, inner: String) -> Result[String]
+def map_generic(head: String, inner: String, scope: Map[String, String]) -> Result[String]
   if head == "list" or head == "List"
     args = split_top(inner, ",")
     return error("PY-OUT-OF-SUBSET: `#{head}` takes one parameter = help: write `list[T]`") if args.size != 1
 
-    return ok("List[#{try map_ann(List.first(args).strip)}]")
+    return ok("List[#{try map_ann(List.first(args).strip, scope)}]")
   end
 
   if head == "dict" or head == "Map"
     args = split_top(inner, ",")
     return error("PY-OUT-OF-SUBSET: `#{head}` takes two parameters = help: write `dict[K, V]`") if args.size != 2
 
-    key = try map_ann(List.first(args).strip)
-    value = try map_ann(List.first(args.drop(1)).strip)
+    key = try map_ann(List.first(args).strip, scope)
+    value = try map_ann(List.first(args.drop(1)).strip, scope)
     return ok("Map[#{key}, #{value}]")
   end
 
@@ -854,7 +870,7 @@ def map_generic(head: String, inner: String) -> Result[String]
     args = split_top(inner, ",")
     return error("PY-OUT-OF-SUBSET: `Optional` takes one parameter = help: write `Optional[X]`") if args.size != 1
 
-    return ok("Optional[#{try map_ann(List.first(args).strip)}]")
+    return ok("Optional[#{try map_ann(List.first(args).strip, scope)}]")
   end
 
   error(
@@ -862,7 +878,7 @@ def map_generic(head: String, inner: String) -> Result[String]
   )
 end
 
-def map_bare(text: String) -> Result[String]
+def map_bare(text: String, scope: Map[String, String]) -> Result[String]
   case text
     "int" -> ok("Int")
     "str" -> ok("String")
@@ -885,11 +901,11 @@ def map_bare(text: String) -> Result[String]
       error(
         "PY-ANY: annotation `object` is excluded; annotate with a concrete type = help: write a concrete type such as int or str",
       )
-    _ -> map_bare_name(text)
+    _ -> map_bare_name(text, scope)
   end
 end
 
-def map_bare_name(text: String) -> Result[String]
+def map_bare_name(text: String, scope: Map[String, String]) -> Result[String]
   if text.include?(".")
     head = List.first(text.split(".")).strip
     if head == "typing"
@@ -906,7 +922,12 @@ def map_bare_name(text: String) -> Result[String]
     )
   end
 
-  return ok(text) if capitalized?(text)
+  if capitalized?(text)
+    found = scope.get(text, "")
+    return ok(found) if found != ""
+
+    return ok(text)
+  end
 
   error(
     "PY-ANNOTATION-UNKNOWN: unknown annotation `#{text}` = help: use one of int, str, float, bool, None, list, dict, Optional",

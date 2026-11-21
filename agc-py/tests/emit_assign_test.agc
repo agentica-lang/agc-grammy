@@ -36,6 +36,12 @@ def func_ctx(source: String, ret: String, scope: Map[String, String]) -> EmitCtx
   EmitCtx.EmitCtx(source: source, file: "assign_test", scope: scope, func_ret: ret, in_try: false, next_temp: 0)
 end
 
+# A context inside an outlined `try` body: the coordinator sets `in_try`,
+# so a `Result[T]` value unwraps with `try` against the declared type.
+def try_ctx(source: String, ret: String, scope: Map[String, String]) -> EmitCtx.EmitCtx
+  EmitCtx.EmitCtx(source: source, file: "assign_test", scope: scope, func_ret: ret, in_try: true, next_temp: 0)
+end
+
 # Dispatches one statement to its lane A emitter by rule, narrowing the
 # parse node to the pieces the emitter takes.
 def dispatch(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> Result[EmitCtx.StmtRes]
@@ -167,16 +173,8 @@ end
 # for every bound name, wrapped in its own function calling `puts`.
 # TODO(parallel): `/tmp/agc_emit_assign_blocks.txt` is order-dependent like
 # the 3b accumulator; use env-overridable accumulator paths.
-def add_func(
-  compiled: Grammar.Grammar,
-  slug: String,
-  src: String,
-  ctx: EmitCtx.EmitCtx,
-  ret: String,
-  uses: List[String],
-) -> Result[Void]
-  ran = try run_all(compiled, src, ctx)
-  body = ran.lines + uses.map { |name| "puts(#{name})" }
+# Writes one function fragment into the block and call accumulators.
+def add_fragment(slug: String, body: List[String], ret: String) -> Result[Void]
   head = "def py_assign_#{slug}() -> Void"
   if ret != "" and ret != "None"
     head = "def py_assign_#{slug}() -> #{ret}"
@@ -187,6 +185,29 @@ def add_func(
   try File.write_text("/tmp/agc_emit_assign_blocks.txt", "#{blocks}#{text}")
   calls = try File.read_text("/tmp/agc_emit_assign_calls.txt")
   try File.write_text("/tmp/agc_emit_assign_calls.txt", "#{calls}  py_assign_#{slug}()\n")
+  ok()
+end
+
+def add_func(
+  compiled: Grammar.Grammar,
+  slug: String,
+  src: String,
+  ctx: EmitCtx.EmitCtx,
+  ret: String,
+  uses: List[String],
+) -> Result[Void]
+  ran = try run_all(compiled, src, ctx)
+  try add_fragment(slug, ran.lines + uses.map { |name| "puts(#{name})" }, ret)
+
+  ok()
+end
+
+# Appends an already-emitted fragment: the lines plus `puts` for every
+# bound name. Unlike `add_func` it never re-parses, so a test can check a
+# multi-statement emission without paying a second, superlinear parse.
+def add_lines(slug: String, lines: List[String], uses: List[String], ret: String) -> Result[Void]
+  try add_fragment(slug, lines + uses.map { |name| "puts(#{name})" }, ret)
+
   ok()
 end
 
@@ -250,6 +271,31 @@ def main() -> Void
       try add_func(compiled.unwrap!, "alias_use", use_src, func_ctx(use_src, "None", scope), "None", ["x"])
       ok()
     end,
+    Test.test("alias resolves inside generics, optional and unions") do
+      ran = try run_all(compiled.unwrap!, "type PyAliasA = int\n", top_ctx(""))
+      try Test.eq(ran.lines, ["type PyAliasA = Int"])
+      # The alias line itself stays in the accumulator of the emit test
+      # above; the scope it seeded drives every structural resolution here.
+      ran2 = try run_seq(
+        compiled.unwrap!,
+        [
+          "x: list[PyAliasA] = [1, 2]\n", "y: PyAliasA | None = None\n", "z: Optional[PyAliasA] = None\n",
+          "d: dict[str, PyAliasA] = {}\n", "q: \"PyAliasA\" = 1\n",
+        ],
+        ran.ctx,
+      )
+
+      try Test.eq(
+        ran2.lines,
+        [
+          "x: List[Int] = [1, 2]", "y: Optional[Int] = none", "z: Optional[Int] = none", "d: Map[String, Int] = {}",
+          "q: Int = 1",
+        ],
+      )
+
+      try add_lines("alias_struct", ran2.lines, ["x", "y", "z", "d", "q"], "")
+      ok()
+    end,
     Test.test("annotated declare emits") do
       src = "x: int = 1\n"
       ran = try run_all(compiled.unwrap!, src, top_ctx(src))
@@ -274,6 +320,12 @@ def main() -> Void
       second = "x: int = None\n"
       ref2 = try run_no(compiled.unwrap!, second, top_ctx(second))
       try Test.eq(ref2.code, "PY-TYPE-MISMATCH")
+      str_src = "bad: Optional[int] = \"a\"\n"
+      ref3 = try run_no(compiled.unwrap!, str_src, top_ctx(str_src))
+      try Test.eq(ref3.code, "PY-TYPE-MISMATCH")
+      seeded = func_ctx(str_src, "None", {"d": "Map[String, Int]"})
+      ref4 = try run_no(compiled.unwrap!, "w: Optional[int] = d\n", seeded)
+      try Test.eq(ref4.code, "PY-TYPE-MISMATCH")
       ok()
     end,
     Test.test("duplicate binding refuses") do
@@ -334,6 +386,9 @@ def main() -> Void
       src = "x: int = 1\nx /= 2\n"
       ref = try run_no(compiled.unwrap!, src, top_ctx(src))
       try Test.eq(ref.code, "PY-TYPE-MISMATCH")
+      aug_ctx = func_ctx(src, "None", {"x": "Optional[Int]"})
+      ref2 = try run_no(compiled.unwrap!, "x += 5\n", aug_ctx)
+      try Test.eq(ref2.code, "PY-TYPE-MISMATCH")
       ok()
     end,
     Test.test("lowercase alias refuses") do
@@ -481,14 +536,71 @@ def main() -> Void
       try add_func(compiled.unwrap!, "interp", interp_src, top_ctx(interp_src), "None", ["c", "t"])
       ok()
     end,
-    Test.test("optional union stays flat") do
-      src = "x: Optional[int] | None = None\n"
-      ran = try run_all(compiled.unwrap!, src, top_ctx(src))
-      try Test.eq(ran.lines, ["x: Optional[Int] = none"])
-      try add_func(compiled.unwrap!, "opt_flat", src, top_ctx(src), "None", ["x"])
-      plain = "y: int | None = None\n"
-      ran2 = try run_all(compiled.unwrap!, plain, top_ctx(plain))
-      try Test.eq(ran2.lines, ["y: Optional[Int] = none"])
+    Test.test("optional target wraps known values") do
+      ran = try run_all(compiled.unwrap!, "x: Optional[int] = 5\n", top_ctx(""))
+      try Test.eq(ran.lines, ["x: Optional[Int] = some(5)"])
+      try Test.eq(ran.ctx.scope.get("x", ""), "Optional[Int]")
+      try add_lines("opt_scalar", ran.lines, ["x"], "")
+      ran2 = try run_seq(
+        compiled.unwrap!,
+        [
+          "x: Optional[int] = None\n",
+          "x = 8\n",
+          "xs: Optional[list[int]] = [1, 2]\n",
+          "m: Optional[dict[str, int]] = {\"a\": 1}\n",
+          "d: dict[str, int] = {}\n",
+          "og: Optional[int] = d.get(\"k\")\n",
+          # Both union spellings stay flat: `Optional[X] | None` is never
+          # `Optional[Optional[X]]`.
+          "u: Optional[int] | None = None\n",
+          "v: int | None = None\n",
+        ],
+        top_ctx(""),
+      )
+
+      try Test.eq(
+        ran2.lines,
+        [
+          "x: Optional[Int] = none", "x = some(8)", "xs: Optional[List[Int]] = some([1, 2])",
+          "m: Optional[Map[String, Int]] = some({\"a\": 1})", "d: Map[String, Int] = {}",
+          "og: Optional[Int] = d.get(\"k\")", "u: Optional[Int] = none", "v: Optional[Int] = none",
+        ],
+      )
+
+      try add_lines("opt_wraps", ran2.lines, ["x", "xs", "m", "d", "og", "u", "v"], "")
+      ok()
+    end,
+    Test.test("unwrapped result and optional return wrap inside try lanes") do
+      src = "x: Optional[int] = int(s)\n"
+      ran = try run_all(compiled.unwrap!, src, try_ctx(src, "Result[int]", {"s": "String"}))
+      try Test.eq(ran.lines, ["x: Optional[Int] = some(try s.to_i)"])
+      plain = "x: int = int(s)\n"
+      ran2 = try run_all(compiled.unwrap!, plain, try_ctx(plain, "Result[int]", {"s": "String"}))
+      try Test.eq(ran2.lines, ["x: Int = try s.to_i"])
+      ret = "return 5\n"
+      ran3 = try run_all(compiled.unwrap!, ret, func_ctx(ret, "Optional[int]", {}))
+      try Test.eq(ran3.lines, ["return some(5)"])
+      try add_lines("ret_opt", ran3.lines, [], "Optional[Int]")
+      none_src = "return None\n"
+      ran4 = try run_all(compiled.unwrap!, none_src, func_ctx(none_src, "Optional[int]", {}))
+      try Test.eq(ran4.lines, ["return none"])
+      try add_lines("ret_opt_none", ran4.lines, [], "Optional[Int]")
+      wrong = "return \"a\"\n"
+      ref = try run_no(compiled.unwrap!, wrong, func_ctx(wrong, "Optional[int]", {}))
+      try Test.eq(ref.code, "PY-TYPE-MISMATCH")
+      # `try` only checks inside a `Result` function, so those fragments
+      # carry their own wrapper and fold the unwrapped value; no call in
+      # `main`, a discarded `Result` would be `CHECK-UNUSED-RESULT`.
+      opt_text = (
+        "def py_assign_try_opt(s: String) -> Result[Optional[Int]]\n#{ran.lines.map { |line| "  #{line}" }.join("\n")}\n  ok(x)\nend\n\n"
+      )
+
+      plain_text = (
+        "def py_assign_try_plain(s: String) -> Result[Int]\n#{ran2.lines.map { |line| "  #{line}" }.join("\n")}\n  ok(x)\nend\n\n"
+      )
+
+      blocks = try File.read_text("/tmp/agc_emit_assign_blocks.txt")
+      try File.write_text("/tmp/agc_emit_assign_blocks.txt", "#{blocks}#{opt_text}#{plain_text}")
       ok()
     end,
     Test.test("grouped and quoted shapes run") do
@@ -515,6 +627,29 @@ def main() -> Void
       Test.assert(
         result.stdout == "5\n14\n4.0\n2\n1\npy_t0\n1\n",
         "run /tmp/agc_emit_assign_behavior.agc printed #{result.stdout.inspect}:\n#{result.stderr}\n#{program}",
+      )
+    end,
+    Test.test("optional shapes run") do
+      ran = try run_seq(
+        compiled.unwrap!,
+        [
+          "x: Optional[int] = 5\n",
+          "y: Optional[int] = None\n",
+          "xs: Optional[list[int]] = [1, 2]\n",
+          "m: Optional[dict[str, int]] = {\"a\": 1}\n",
+        ],
+        top_ctx(""),
+      )
+
+      body = ran.lines + ["puts(x)", "puts(y)", "puts(xs)", "puts(m)"]
+      program = "#{EmitExpr.helpers()}\ndef main() -> Void\n#{body.map { |line| "  #{line}" }.join("\n")}\nend\n"
+
+      try File.write_text("/tmp/agc_emit_assign_optional.agc", program)
+      proc = try Process.spawn_captured("agentica", ["/tmp/agc_emit_assign_optional.agc"])
+      result = try Process.output(proc, 30000)
+      Test.assert(
+        result.stdout == "some(5)\nnone\nsome([1, 2])\nsome({\"a\": 1})\n",
+        "run /tmp/agc_emit_assign_optional.agc printed #{result.stdout.inspect}:\n#{result.stderr}\n#{program}",
       )
     end,
     Test.test("all fragments check clean together") do
