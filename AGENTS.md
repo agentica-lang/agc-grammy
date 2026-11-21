@@ -71,7 +71,10 @@ its tests in `tests/`, so always pass the folder.
   stored text, `*_ALL` walk it from the top down. `POP`/`PEEK`/`DROP` fail on an
   empty stack, `*_ALL` match nothing, and `skip` runs with an empty stack
   because a skipped rule may not use it (the validator refuses one that does).
-  A zero-width repetition only takes its shortcut when the stack did not move.
+  A zero-width repetition only takes its shortcut when the stack did not move,
+  and an unbounded one keeps going while the stack shrinks (a `DROP` loop) but
+  stops when it grows; the validator already refuses the always-matching forms,
+  so that stop is only a guard.
 - A tag (`#name = term`) lands on the last node its term built, and over `*`,
   `+`, `?` or `{n,m}` on the last node of every iteration. The validator refuses a tag on an
   expression that builds no node. `run` applies the start rule's own atomicity
