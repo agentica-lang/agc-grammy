@@ -61,13 +61,7 @@ def refuse(code: String, message: String, help: Optional[String], node: Tree.Nod
 end
 
 ## Refuses with an explicit span (for `NameOcc`/`Span` positions).
-def refuse_at(
-  code: String,
-  message: String,
-  help: Optional[String],
-  start: Int,
-  stop: Int,
-) -> StmtRes
+def refuse_at(code: String, message: String, help: Optional[String], start: Int, stop: Int) -> StmtRes
   refusal = Refusal(code: code, message: message, help: help, start: start, stop: stop)
   StmtRes.No(refusal)
 end

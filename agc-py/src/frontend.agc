@@ -725,8 +725,7 @@ def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
       )
     "type_alias" ->
       ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
-    "assign" ->
-      ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
+    "assign" -> ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
     "augmented_assign" ->
       ok(some(Stmt.AugAssigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
     "for_loop" ->
@@ -740,16 +739,13 @@ def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
         ),
       )
     "if_stmt" ->
-      arms = [
-        CondArm(cond: try expr_child(node, "if"), body: try build_body(node.children, source)),
-      ]
+      arms = [CondArm(cond: try expr_child(node, "if"), body: try build_body(node.children, source))]
       for arm in try build_arms(node, source)
         arms = arms.push(arm)
       end
 
       ok(some(Stmt.IfStmt(arms, try build_else(node, source))))
-    "while_loop" ->
-      ok(some(Stmt.WhileStmt(try expr_child(node, "while"), try build_body(node.children, source))))
+    "while_loop" -> ok(some(Stmt.WhileStmt(try expr_child(node, "while"), try build_body(node.children, source))))
     "try_stmt" -> build_try(node, source)
     "return_stmt" -> ok(some(Stmt.ReturnStmt(Tree.first_child(node, "cond_expr"))))
     "pass_stmt" -> ok(some(Stmt.Other(span_of(node))))
