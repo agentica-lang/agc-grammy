@@ -33,7 +33,10 @@ its tests in `tests/`, so always pass the folder.
   `Ctx(grammar, chars, base, atomicity, whitespace, comment)` and returns an
   `Outcome` (found or the furthest `Attempt`); only `run` is public.
 - `src/tree.agc`: `Node(rule, start, stop, children, tag)`, `Position` and the
-  queries user code calls.
+  queries user code calls, plus `to_json`/`json_string`: a pest-style dump where
+  each node carries `pos`/`rule` (and `tag` when set) and `inner` is the covered
+  text or the nested pairs. `grammars/json.grammar` is pest's `json.pest`
+  byte for byte, and `tests/engine_test.agc` parses it as a parity fixture.
 - `src/grammy.agc`: re-exports; add every new public name here or importers
   cannot reach it.
 - `src/main.agc`: the CLI (`<grammar> <rule> [input-file]`).

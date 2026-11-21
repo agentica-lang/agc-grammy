@@ -113,6 +113,76 @@ def tagged(node: Node, name: String) -> List[Node]
   found
 end
 
+## The tree as JSON, in the style of pest's `Pair::to_json`: each node carries
+## its `pos` and `rule` (plus `tag` when the grammar set one), and `inner` is
+## the covered text for a leaf or the nested pairs for a node with children.
+def to_json(node: Node, input: String) -> String = json_node(node, input, 0)
+
+def json_node(node: Node, input: String, depth: Int) -> String
+  pad = "  " * depth
+  inner_pad = "  " * (depth + 1)
+  lines = ["#{pad}{"]
+  lines = lines.push("#{inner_pad}\"pos\": [#{node.start}, #{node.stop}],")
+  lines = lines.push("#{inner_pad}\"rule\": #{json_string(node.rule)},")
+  case node.tag
+    none -> lines = lines
+    some(tag) -> lines = lines.push("#{inner_pad}\"tag\": #{json_string(tag)},")
+  end
+
+  if node.children.empty?
+    lines = lines.push("#{inner_pad}\"inner\": #{json_string(text(node, input))}")
+  else
+    lines = lines.push("#{inner_pad}\"inner\": #{json_pairs(node.children, input, depth + 1)}")
+  end
+
+  lines.push("#{pad}}").join("\n")
+end
+
+def json_pairs(children: List[Node], input: String, depth: Int) -> String
+  pad = "  " * depth
+  inner_pad = "  " * (depth + 1)
+  first = List.first(children)
+  last = List.last(children)
+  lines = ["{"]
+  lines = lines.push("#{inner_pad}\"pos\": [#{first.start}, #{last.stop}],")
+  lines = lines.push("#{inner_pad}\"pairs\": [")
+  rendered = children.map { |child| json_node(child, input, depth + 2) }
+  lines = lines.push(rendered.join(",\n"))
+  lines = lines.push("#{inner_pad}]")
+  lines.push("#{pad}}").join("\n")
+end
+
+## A string as a JSON string literal, with the control characters escaped.
+def json_string(value: String) -> String = "\"#{json_escape(value)}\""
+
+def json_escape(value: String) -> String
+  out = ""
+  for ch in value.split("")
+    out = "#{out}#{json_char(ch)}"
+  end
+
+  out
+end
+
+def json_char(ch: String) -> String
+  case ch
+    "\"" -> "\\\""
+    "\\" -> "\\\\"
+    "\n" -> "\\n"
+    "\r" -> "\\r"
+    "\t" -> "\\t"
+    _ -> json_control(ch)
+  end
+end
+
+def json_control(ch: String) -> String
+  code = ch.code
+  return ch if code >= 32
+  return "\\b" if code == 8
+  return "\\f" if code == 12
+  "\\u#{format("%04x", code)}"
+end
+
 ## Where `offset` falls in `input`.
 def position(input: String, offset: Int) -> Position
   chars = input.split("")
