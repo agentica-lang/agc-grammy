@@ -150,6 +150,21 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("an insensitive literal ignores case") do
+      try Test.ok?(parse("p = { ^\"abc\" }", "p", "AbC"))
+      Test.error?(parse("p = { ^\"abc\" }", "p", "abd"))
+    end,
+    Test.test("repetition bounds") do
+      try Test.ok?(parse("p = { \"a\"{2} }", "p", "aa"))
+      try Test.error?(parse("p = { \"a\"{2} }", "p", "a"))
+      try Test.ok?(parse("p = { \"a\"{2,3} ~ EOI }", "p", "aaa"))
+      Test.error?(parse("p = { \"a\"{2,3} ~ EOI }", "p", "aaaa"))
+    end,
+    Test.test("a pest range matches one character") do
+      tree = try parse("p = { 'a'..'z'+ ~ EOI }", "p", "abc")
+      try Test.eq(tree.stop, 3)
+      Test.error?(parse("p = { 'a'..'z'+ }", "p", "ab1"))
+    end,
     Test.test("tree queries") do
       grammar_text = "p = { item* }\nitem = { ASCII_DIGIT }"
       tree = try parse(grammar_text, "p", "123")

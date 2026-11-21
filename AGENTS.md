@@ -26,7 +26,9 @@ its tests in `tests/`, so always pass the folder.
 ## Layout and boundaries
 
 - `src/grammar.agc`: `Rule`, `Grammar`, `Expr`, `ClassItem` and the parser for
-  `.grammar` text, including the duplicate/unknown-rule validation.
+  `.grammar` text: pest syntax (`"lit"`, `^"lit"`, `'a'..'z'`, `~` required,
+  `{n,m}`, `//` and nested `/* */` comments) plus `[a-z]` classes and `.` as
+  extensions; it also validates the grammar.
 - `src/engine.agc`: the PEG matcher. It threads a `Ctx(grammar, chars, base)`
   and returns an `Outcome` (found or the furthest `Attempt`); only `run` is
   public.

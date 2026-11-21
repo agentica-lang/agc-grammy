@@ -53,22 +53,52 @@ def main() -> Void
       grammar = try Grammar.compile("a = { \"a\\\"b\\n\" }")
       Test.eq(grammar.rules[0].body, Expr.Literal("a\"b\n"))
     end,
-    Test.test("comments, blanks and a missing separator") do
-      grammar = try Grammar.compile("# a grammar\n\na = { \"x\" }\n\nb = { a \"y\" }\n")
+    Test.test("line and block comments are skipped") do
+      grammar = try Grammar.compile("// a grammar\n/* nested /* x */ y */\n\na = { \"x\" }\n\nb = { a ~ \"y\" }\n")
       try Test.eq(grammar.rules.size, 2)
       Test.eq(grammar.rules[1].body, Expr.Seq([Expr.RuleRef("a"), Expr.Literal("y")]))
     end,
-    Test.test("modifiers combine") do
-      grammar = try Grammar.compile("a = >_{ \"x\" }")
-      rule = grammar.rules[0]
-      try Test.eq(rule.indents, true)
-      Test.eq(rule.silent, true)
-    end,
-    Test.test("an unsupported modifier fails") do
-      case Grammar.compile("a = @{ \"x\" }")
-        error(e) -> Test.assert(e.message.include?("not supported yet"), e.message)
+    Test.test("a missing ~ fails") do
+      case Grammar.compile("b = { \"x\" \"y\" }")
+        error(e) -> Test.assert(e.message.include?("expected ~"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
+    end,
+    Test.test("repetition bounds") do
+      grammar = try Grammar.compile("a = { \"x\"{3} ~ \"y\"{2,} ~ \"z\"{,4} ~ \"w\"{1,2} }")
+      expected = Expr.Seq([
+        Expr.Repeat(Expr.Literal("x"), 3, 3),
+        Expr.Repeat(Expr.Literal("y"), 2, UNBOUNDED),
+        Expr.Repeat(Expr.Literal("z"), 0, 4),
+        Expr.Repeat(Expr.Literal("w"), 1, 2),
+      ])
+
+      Test.eq(grammar.rules[0].body, expected)
+    end,
+    Test.test("a minimum above the maximum fails") do
+      case Grammar.compile("a = { \"x\"{3,2} }")
+        error(e) -> Test.assert(e.message.include?("above the maximum"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an insensitive literal") do
+      grammar = try Grammar.compile("a = { ^\"true\" }")
+      Test.eq(grammar.rules[0].body, Expr.Insensitive("true"))
+    end,
+    Test.test("a pest range is a class span") do
+      grammar = try Grammar.compile("a = { 'a'..'z' }")
+      Test.eq(grammar.rules[0].body, Expr.CharClass(false, [ClassItem.Span("a", "z")]))
+    end,
+    Test.test("escapes in literals") do
+      grammar = try Grammar.compile("a = { \"\\x41\" ~ \"\\u{1F600}\" ~ \"\\0\" ~ \"\\'\" }")
+      expected = Expr.Seq([
+        Expr.Literal("A"),
+        Expr.Literal(String.from_code(128512)),
+        Expr.Literal(String.from_code(0)),
+        Expr.Literal("'"),
+      ])
+
+      Test.eq(grammar.rules[0].body, expected)
     end,
     Test.test("a rule declared twice fails") do
       case Grammar.compile("a = { \"x\" }\na = { \"y\" }")

@@ -32,6 +32,7 @@ end
 ## The body of a rule, as written.
 enum Expr
   Literal(String)
+  Insensitive(String)
   CharClass(Bool, List[ClassItem])
   AnyChar
   Builtin(String)
@@ -177,6 +178,17 @@ struct ParsedFlags
   pos: Int
 end
 
+struct Scanned
+  text: String
+  pos: Int
+end
+
+struct ParsedBounds
+  min: Int
+  max: Int
+  pos: Int
+end
+
 struct ParsedPrefixes
   ops: List[String]
   pos: Int
@@ -250,17 +262,24 @@ def parse_seq(chars: List[String], pos: Int) -> Result[ParsedExpr]
   parts: List[Expr] = []
   at = skip_blanks(chars, pos)
   while true
-    c = char_at(chars, at)
-    break if c == "|" or c == ")" or c == "}" or c == ""
+    break if seq_end?(chars, at)
     part = try parse_term(chars, at)
     parts = parts.push(part.expr)
-    at = skip_tilde(chars, part.pos)
+    at = skip_blanks(chars, part.pos)
+    break if seq_end?(chars, at)
+    return error("grammar: expected ~ between terms at character #{at}") if char_at(chars, at) != "~"
+    at = skip_blanks(chars, at + 1)
   end
 
   return error("grammar: expected an expression at character #{pos}") if parts.size == 0
   return ok(ParsedExpr(expr: parts[0], pos: at)) if parts.size == 1
 
   ok(ParsedExpr(expr: Expr.Seq(parts), pos: at))
+end
+
+def seq_end?(chars: List[String], pos: Int) -> Bool
+  c = char_at(chars, pos)
+  c == "|" or c == ")" or c == "}" or c == ""
 end
 
 def parse_term(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -310,6 +329,10 @@ def apply_postfix(chars: List[String], base: ParsedExpr) -> Result[ParsedExpr]
       "?" ->
         expr = Expr.Repeat(expr, 0, 1)
         at = skip_blanks(chars, at + 1)
+      "{" ->
+        bounds = try read_bounds(chars, at)
+        expr = Expr.Repeat(expr, bounds.min, bounds.max)
+        at = skip_blanks(chars, bounds.pos)
       _ -> break
     end
   end
@@ -322,6 +345,8 @@ def parse_primary(chars: List[String], pos: Int) -> Result[ParsedExpr]
   case char_at(chars, at)
     "(" -> parse_group(chars, at)
     "\"" -> parse_literal(chars, at)
+    "^" -> parse_insensitive(chars, at)
+    "'" -> parse_range(chars, at)
     "[" -> parse_class_expr(chars, at)
     "." -> ok(ParsedExpr(expr: Expr.AnyChar, pos: at + 1))
     _ -> parse_name(chars, at)
@@ -337,6 +362,77 @@ end
 def parse_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
   text = try parse_string(chars, pos)
   ok(ParsedExpr(expr: Expr.Literal(text.text), pos: text.pos))
+end
+
+def parse_insensitive(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  text = try parse_string(chars, pos + 1)
+  ok(ParsedExpr(expr: Expr.Insensitive(text.text), pos: text.pos))
+end
+
+# A pest range, `'a'..'z'`, is one character span: the same thing as a class.
+def parse_range(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  low = try parse_char_literal(chars, pos)
+  after_low = skip_blanks(chars, low.pos)
+  if !starts_with?(chars, after_low, "..")
+    return error("grammar: expected .. after #{low.value.inspect} at character #{after_low}")
+  end
+
+  high = try parse_char_literal(chars, skip_blanks(chars, after_low + 2))
+  items = [ClassItem.Span(low.value, high.value)]
+  ok(ParsedExpr(expr: Expr.CharClass(false, items), pos: high.pos))
+end
+
+def parse_char_literal(chars: List[String], pos: Int) -> Result[ParsedChar]
+  return error("grammar: expected a character at character #{pos}") if char_at(chars, pos) != "'"
+
+  inner = try read_class_char(chars, pos + 1)
+  return error("grammar: unterminated character at character #{pos}") if char_at(chars, inner.pos) != "'"
+
+  ok(ParsedChar(value: inner.value, pos: inner.pos + 1))
+end
+
+def read_bounds(chars: List[String], pos: Int) -> Result[ParsedBounds]
+  first = read_number(chars, skip_blanks(chars, pos + 1))
+  at = first.pos
+  if char_at(chars, at) == "}"
+    return error("grammar: a repetition bound needs a number at character #{pos}") if first.text.empty?
+
+    exact = try first.text.to_i
+    return ok(ParsedBounds(min: exact, max: exact, pos: at + 1))
+  end
+
+  return error("grammar: expected , or } in a repetition bound at character #{at}") if char_at(chars, at) != ","
+
+  second = read_number(chars, skip_blanks(chars, at + 1))
+  close = try expect_char(chars, skip_blanks(chars, second.pos), "}")
+  if first.text.empty? and second.text.empty?
+    return error("grammar: a repetition bound needs a number at character #{pos}")
+  end
+
+  low = try bound_count(first.text, 0)
+  high = try bound_count(second.text, UNBOUNDED)
+  return error("grammar: the repetition minimum #{low} is above the maximum #{high}") if high >= 0 and low > high
+
+  ok(ParsedBounds(min: low, max: high, pos: close))
+end
+
+def read_number(chars: List[String], pos: Int) -> Scanned
+  at = pos
+  text = ""
+  while at < chars.size and is_digit?(chars[at])
+    text = "#{text}#{chars[at]}"
+    at += 1
+  end
+
+  Scanned(text: text, pos: at)
+end
+
+def is_digit?(c: String) -> Bool = c.length == 1 and "0123456789".include?(c)
+
+def bound_count(text: String, missing: Int) -> Result[Int]
+  return ok(missing) if text.empty?
+
+  text.to_i
 end
 
 def parse_class_expr(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -412,9 +508,65 @@ def read_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
 
   code = char_at(chars, pos + 1)
   return none if code == ""
+  return some(ParsedChar(value: String.from_code(0), pos: pos + 2)) if code == "0"
+  return read_code_escape(chars, pos) if code == "x" or code == "u"
 
   some(ParsedChar(value: Map.get(ESCAPES, code, code), pos: pos + 2))
 end
+
+def read_code_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
+  return read_hex_escape(chars, pos) if char_at(chars, pos + 1) == "x"
+
+  read_brace_escape(chars, pos)
+end
+
+def read_hex_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
+  high = hex_value(char_at(chars, pos + 2))
+  low = hex_value(char_at(chars, pos + 3))
+  return none if high.none? or low.none?
+
+  # Both sides are hex digits, so the conversions cannot fail.
+  code = high.unwrap! * 16 + low.unwrap!
+  some(ParsedChar(value: String.from_code(code), pos: pos + 4))
+end
+
+def read_brace_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
+  return none if char_at(chars, pos + 2) != "{"
+
+  digits = read_hex_run(chars, pos + 3, 6)
+  return none if digits.text.size < 2
+  return none if char_at(chars, digits.pos) != "}"
+
+  # Every character is a hex digit, so the conversion cannot fail.
+  code = hex_number(digits.text)
+  return none if code > 1114111 or (code >= 55296 and code <= 57343) or code < 0
+
+  some(ParsedChar(value: String.from_code(code), pos: digits.pos + 1))
+end
+
+def read_hex_run(chars: List[String], pos: Int, max: Int) -> Scanned
+  at = pos
+  text = ""
+  while at < chars.size and text.size < max and hex_value(chars[at]).some?
+    text = "#{text}#{chars[at]}"
+    at += 1
+  end
+
+  Scanned(text: text, pos: at)
+end
+
+def hex_value(c: String) -> Optional[Int]
+  return none if c.length != 1
+
+  code = c.code
+  return some(code - 48) if code >= 48 and code <= 57
+  return some(code - 87) if code >= 97 and code <= 102
+  return some(code - 55) if code >= 65 and code <= 70
+
+  none
+end
+
+def hex_number(text: String) -> Int = text.split("").reduce(0) do |total, ch| total * 16 + hex_value(ch).unwrap! end
 
 def read_ident(chars: List[String], pos: Int) -> Optional[ParsedName]
   at = pos
@@ -435,18 +587,29 @@ def is_letter?(c: String) -> Bool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ
 
 def skip_blanks(chars: List[String], pos: Int) -> Int
   at = pos
-  while at < chars.size
-    c = chars[at]
-    if c == " " or c == "\t" or c == "\r" or c == "\n"
-      at += 1
-    elsif c == "#"
-      at = skip_line(chars, at)
+  looping = true
+  while looping
+    after = skip_one(chars, at)
+    if after == at
+      looping = false
     else
-      break
+      at = after
     end
   end
 
   at
+end
+
+# Skips one blank, a `//` comment or a `/* */` comment; returns `pos` otherwise.
+def skip_one(chars: List[String], pos: Int) -> Int
+  return pos if pos >= chars.size
+
+  c = chars[pos]
+  return pos + 1 if c == " " or c == "\t" or c == "\r" or c == "\n"
+  return skip_line(chars, pos) if starts_with?(chars, pos, "//")
+  return skip_block(chars, pos, 1) if starts_with?(chars, pos, "/*")
+
+  pos
 end
 
 def skip_line(chars: List[String], pos: Int) -> Int
@@ -458,11 +621,36 @@ def skip_line(chars: List[String], pos: Int) -> Int
   at
 end
 
-def skip_tilde(chars: List[String], pos: Int) -> Int
-  at = skip_blanks(chars, pos)
-  return at if char_at(chars, at) != "~"
+# Block comments nest, as in pest. An unterminated one stops at its own start,
+# so the parser reports the stray `/` instead of swallowing the file.
+def skip_block(chars: List[String], pos: Int, depth: Int) -> Int
+  at = pos + 2
+  level = depth
+  while at < chars.size and level > 0
+    if starts_with?(chars, at, "/*")
+      level += 1
+      at += 2
+    elsif starts_with?(chars, at, "*/")
+      level -= 1
+      at += 2
+    else
+      at += 1
+    end
+  end
 
-  skip_blanks(chars, at + 1)
+  return pos if level > 0
+
+  at
+end
+
+def starts_with?(chars: List[String], pos: Int, text: String) -> Bool
+  parts = text.split("")
+  return false if pos + parts.size > chars.size
+  for i in 0...parts.size
+    return false if chars[pos + i] != parts[i]
+  end
+
+  true
 end
 
 def expect_char(chars: List[String], pos: Int, ch: String) -> Result[Int]
@@ -736,6 +924,7 @@ end
 def nullable_with?(expr: Expr, names: Set[String]) -> Bool
   case expr
     Expr.Literal(text) -> text.empty?
+    Expr.Insensitive(text) -> text.empty?
     Expr.CharClass(_, _) -> false
     Expr.AnyChar -> false
     Expr.Builtin(name) -> name == "EOF" or name == "EOI" or name == "SOI"
@@ -768,6 +957,7 @@ end
 def always_with?(expr: Expr, names: Set[String]) -> Bool
   case expr
     Expr.Literal(text) -> text.empty?
+    Expr.Insensitive(text) -> text.empty?
     Expr.CharClass(_, _) -> false
     Expr.AnyChar -> false
     Expr.Builtin(_) -> false
@@ -800,6 +990,7 @@ end
 def still_with?(expr: Expr, names: Set[String]) -> Bool
   case expr
     Expr.Literal(text) -> text.empty?
+    Expr.Insensitive(text) -> text.empty?
     Expr.CharClass(_, _) -> false
     Expr.AnyChar -> false
     Expr.Builtin(name) -> name == "EOF" or name == "EOI" or name == "SOI"

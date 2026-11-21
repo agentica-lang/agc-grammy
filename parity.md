@@ -25,22 +25,22 @@ worth having, **no** = deliberately out of scope.
 | implicit `WHITESPACE` / `COMMENT` skipping | yes | missing | later (with atomicity) |
 | node tags `#tag = expr` | yes (extra) | missing | later |
 | string literal `"text"` | yes | yes | — |
-| insensitive literal `^"text"` | yes | missing | now |
-| range `'a'..'z'` | yes | missing (classes instead) | now, as an alias |
+| insensitive literal `^"text"` | yes | yes | done |
+| range `'a'..'z'` | yes | yes (parsed as a one-span class) | done |
 | class `[a-z]`, `[^0-9]` | no | yes (extension) | keep |
 | `.` any char | no (`ANY`) | yes (extension) | keep |
-| sequence `~` | required | optional | keep |
+| sequence `~` | required | required | done |
 | ordered choice `\|` | yes | yes | — |
 | `*`, `+`, `?` | yes | yes | — |
-| bounds `{n}`, `{n,}`, `{,n}`, `{n,m}` | yes | missing | now |
+| bounds `{n}`, `{n,}`, `{,n}`, `{n,m}` | yes | yes | done |
 | `&`, `!` lookahead | yes | yes | — |
 | grouping `( )` | yes | yes | — |
 | left recursion | static error | static error | done |
 | indentation blocks | none (users pre-process or use the stack) | `>` scope with `INDENT`/`SAME` (extension) | done |
-| `//` line and `/* */` nested comments | yes | only `#` | now (`#` stays) |
+| `//` line and `/* */` nested comments | yes | yes (`#` removed) | done |
 | doc comments `///`, `//!` | yes | missing | later |
 | escapes `\" \\ \n \r \t` | yes | yes | — |
-| escapes `\0 \' \xNN \u{NNNN}` | yes | missing | now |
+| escapes `\0 \' \xNN \u{NNNN}` | yes | yes | done |
 | `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | missing | later |
 | `PEEK`, `PEEK[a..b]`, `PEEK_ALL` | yes | missing | later |
 | `ANY` | yes | yes | — |
@@ -157,11 +157,11 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 2. **Validator parity for hangs** — done: left recursion (through nullable
    prefixes and mutual recursion), non-failing and non-progressing repetitions,
    reserved (pest keyword/builtin) rule names, and unreachable choice arms.
-3. **Syntax fill-ins** — the pest builtin names (`EOI`, `SOI`, the whole
-   `ASCII_*` family) and `NEWLINE` with `\r\n` are done. Still missing, and
-   next: repetition bounds `{n,m}`, `^"literal"`, escapes `\0 \' \xNN \u{...}`,
-   `//` and `/* */` comments, `'a'..'z'` ranges, `~` required, and the `@`/`$`/`!`
-   modifiers (they parse today and report "not supported yet").
+3. **Syntax fill-ins** — done: repetition bounds `{n,m}`, `^"literal"`,
+   escapes `\0 \' \xNN \u{...}`, `//` and nested `/* */` comments,
+   `'a'..'z'` ranges as one-span classes, required `~`, and the full pest
+   builtin set. The `@`/`$`/`!` modifiers parse and report "not supported yet";
+   atomicity with implicit `WHITESPACE`/`COMMENT` is the next milestone.
 
 ### Milestone 2 — real grammars
 
@@ -186,13 +186,13 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 
 ## 8. Decisions
 
-1. **Syntax: pest is the base, with two documented extensions.** Any `.pest`
-   body parses: `"text"`, `^"text"`, `'a'..'z'`, `ANY`, `~`, `|`, `* + ?`,
-   `{n,m}`, `& !`, `( )`, `_ @ $ !` modifiers and `//`/`/* */` comments. The
-   extensions are `[a-z]`/`[^...]` classes and `.` for `ANY`; pest has no `[` in
-   a body, so they never conflict. `#` comments go away (they would collide
-   with node tags `#tag = expr`). `~` becomes required. These are the item 3
-   syntax fill-ins, still open.
+1. **Syntax: pest is the base, with two documented extensions (done).** A
+   `.pest` body parses: `"text"`, `^"text"`, `'a'..'z'`, `ANY`, `~`, `|`,
+   `* + ?`, `{n,m}`, `& !`, `( )` and `//`/`/* */` comments. The extensions are
+   `[a-z]`/`[^...]` classes and `.` for `ANY`; pest has no `[` in a body, so
+   they never conflict. `#` comments are gone (they collided with the future
+   node tags `#tag = expr`) and `~` is required. Only the `_ @ $ !` modifiers
+   are still missing, and they report "not supported yet".
 2. **Builtin names: pest names, old ones as aliases (done).** `EOI` and `EOF`,
    `ASCII_ALPHANUMERIC` and `ASCII_ALNUM`, `ASCII_HEX_DIGIT` and `ASCII_HEX`
    all work; the grammar validator reserves every one of them.

@@ -68,6 +68,7 @@ end
 def match(ctx: Ctx, expr: Grammar.Expr, pos: Int) -> Outcome
   case expr
     Expr.Literal(text) -> match_literal(text, ctx.chars, pos)
+    Expr.Insensitive(text) -> match_insensitive(text, ctx.chars, pos)
     Expr.CharClass(negated, items) -> match_class(negated, items, ctx.chars, pos)
     Expr.AnyChar -> match_any(ctx.chars, pos)
     Expr.Builtin(name) -> match_builtin(ctx, name, pos)
@@ -187,6 +188,17 @@ def match_negative(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
       refused = Attempt(pos: pos, expected: [], unexpected: [Label(text: describe(inner), terminal: false)])
       Outcome(found: none, attempt: some(refused))
   end
+end
+
+# An insensitive literal compares case by case (ASCII downcasing, as pest).
+def match_insensitive(text: String, chars: List[String], pos: Int) -> Outcome
+  parts = text.split("")
+  for i in 0...parts.size
+    at = pos + i
+    return miss(at, ["^#{text.inspect}"]) if at >= chars.size or chars[at].downcase != parts[i].downcase
+  end
+
+  matched(Progress(pos: pos + parts.size, nodes: []))
 end
 
 def match_literal(text: String, chars: List[String], pos: Int) -> Outcome
@@ -424,6 +436,7 @@ end
 def describe(expr: Grammar.Expr) -> String
   case expr
     Expr.Literal(text) -> text.inspect
+    Expr.Insensitive(text) -> "^#{text.inspect}"
     Expr.CharClass(negated, items) -> class_text(negated, items)
     Expr.AnyChar -> "any character"
     Expr.Builtin(name) -> builtin_label(name)

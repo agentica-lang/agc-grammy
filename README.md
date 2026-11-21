@@ -83,17 +83,21 @@ fail (which hides the arms after it).
 ## Grammar syntax
 
 A rule is `name = { body }`, or `name = _{ body }` for a silent rule that builds
-no node. Rules are separated by blanks; `#` starts a comment.
+no node. Rules are separated by blanks; `//` starts a line comment and
+`/* ... */` a block comment (they nest).
 
 | In a body | Means |
 |---|---|
-| `"text"` | a literal (`\"`, `\\`, `\n`, `\r`, `\t`) |
+| `"text"` | a literal (`\"`, `\\`, `\n`, `\r`, `\t`, `\0`, `\'`, `\xNN`, `\u{NNNN}`) |
+| `^"text"` | the same literal, case insensitively |
+| `'a'..'z'` | one character in a pest range |
+| `a{n}`, `a{n,}`, `a{,n}`, `a{n,m}` | repetition bounds |
 | `[a-z]`, `[^0-9]` | one character, in or out of the set; `\-` and `\]` are literal |
 | `.` | any character |
 | `name` | that rule; silent rules pass their children up |
 | `ANY`, `SOI`, `EOI` (alias `EOF`), `NEWLINE` | builtins |
 | `INDENT`, `SAME` | consume a line's indentation, compared with the `>` scope |
-| `a ~ b` | sequence (`~` may be left out between terms) |
+| `a ~ b` | sequence (`~` is required between terms, as in pest) |
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
@@ -109,7 +113,8 @@ Between `=` and `{` a rule takes modifiers: `_` builds no node, and `>` opens an
 indentation scope (`>_{` is both).
 
 There is no implicit whitespace skipping: write `ws` into the grammar, or use a
-silent rule. Left recursion is not supported (it will not terminate).
+silent rule. A repetition without a bound stops on the first iteration that
+makes no progress. Left recursion is not supported (it will not terminate).
 
 ## Indentation
 
@@ -192,8 +197,8 @@ live in `tests/` and are run as `agentica test tests`.
 
 ## Not there yet
 
-- no implicit whitespace, no `^"case insensitive"` literals
-- no `{n,m}` repetition bounds; `.grammar` comments are `#` only
+- no implicit whitespace and no atomicity (`@`, `$`, `!`)
+- no node tags (`#tag = expr`), no node stack (`PUSH`/`PEEK`/`POP`)
 - no atomicity (`@`, `$`, `!`) and no node tags (`#tag = expr`)
 - no packrat memoization and no left recursion
 - nodes keep no span information other than start/stop offsets
