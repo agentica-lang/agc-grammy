@@ -643,14 +643,9 @@ end
 
 # Whether `quote` opens or closes at `at`.
 def starts_quote?(chars: List[String], at: Int, quote: String) -> Bool
-  window = ""
-  index = 0
-  while index < quote.length and at + index < chars.size
-    window = window + chars[at + index]
-    index += 1
-  end
+  return false if at >= chars.size or chars[at] != quote.slice(0, 1)
 
-  window == quote
+  quote.length == 1 or (at + 2 < chars.size and chars[at + 1] == chars[at] and chars[at + 2] == chars[at])
 end
 
 def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
