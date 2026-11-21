@@ -1,4 +1,4 @@
-## Typed-subset grammar fixtures for phases 2a and 2b.
+## Typed-subset grammar fixtures for phases 2a–2c.
 
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
@@ -14,6 +14,13 @@ end
 
 def node_texts(tree: Tree.Node, name: String, input: String) -> List[String]
   Tree.find_all(tree, name).map { |node| Tree.text(node, input) }
+end
+
+def assert_parse_error_at(compiled: Result[Grammar.Grammar], input: String, location: String) -> Result[Void]
+  case parse_py(compiled, input)
+    error(e) -> Test.assert(e.message.include?(location), e.message)
+    ok(_) -> Test.assert(false, "expected an error")
+  end
 end
 
 def main() -> Void
@@ -301,6 +308,68 @@ def main() -> Void
       try Test.error?(parse_py(compiled, "x = 01e2"))
       try Test.error?(parse_py(compiled, "x = 1__0"))
       Test.error?(parse_py(compiled, "x = 0b2"))
+    end,
+    Test.test("for loops parse lists, ranges and string calls with break and next") do
+      program = "for x in [1, 2]:\n    break\nfor i in range(3):\n    next\nfor c in str(1):\n    pass\n"
+      tree = try parse_py(compiled, program)
+      try Test.eq(Tree.find_all(tree, "for_loop").size, 3)
+      try Test.eq(Tree.find_all(tree, "list_lit").size, 1)
+      try Test.eq(node_texts(tree, "call", program), ["range(3)", "str(1)"])
+      try Test.eq(Tree.find_all(tree, "break_stmt").size, 1)
+      try Test.eq(Tree.find_all(tree, "next_stmt").size, 1)
+      Test.eq(Tree.find_all(tree, "pass_stmt").size, 1)
+    end,
+    Test.test("try parses exactly one bare, named or bound handler") do
+      program = (
+        "def f() -> None:\n    try:\n        pass\n    except:\n        pass\n    try:\n        pass\n    except E:\n        pass\n    try:\n        pass\n    except E as e:\n        pass\n"
+      )
+
+      tree = try parse_py(compiled, program)
+      try Test.eq(Tree.find_all(tree, "try_stmt").size, 3)
+      try Test.eq(Tree.find_all(tree, "except_handler").size, 3)
+      try Test.eq(Tree.find_all(tree, "pass_stmt").size, 6)
+      Test.eq(node_texts(tree, "name", program), ["f", "E", "E", "e"])
+    end,
+    Test.test("assert parses with and without a message") do
+      program = "assert True\nassert x > 0, \"positive only\"\n"
+      tree = try parse_py(compiled, program)
+      try Test.eq(Tree.find_all(tree, "assert_stmt").size, 2)
+      Test.eq(Tree.find_all(tree, "text").size, 1)
+    end,
+    Test.test("raise parses a call or a name") do
+      program = "raise E(\"msg\")\nraise E\n"
+      tree = try parse_py(compiled, program)
+      try Test.eq(Tree.find_all(tree, "raise_stmt").size, 2)
+      try Test.eq(Tree.find_all(tree, "call").size, 1)
+      Test.eq(node_texts(tree, "name", program), ["E", "E"])
+    end,
+    Test.test("loop else is rejected") do
+      assert_parse_error_at(compiled, "for x in xs:\n    pass\nelse:\n    pass\n", "line 3, column 6")
+    end,
+    Test.test("finally without a handler is rejected") do
+      assert_parse_error_at(compiled, "try:\n    pass\nfinally:\n    pass\n", "line 3, column 1")
+    end,
+    Test.test("finally after a handler is rejected") do
+      assert_parse_error_at(compiled, "try:\n    pass\nexcept:\n    pass\nfinally:\n    pass\n", "line 5, column 9")
+    end,
+    Test.test("try else is rejected") do
+      assert_parse_error_at(compiled, "try:\n    pass\nexcept:\n    pass\nelse:\n    pass\n", "line 5, column 6")
+    end,
+    Test.test("two handlers is rejected") do
+      assert_parse_error_at(compiled, "try:\n    pass\nexcept E:\n    pass\nexcept F:\n    pass\n", "line 5, column 1")
+    end,
+    Test.test("bare raise is rejected") do assert_parse_error_at(compiled, "raise\n", "line 1, column 6") end,
+    Test.test("raise from is rejected") do
+      assert_parse_error_at(compiled, "raise E from cause\n", "line 1, column 9")
+    end,
+    Test.test("bare decorator is rejected") do
+      assert_parse_error_at(compiled, "@decorate\ndef f() -> None:\n    pass\n", "line 1, column 1")
+    end,
+    Test.test("call decorator is rejected") do
+      assert_parse_error_at(compiled, "@decorate(1)\ndef f() -> None:\n    pass\n", "line 1, column 1")
+    end,
+    Test.test("continue keyword is rejected") do
+      assert_parse_error_at(compiled, "for x in xs:\n    continue\n", "line 2, column 5")
     end,
   ])
 end
