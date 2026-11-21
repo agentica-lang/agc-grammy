@@ -3,19 +3,19 @@ AGENTICA ?= agentica
 .PHONY: check fmt fmt-check lint test ci example
 
 check:
-	$(AGENTICA) check src examples tests
+	$(AGENTICA) check src examples tests agc-py
 
 fmt:
-	$(AGENTICA) fmt src examples tests
+	$(AGENTICA) fmt src examples tests agc-py
 
 fmt-check:
-	$(AGENTICA) fmt --check src examples tests
+	$(AGENTICA) fmt --check src examples tests agc-py
 
 lint:
-	$(AGENTICA) lint src examples tests
+	$(AGENTICA) lint src examples tests agc-py
 
 test:
-	$(AGENTICA) test tests
+	$(AGENTICA) test tests agc-py/tests
 
 ci: check fmt-check lint test
 
