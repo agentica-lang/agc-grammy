@@ -114,7 +114,10 @@ plain types only.
   (failure emits `IO.warn(msg)` then `System.exit(1)`; it is not catchable).
 - `if`/`elif`/`else`, `while`, `for x in ...` over `List` and `Range`.
   String iteration desugars through `split("")` (Unicode scalar values,
-  and `Bytes` is not an iteration source). No `for`/`while` `else`.
+  and `Bytes` is not an iteration source). A new loop target is scoped to
+  the loop; to use it afterwards, bind it with its type before the loop.
+  In that case, an empty iterable leaves its value unchanged. No
+  `for`/`while` `else`.
   `break` is included; the spelling is `next` for continue (the backend has
   no `continue` — verified by probe). Top-level statements in file order
   form the `main` body; top-level bindings are `main`-locals.
