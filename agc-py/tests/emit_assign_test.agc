@@ -1,5 +1,6 @@
 ## Phase 3c lane A binding-statement tests: every emitted fragment passes
-## `agentica check` in the test itself.
+## `agentica check` in the test itself, and one behavior test runs the
+## grouped and quoted shapes to pin their values.
 ##
 ## Each test parses tiny programs (at most three lines) with a single
 ## `Engine.run`, emits each statement through `EmitAssign` with a threaded
@@ -117,6 +118,21 @@ def run_all(compiled: Grammar.Grammar, src: String, ctx: EmitCtx.EmitCtx) -> Res
   else
     ok(RunOk(lines: lines, ctx: current))
   end
+end
+
+# Emits every program in `srcs` in order, threading one context, so
+# later statements sit past earlier temps exactly like the coordinator's
+# spine. A refusal anywhere fails the whole run with its code.
+def run_seq(compiled: Grammar.Grammar, srcs: List[String], ctx: EmitCtx.EmitCtx) -> Result[RunOk]
+  lines: List[String] = []
+  current = ctx
+  for src in srcs
+    ran = try run_all(compiled, src, current)
+    lines = lines + ran.lines
+    current = ran.ctx
+  end
+
+  ok(RunOk(lines: lines, ctx: current))
 end
 
 # Emits `src` and answers its first refusal; fails when everything emits.
@@ -403,6 +419,103 @@ def main() -> Void
       try Test.eq(ran.ctx.next_temp, 2)
       try add_func(compiled.unwrap!, "temps", src, top_ctx(src), "None", ["c", "y", "w"])
       ok()
+    end,
+    Test.test("augmented RHS groups") do
+      first = "x: int = 10\nx -= 2 + 3\n"
+      ran = try run_all(compiled.unwrap!, first, top_ctx(first))
+      try Test.eq(ran.lines, ["x: Int = 10", "x = x - (2 + 3)"])
+      try add_func(compiled.unwrap!, "aug_group", first, top_ctx(first), "None", ["x"])
+      second = "x: int = 2\nx *= 3 + 4\n"
+      ran2 = try run_all(compiled.unwrap!, second, top_ctx(second))
+      try Test.eq(ran2.lines, ["x: Int = 2", "x = x * (3 + 4)"])
+      third = "f: float = 20.0\nf /= 2.0 + 3.0\n"
+      ran3 = try run_all(compiled.unwrap!, third, top_ctx(third))
+      try Test.eq(ran3.lines, ["f: Float = 20.0", "f = f / (2.0 + 3.0)"])
+      fourth = "x: int = 7\nx %= 2 + 3\n"
+      ran4 = try run_all(compiled.unwrap!, fourth, top_ctx(fourth))
+      try Test.eq(ran4.lines, ["x: Int = 7", "x = py_pymod(x, 2 + 3)"])
+      mixed = "x: int = 10\nx -= 2 * 3\n"
+      ran5 = try run_all(compiled.unwrap!, mixed, top_ctx(mixed))
+      try Test.eq(ran5.lines, ["x: Int = 10", "x = x - (2 * 3)"])
+      str_src = "s: str = \"a\"\ns += \"b\" + \"c\"\n"
+      ran6 = try run_all(compiled.unwrap!, str_src, top_ctx(str_src))
+      try Test.eq(ran6.lines, ["s: String = \"a\"", "s = s + (\"b\" + \"c\")"])
+      try add_func(compiled.unwrap!, "aug_str_group", str_src, top_ctx(str_src), "None", ["s"])
+      grouped = "x: int = 10\nx -= (2 + 3)\n"
+      ran7 = try run_all(compiled.unwrap!, grouped, top_ctx(grouped))
+      try Test.eq(ran7.lines, ["x: Int = 10", "x = x - (2 + 3)"])
+      ok()
+    end,
+    Test.test("quoted temps survive the supply") do
+      first = "c: bool = True\nq: int = 1 if c else 2\n"
+      ran = try run_all(compiled.unwrap!, first, top_ctx(first))
+      try Test.eq(ran.lines, ["c: Bool = true", "py_t0 = 2", "if c", "  py_t0 = 1", "end", "q: Int = py_t0"])
+      try Test.eq(ran.ctx.next_temp, 1)
+      second = "s: str = \"py_t0\"\n"
+      ran2 = try run_all(compiled.unwrap!, second, ran.ctx)
+      try Test.eq(ran2.lines, ["s: String = \"py_t0\""])
+      try Test.eq(ran2.ctx.next_temp, 1)
+      third = "w: int = 3 if c else 4\n"
+      ran3 = try run_all(compiled.unwrap!, third, ran2.ctx)
+      try Test.eq(ran3.lines, ["py_t1 = 4", "if c", "  py_t1 = 3", "end", "w: Int = py_t1"])
+      try Test.eq(ran3.ctx.next_temp, 2)
+      quoted = "c: bool = True\nq: int = 1 if c else 2\ns: str = \"py_t0\"\n"
+      try add_func(compiled.unwrap!, "quoted", quoted, top_ctx(quoted), "None", ["c", "q", "s"])
+      ok()
+    end,
+    Test.test("interpolated temps shift") do
+      src = "t: str = f\"{1 if c else 2}\"\n"
+      ctx = EmitCtx.EmitCtx(
+        source: src,
+        file: "assign_test",
+        scope: {"c": "Bool"},
+        func_ret: "",
+        in_try: false,
+        next_temp: 1,
+      )
+
+      ran = try run_all(compiled.unwrap!, src, ctx)
+      try Test.eq(ran.lines, ["py_t1 = 2", "if c", "  py_t1 = 1", "end", "t: String = \"" + interp("py_t1") + "\""])
+      try Test.eq(ran.ctx.next_temp, 2)
+      interp_src = "c: bool = True\nt: str = f\"{1 if c else 2}\"\n"
+      try add_func(compiled.unwrap!, "interp", interp_src, top_ctx(interp_src), "None", ["c", "t"])
+      ok()
+    end,
+    Test.test("optional union stays flat") do
+      src = "x: Optional[int] | None = None\n"
+      ran = try run_all(compiled.unwrap!, src, top_ctx(src))
+      try Test.eq(ran.lines, ["x: Optional[Int] = none"])
+      try add_func(compiled.unwrap!, "opt_flat", src, top_ctx(src), "None", ["x"])
+      plain = "y: int | None = None\n"
+      ran2 = try run_all(compiled.unwrap!, plain, top_ctx(plain))
+      try Test.eq(ran2.lines, ["y: Optional[Int] = none"])
+      ok()
+    end,
+    Test.test("grouped and quoted shapes run") do
+      ran = try run_seq(
+        compiled.unwrap!,
+        [
+          "ax: int = 10\nax -= 2 + 3\n",
+          "ay: int = 2\nay *= 3 + 4\n",
+          "af: float = 20.0\naf /= 2.0 + 3.0\n",
+          "am: int = 7\nam %= 2 + 3\n",
+          "c: bool = True\nq: int = 1 if c else 2\n",
+          "s: str = \"py_t0\"\n",
+          "t: str = f\"{1 if c else 2}\"\n",
+        ],
+        top_ctx(""),
+      )
+
+      body = ran.lines + ["puts(ax)", "puts(ay)", "puts(af)", "puts(am)", "puts(q)", "puts(s)", "puts(t)"]
+      program = "#{EmitExpr.helpers()}\ndef main() -> Void\n#{body.map { |line| "  #{line}" }.join("\n")}\nend\n"
+
+      try File.write_text("/tmp/agc_emit_assign_behavior.agc", program)
+      proc = try Process.spawn_captured("agentica", ["/tmp/agc_emit_assign_behavior.agc"])
+      result = try Process.output(proc, 30000)
+      Test.assert(
+        result.stdout == "5\n14\n4.0\n2\n1\npy_t0\n1\n",
+        "run /tmp/agc_emit_assign_behavior.agc printed #{result.stdout.inspect}:\n#{result.stderr}\n#{program}",
+      )
     end,
     Test.test("all fragments check clean together") do
       aliases = try File.read_text("/tmp/agc_emit_assign_aliases.txt")

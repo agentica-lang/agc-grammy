@@ -196,6 +196,12 @@ struct ErrParts
   help: Optional[String]
 end
 
+# One read hole: the `#{...}` code plus the offset past its closer.
+struct InterpTake
+  code: String
+  next: Int
+end
+
 # The binding target of a lane A statement comes from the coordinator as
 # a `NameOcc`; `need_*` helpers are gone with the node-based entries.
 
@@ -483,49 +489,52 @@ def aug_combine(xname: String, xtype: String, op: String, rcode: String, rtype: 
 end
 
 def aug_add(xname: String, xtype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{xname} + #{rcode}", "Int"]) if xtype == "Int" and rtype == "Int"
+  rhs = group_operand(rcode)
+  return ok(["#{xname} + #{rhs}", "Int"]) if xtype == "Int" and rtype == "Int"
 
-  return ok(["#{xname} + #{rcode}", "Float"]) if xtype == "Float" and rtype == "Float"
+  return ok(["#{xname} + #{rhs}", "Float"]) if xtype == "Float" and rtype == "Float"
 
-  return ok(["#{xname} + #{rcode}", "String"]) if xtype == "String" and rtype == "String"
+  return ok(["#{xname} + #{rhs}", "String"]) if xtype == "String" and rtype == "String"
 
-  return aug_add_lists(xname, xtype, rcode, rtype) if ann_base(xtype) == "List" and ann_base(rtype) == "List"
+  return aug_add_lists(xname, xtype, rhs, rtype) if ann_base(xtype) == "List" and ann_base(rtype) == "List"
 
-  return ok(["#{xname} + #{rcode}", "Unknown"]) if xtype == "Unknown" or rtype == "Unknown"
+  return ok(["#{xname} + #{rhs}", "Unknown"]) if xtype == "Unknown" or rtype == "Unknown"
 
   error("PY-TYPE-MISMATCH: `+=` needs two numbers, two strings or two lists, found #{xtype} and #{rtype}")
 end
 
-def aug_add_lists(xname: String, xtype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{xname} + #{rcode}", xtype]) if xtype == rtype
+def aug_add_lists(xname: String, xtype: String, rhs: String, rtype: String) -> Result[List[String]]
+  return ok(["#{xname} + #{rhs}", xtype]) if xtype == rtype
 
   x_bare = xtype == "List" or ann_elem(xtype) == "Unknown"
   r_bare = rtype == "List" or ann_elem(rtype) == "Unknown"
-  return ok(["#{xname} + #{rcode}", "List"]) if x_bare and r_bare
+  return ok(["#{xname} + #{rhs}", "List"]) if x_bare and r_bare
 
-  return ok(["#{xname} + #{rcode}", rtype]) if x_bare
+  return ok(["#{xname} + #{rhs}", rtype]) if x_bare
 
-  return ok(["#{xname} + #{rcode}", xtype]) if r_bare
+  return ok(["#{xname} + #{rhs}", xtype]) if r_bare
 
   error("PY-TYPE-MISMATCH: `+=` needs two same-typed lists, found #{xtype} and #{rtype}")
 end
 
 def aug_minus(xname: String, xtype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{xname} - #{rcode}", "Int"]) if xtype == "Int" and rtype == "Int"
+  rhs = group_operand(rcode)
+  return ok(["#{xname} - #{rhs}", "Int"]) if xtype == "Int" and rtype == "Int"
 
-  return ok(["#{xname} - #{rcode}", "Float"]) if xtype == "Float" and rtype == "Float"
+  return ok(["#{xname} - #{rhs}", "Float"]) if xtype == "Float" and rtype == "Float"
 
-  return ok(["#{xname} - #{rcode}", "Unknown"]) if xtype == "Unknown" or rtype == "Unknown"
+  return ok(["#{xname} - #{rhs}", "Unknown"]) if xtype == "Unknown" or rtype == "Unknown"
 
   error("PY-TYPE-MISMATCH: `-=` needs two numbers, found #{xtype} and #{rtype}")
 end
 
 def aug_star(xname: String, xtype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{xname} * #{rcode}", "Int"]) if xtype == "Int" and rtype == "Int"
+  rhs = group_operand(rcode)
+  return ok(["#{xname} * #{rhs}", "Int"]) if xtype == "Int" and rtype == "Int"
 
-  return ok(["#{xname} * #{rcode}", "Float"]) if xtype == "Float" and rtype == "Float"
+  return ok(["#{xname} * #{rhs}", "Float"]) if xtype == "Float" and rtype == "Float"
 
-  return ok(["#{xname} * #{rcode}", "String"]) if xtype == "String" and rtype == "Int"
+  return ok(["#{xname} * #{rhs}", "String"]) if xtype == "String" and rtype == "Int"
 
   if xtype == "Int" and rtype == "String"
     return error("PY-OPERATOR: repeat as `s * n`, not `n * s` = help: write #{rcode} * #{xname}")
@@ -543,9 +552,10 @@ def aug_star(xname: String, xtype: String, rcode: String, rtype: String) -> Resu
 end
 
 def aug_slash(xname: String, xtype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{xname}.to_f / #{rcode}.to_f", "Float"]) if xtype == "Int" and rtype == "Int"
+  rhs = group_operand(rcode)
+  return ok(["#{xname}.to_f / #{rhs}.to_f", "Float"]) if xtype == "Int" and rtype == "Int"
 
-  return ok(["#{xname} / #{rcode}", "Float"]) if xtype == "Float" and rtype == "Float"
+  return ok(["#{xname} / #{rhs}", "Float"]) if xtype == "Float" and rtype == "Float"
 
   if xtype != "Unknown" and rtype != "Unknown"
     return error("PY-TYPE-MISMATCH: `/=` needs two numbers, found #{xtype} and #{rtype}")
@@ -566,6 +576,151 @@ def aug_mod(xname: String, xtype: String, rcode: String, rtype: String) -> Resul
   end
 
   error("PY-OPERATOR: `%=` has no form for #{xtype} and #{rtype}")
+end
+
+# Parenthesizes a compound augmented-assignment right-hand side so the
+# sugar keeps its grouping: `x -= 2 + 3` is `x = x - (2 + 3)`, not
+# `x - 2 + 3`. Atomic operands (names, numbers, temps, calls, indexing,
+# helpers, lone `"..."` strings, an already-wrapped group) pass through
+# untouched, so plain `x += 2` still reads `x = x + 2`. The scan skips
+# string contents, so a literal `"a + b"` stays bare while `"b" + "c"`
+# still groups.
+def group_operand(code: String) -> String
+  return code if code == ""
+
+  return code if wrapped?(code)
+
+  return "(#{code})" if needs_parens?(code)
+
+  code
+end
+
+# Whether `code` is one outer `(...)` pair covering the whole string, so
+# an explicit source group never doubles: `(2 + 3)` stays as emitted.
+def wrapped?(code: String) -> Bool
+  chars = code.split("")
+  return false if chars.empty? or chars[0] != "("
+
+  depth = 0
+  in_string = false
+  i = 0
+  while i < chars.size
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        i += 2
+      else
+        if ch == "\""
+          in_string = false
+        end
+
+        i += 1
+      end
+    else
+      if ch == "\""
+        in_string = true
+        i += 1
+      else
+        if ch == "("
+          depth += 1
+        else
+          if ch == ")"
+            depth -= 1
+            return i == chars.size - 1 if depth == 0
+          end
+        end
+
+        i += 1
+      end
+    end
+  end
+
+  false
+end
+
+# Whether `code` holds a depth-0 operator outside strings, so embedding it
+# as an infix operand would rebind: `2 + 3`, comparisons, `and`/`or`.
+# Calls, indexing, `.to_f`, helpers and temps have none at depth 0.
+def needs_parens?(code: String) -> Bool
+  chars = code.split("")
+  depth = 0
+  in_string = false
+  i = 0
+  while i < chars.size
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        i += 2
+      else
+        if ch == "\""
+          in_string = false
+        end
+
+        i += 1
+      end
+    else
+      if ch == "\""
+        in_string = true
+        i += 1
+      else
+        if ch == "(" or ch == "[" or ch == "{"
+          depth += 1
+          i += 1
+        else
+          if ch == ")" or ch == "]" or ch == "}"
+            depth -= 1
+            i += 1
+          else
+            return true if depth == 0 and op_at?(chars, i)
+
+            i += 1
+          end
+        end
+      end
+    end
+  end
+
+  false
+end
+
+# Whether an operator starts at `chars[i]` (depth 0, outside strings):
+# `==` `!=` `<=` `>=` `<` `>`, spaced `+ - * / %`, or spaced `and`/`or`.
+# `EmitExpr` always spaces its infix operators, so unspaced `<`/`>` only
+# ever come from comparisons.
+def op_at?(chars: List[String], i: Int) -> Bool
+  ch = chars[i]
+  return i + 1 < chars.size and chars[i + 1] == "=" if ch == "=" or ch == "!"
+
+  return true if ch == "<" or ch == ">"
+
+  return spaced_infix?(chars, i) or spaced_word?(chars, i, "and") or spaced_word?(chars, i, "or") if ch == " "
+
+  false
+end
+
+def spaced_infix?(chars: List[String], i: Int) -> Bool
+  return false if i + 2 >= chars.size
+
+  return false if chars[i + 2] != " "
+
+  op = chars[i + 1]
+  op == "+" or op == "-" or op == "*" or op == "/" or op == "%"
+end
+
+def spaced_word?(chars: List[String], i: Int, word: String) -> Bool
+  letters = word.split("")
+  return false if i + letters.size + 1 >= chars.size
+
+  return false if chars[i + letters.size + 1] != " "
+
+  k = 0
+  while k < letters.size
+    return false if chars[i + 1 + k] != letters[k]
+
+    k += 1
+  end
+
+  true
 end
 
 # Whether the declared type accepts the value type: exact names, `Unknown`
@@ -657,11 +812,23 @@ def map_ann(text: String) -> Result[String]
   end
 end
 
-# Only `X | None` unions exist in the subset; anything else refuses.
+# Only `X | None` unions exist in the subset; anything else refuses. An
+# already-`Optional` side stays flat: `Optional[X] | None` is
+# `Optional[X]`, never `Optional[Optional[X]]`.
 def map_union(first: String, second: String, text: String) -> Result[String]
-  return ok("Optional[#{try map_ann(second)}]") if first == "None" or first == "none"
+  if first == "None" or first == "none"
+    inner = try map_ann(second)
+    return ok(inner) if ann_base(inner) == "Optional"
 
-  return ok("Optional[#{try map_ann(first)}]") if second == "None" or second == "none"
+    return ok("Optional[#{inner}]")
+  end
+
+  if second == "None" or second == "none"
+    inner = try map_ann(first)
+    return ok(inner) if ann_base(inner) == "Optional"
+
+    return ok("Optional[#{inner}]")
+  end
 
   error("PY-OUT-OF-SUBSET: union `#{text}` only allows `X | None` = help: write `Optional[X]`")
 end
@@ -829,95 +996,177 @@ def split_top(text: String, sep: String) -> List[String]
 end
 
 def shift_out(out: EmitExpr.Out, base: Int) -> Shifted
-  used = temps_used(out.pre + [out.code])
+  used = shift_used(out.pre + [out.code])
   return Shifted(code: out.code, pre: out.pre, used: used) if base == 0
 
-  Shifted(code: shift_temps(out.code, base), pre: out.pre.map { |line| shift_temps(line, base) }, used: used)
+  Shifted(code: shift_line(out.code, base), pre: out.pre.map { |line| shift_line(line, base) }, used: used)
 end
 
-# How many `py_tN` temps a value used: one past the highest index.
-def temps_used(lines: List[String]) -> Int
-  top = 0
-  for line in lines
-    found = max_temp_in(line)
-    if found > top
-      top = found
-    end
-  end
-
-  top
-end
-
-def max_temp_in(text: String) -> Int
-  chars = text.split("")
-  top = 0
-  i = 0
-  while i < chars.size
-    if temp_at?(chars, i)
-      j = i + 4
-      digits = ""
-      while j < chars.size and digit?(chars[j])
-        digits = "#{digits}#{chars[j]}"
-        j += 1
-      end
-
-      found = parse_int(digits) + 1
+# How many `py_tN` temps a value used: one past the highest index anywhere
+# a temp can hide — the preamble and code plus every `"...#{...}..."`
+# interpolation they carry. The shared `EmitCtx` scan sees code segments
+# and skips literal text, so a quoted `"py_t0"` never bumps the supply.
+def shift_used(texts: List[String]) -> Int
+  top = EmitCtx.max_temp_index(texts)
+  for text in texts
+    for inner in interp_inners(text)
+      found = EmitCtx.max_temp_index([inner])
       if found > top
         top = found
       end
-
-      i = j
-    else
-      i += 1
     end
   end
 
-  top
+  return 0 if top < 0
+
+  top + 1
 end
 
-def temp_at?(chars: List[String], i: Int) -> Bool
-  return false if i + 4 >= chars.size
-
-  chars[i] == "p" and chars[i + 1] == "y" and chars[i + 2] == "_" and chars[i + 3] == "t" and digit?(chars[i + 4])
-end
-
-def digit?(ch: String) -> Bool
-  code = ch.code
-  code >= 48 and code <= 57
-end
-
-def parse_int(digits: String) -> Int
-  num = 0
-  for ch in digits.split("")
-    num = num * 10 + (ch.code - 48)
-  end
-
-  num
-end
-
-# Renames every `py_tN` in `text` to `py_t{base + N}`.
-def shift_temps(text: String, base: Int) -> String
-  chars = text.split("")
+# Renames one emitted line's temps past `base`, inside interpolations too:
+# code outside strings and each `"...#{...}..."` hole shift through the
+# shared `EmitCtx.shift_code`, while literal text (including a quoted
+# `"py_t0"`) stays verbatim.
+def shift_line(text: String, base: Int) -> String
   out = ""
+  cur = ""
+  chars = text.split("")
   i = 0
+  in_string = false
   while i < chars.size
-    if temp_at?(chars, i)
-      j = i + 4
-      digits = ""
-      while j < chars.size and digit?(chars[j])
-        digits = "#{digits}#{chars[j]}"
-        j += 1
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        cur = "#{cur}#{ch}#{chars[i + 1]}"
+        i += 2
+      else
+        if ch == "\""
+          out = "#{out}#{cur}#{ch}"
+          cur = ""
+          in_string = false
+          i += 1
+        else
+          if ch == "#" and i + 1 < chars.size and chars[i + 1] == "{"
+            taken = take_interp(chars, i + 2)
+            cur = "#{cur}#" + "{" + EmitCtx.shift_code(taken.code, base) + "}"
+            i = taken.next
+          else
+            cur = "#{cur}#{ch}"
+            i += 1
+          end
+        end
       end
-
-      out = "#{out}py_t#{base + parse_int(digits)}"
-      i = j
     else
-      out = "#{out}#{chars[i]}"
-      i += 1
+      if ch == "\""
+        out = "#{out}#{EmitCtx.shift_code(cur, base)}"
+        cur = ch
+        in_string = true
+        i += 1
+      else
+        cur = "#{cur}#{ch}"
+        i += 1
+      end
     end
+  end
+
+  if in_string
+    out = "#{out}#{cur}"
+  else
+    out = "#{out}#{EmitCtx.shift_code(cur, base)}"
   end
 
   out
+end
+
+# Every `#{...}` hole inside the `"..."` strings of `text`. Holes never
+# nest: `EmitExpr` hoists a hole holding a `"` to a temp, and a dict
+# literal only balances braces, which the reader tracks.
+def interp_inners(text: String) -> List[String]
+  inners: List[String] = []
+  chars = text.split("")
+  i = 0
+  in_string = false
+  while i < chars.size
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        i += 2
+      else
+        if ch == "\""
+          in_string = false
+          i += 1
+        else
+          if ch == "#" and i + 1 < chars.size and chars[i + 1] == "{"
+            taken = take_interp(chars, i + 2)
+            inners = inners.push(taken.code)
+            i = taken.next
+          else
+            i += 1
+          end
+        end
+      end
+    else
+      if ch == "\""
+        in_string = true
+      end
+
+      i += 1
+    end
+  end
+
+  inners
+end
+
+# Reads the hole after `#{` at `from - 2`: balances braces with string
+# awareness (a dict literal balances; a nested quote was hoisted to a
+# temp by `EmitExpr`, so none appears). Answers the hole code and the
+# offset past the closing `}`.
+def take_interp(chars: List[String], from: Int) -> InterpTake
+  inner = ""
+  depth = 1
+  j = from
+  in_string = false
+  while j < chars.size and depth > 0
+    ch = chars[j]
+    if in_string
+      if ch == "\\" and j + 1 < chars.size
+        inner = "#{inner}#{ch}#{chars[j + 1]}"
+        j += 2
+      else
+        if ch == "\""
+          in_string = false
+        end
+
+        inner = "#{inner}#{ch}"
+        j += 1
+      end
+    else
+      if ch == "\""
+        in_string = true
+        inner = "#{inner}#{ch}"
+        j += 1
+      else
+        if ch == "{"
+          depth += 1
+          inner = "#{inner}#{ch}"
+          j += 1
+        else
+          if ch == "}"
+            depth -= 1
+            if depth > 0
+              inner = "#{inner}#{ch}"
+            end
+
+            j += 1
+          else
+            inner = "#{inner}#{ch}"
+            j += 1
+          end
+        end
+      end
+    end
+  end
+
+  InterpTake(code: inner, next: j)
 end
 
 # Splits an `EmitExpr` message-only error (`CODE: message = help: hint`)
