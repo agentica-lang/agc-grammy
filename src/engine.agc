@@ -8,6 +8,11 @@
 ## captures the indentation of the line it starts on as the block base, and the
 ## `INDENT`/`SAME` builtins consume a line's indentation and compare it with
 ## that base. Offsets stay exact, so spans and error columns are real.
+##
+## Whitespace is implicit: when the grammar defines `WHITESPACE` and/or
+## `COMMENT`, they are matched between the parts of a sequence and between the
+## iterations of a repetition, and after the start rule. Atomic rules (`@`,
+## `$` and anything they call) skip nothing.
 
 import Grammar from "grammar"
 import {Expr} from "grammar"
@@ -16,14 +21,22 @@ import Tree from "tree"
 ## Parses `text` with the rule named `rule_name`; all of `text` must be used.
 def run(grammar: Grammar.Grammar, rule_name: String, text: String) -> Result[Tree.Node]
   rule = try Grammar.rule(grammar, rule_name)
-  ctx = Ctx(grammar: grammar, chars: text.split(""), base: 0)
+  ctx = Ctx(
+    grammar: grammar,
+    chars: text.split(""),
+    base: 0,
+    atomicity: Grammar.Atomicity.Plain,
+    skips: has_skip_rules(grammar),
+  )
+
   outcome = match(ctx, rule.body, 0)
   case outcome.found
     none -> error(failure(text, rule_name, outcome.attempt))
     some(found) ->
-      return error(unconsumed(text, found.pos)) if found.pos < ctx.chars.size
+      stop = skip(ctx.with(atomicity: effective_atomicity(ctx.atomicity, rule.atomicity)), found.pos)
+      return error(unconsumed(text, stop)) if stop < ctx.chars.size
 
-      ok(Tree.Node(rule: rule_name, start: 0, stop: found.pos, children: found.nodes))
+      ok(Tree.Node(rule: rule_name, start: 0, stop: stop, children: found.nodes, tag: none))
   end
 end
 
@@ -32,12 +45,15 @@ private
 # The most labels a message shows.
 LABEL_LIMIT = 6
 
-# Everything matching needs: the grammar, the input characters and the
-# indentation of the block being matched (0 at the top level).
+# Everything matching needs: the grammar, the input characters, the indentation
+# of the block being matched (0 at the top level) and how the enclosing rule
+# treats whitespace.
 struct Ctx
   grammar: Grammar.Grammar
   chars: List[String]
   base: Int
+  atomicity: Grammar.Atomicity
+  skips: Bool
 end
 
 # What one expression matched: where it stopped and the nodes it built.
@@ -75,9 +91,10 @@ def match(ctx: Ctx, expr: Grammar.Expr, pos: Int) -> Outcome
     Expr.RuleRef(name) -> match_ref(ctx, name, pos)
     Expr.Seq(parts) -> match_seq(ctx, parts, pos)
     Expr.Choice(options) -> match_choice(ctx, options, pos)
-    Expr.Repeat(inner, min, max) -> match_repeat(ctx, inner, min, max, pos)
+    Expr.Repeat(inner, min, max) -> match_repeat(ctx, inner, min, max, pos, "")
     Expr.Lookahead(inner) -> match_lookahead(ctx, inner, pos)
     Expr.Negative(inner) -> match_negative(ctx, inner, pos)
+    Expr.Tagged(name, inner) -> match_tagged(ctx, name, inner, pos)
   end
 end
 
@@ -88,7 +105,7 @@ def match_ref(ctx: Ctx, name: String, pos: Int) -> Outcome
     none -> miss(pos, [name])
     some(rule) ->
       if rule.silent
-        outcome = match(inner_ctx(ctx, rule, pos), rule.body, pos)
+        outcome = match(body_ctx(ctx, rule, pos), rule.body, pos)
         Outcome(found: outcome.found, attempt: without_terminals(outcome.attempt))
       else
         match_rule(ctx, rule, pos)
@@ -97,29 +114,60 @@ def match_ref(ctx: Ctx, name: String, pos: Int) -> Outcome
 end
 
 def match_rule(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Outcome
-  outcome = match(inner_ctx(ctx, rule, pos), rule.body, pos)
+  outcome = match(body_ctx(ctx, rule, pos), rule.body, pos)
   case outcome.found
     none ->
       named = Attempt(pos: pos, expected: [Label(text: rule.name, terminal: false)], unexpected: [])
       Outcome(found: none, attempt: merge(outcome.attempt, some(named)))
     some(found) ->
-      node = Tree.Node(rule: rule.name, start: pos, stop: found.pos, children: found.nodes)
+      return Outcome(found: some(found), attempt: outcome.attempt) if !creates_node?(ctx, rule)
+      node = Tree.Node(rule: rule.name, start: pos, stop: found.pos, children: found.nodes, tag: none)
       matched(Progress(pos: found.pos, nodes: [node]))
   end
 end
 
-# A scope rule works against the indentation of the line it starts on.
-def inner_ctx(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Ctx
-  return ctx if !rule.indents
+# The context a rule body runs in: the indentation scope it opens and the
+# atomicity it declares.
+def body_ctx(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Ctx
+  base = ctx.base
+  if rule.indents
+    base = line_indent(ctx.chars, pos)
+  end
 
-  ctx.with(base: line_indent(ctx.chars, pos))
+  ctx.with(base: base, atomicity: effective_atomicity(ctx.atomicity, rule.atomicity))
+end
+
+# A plain rule inherits what its caller does; the rest say it outright, except
+# `!`, which restores the normal behaviour inside an atomic rule.
+def effective_atomicity(inherited: Grammar.Atomicity, declared: Grammar.Atomicity) -> Grammar.Atomicity
+  case declared
+    Grammar.Atomicity.Plain -> inherited
+    Grammar.Atomicity.Atomic -> Grammar.Atomicity.Atomic
+    Grammar.Atomicity.Compound -> Grammar.Atomicity.Compound
+    Grammar.Atomicity.NonAtomic -> Grammar.Atomicity.Plain
+  end
+end
+
+# A rule builds its node unless it runs inside an atomic rule, which drops the
+# nodes of everything it calls but keeps its own token.
+def creates_node?(ctx: Ctx, rule: Grammar.Rule) -> Bool
+  case rule.atomicity
+    Grammar.Atomicity.Atomic -> ctx.atomicity != Grammar.Atomicity.Atomic
+    _ -> effective_atomicity(ctx.atomicity, rule.atomicity) != Grammar.Atomicity.Atomic
+  end
 end
 
 def match_seq(ctx: Ctx, parts: List[Grammar.Expr], pos: Int) -> Outcome
   nodes: List[Tree.Node] = []
   attempt: Optional[Attempt] = none
   at = pos
+  first = true
   for part in parts
+    if !first
+      at = skip(ctx, at)
+    end
+
+    first = false
     outcome = match(ctx, part, at)
     attempt = merge(attempt, outcome.attempt)
     case outcome.found
@@ -145,26 +193,33 @@ def match_choice(ctx: Ctx, options: List[Grammar.Expr], pos: Int) -> Outcome
 end
 
 # Stops on no progress, so a repetition of a nullable expression terminates.
-def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int) -> Outcome
+def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, tag: String) -> Outcome
   nodes: List[Tree.Node] = []
   attempt: Optional[Attempt] = none
   count = 0
   at = pos
   while max < 0 or count < max
+    before = at
+    if count > 0
+      at = skip(ctx, at)
+    end
+
     outcome = match(ctx, inner, at)
     attempt = merge(attempt, outcome.attempt)
     case outcome.found
-      none -> break
+      none ->
+        at = before
+        break
       some(found) ->
         stuck = found.pos == at
-        nodes = append(nodes, found.nodes)
+        nodes = append(nodes, tag_nodes(found.nodes, tag))
         at = found.pos
         count += 1
         if stuck and max >= 0
           # A zero-width iteration repeats the same empty match, so the rest of
           # a bounded repetition is known without matching again.
           while count < max
-            nodes = append(nodes, found.nodes)
+            nodes = append(nodes, tag_nodes(found.nodes, tag))
             count += 1
           end
         end
@@ -179,6 +234,30 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int) ->
   end
 
   Outcome(found: some(Progress(pos: at, nodes: nodes)), attempt: attempt)
+end
+
+# A tag lands on the last node its term built, except over a repetition or an
+# optional, where it names every node they build (as pest does).
+def match_tagged(ctx: Ctx, name: String, inner: Grammar.Expr, pos: Int) -> Outcome
+  case inner
+    Expr.Repeat(each, min, max) -> match_repeat(ctx, each, min, max, pos, name)
+    _ -> last_tagged(match(ctx, inner, pos), name)
+  end
+end
+
+def last_tagged(outcome: Outcome, name: String) -> Outcome
+  case outcome.found
+    none -> outcome
+    some(found) -> matched(Progress(pos: found.pos, nodes: tag_nodes(found.nodes, name)))
+  end
+end
+
+def tag_nodes(nodes: List[Tree.Node], name: String) -> List[Tree.Node]
+  return nodes if nodes.empty? or name.empty?
+
+  last = nodes[nodes.size - 1]
+  tagged = Tree.Node(rule: last.rule, start: last.start, stop: last.stop, children: last.children, tag: some(name))
+  nodes.take(nodes.size - 1).push(tagged)
 end
 
 def match_lookahead(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
@@ -374,6 +453,60 @@ def skip_blank_lines(chars: List[String], pos: Int) -> Int
   at
 end
 
+# Whitespace and comments between two expressions:
+# `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. Atomic rules skip nothing.
+def skip(ctx: Ctx, pos: Int) -> Int
+  return pos if !ctx.skips or ctx.atomicity != Grammar.Atomicity.Plain
+
+  at = skip_while(ctx, "WHITESPACE", pos)
+  looping = true
+  while looping
+    after = skip_once(ctx, "COMMENT", at)
+    if after == at
+      looping = false
+    else
+      at = skip_while(ctx, "WHITESPACE", after)
+    end
+  end
+
+  at
+end
+
+def has_skip_rules(grammar: Grammar.Grammar) -> Bool
+  Grammar.find(grammar, "WHITESPACE").some? or Grammar.find(grammar, "COMMENT").some?
+end
+
+def skip_while(ctx: Ctx, name: String, pos: Int) -> Int
+  at = pos
+  looping = true
+  while looping
+    after = skip_once(ctx, name, at)
+    if after == at
+      looping = false
+    else
+      at = after
+    end
+  end
+
+  at
+end
+
+def skip_once(ctx: Ctx, name: String, pos: Int) -> Int
+  case Grammar.find(ctx.grammar, name)
+    none -> pos
+    some(rule) -> skipped(ctx, rule, pos)
+  end
+end
+
+# A skipped rule runs atomically: it builds no nodes and skips nothing itself.
+def skipped(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Int
+  outcome = match(ctx.with(atomicity: Grammar.Atomicity.Atomic), rule.body, pos)
+  case outcome.found
+    none -> pos
+    some(found) -> found.pos
+  end
+end
+
 # The indentation of the line that holds `pos`: its leading spaces and tabs.
 def line_indent(chars: List[String], pos: Int) -> Int
   start = line_start(chars, pos)
@@ -461,6 +594,7 @@ def describe(expr: Grammar.Expr) -> String
     Expr.Repeat(inner, _, _) -> describe(inner)
     Expr.Lookahead(inner) -> describe(inner)
     Expr.Negative(inner) -> describe(inner)
+    Expr.Tagged(_, inner) -> describe(inner)
     Expr.Seq(_) -> "a sequence"
     Expr.Choice(_) -> "one of several alternatives"
   end

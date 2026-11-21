@@ -15,6 +15,7 @@ import T from "tree"
 export E.run
 export G.Grammar
 export G.Rule
+export G.Atomicity
 export G.Expr
 export G.ClassItem
 export G.UNBOUNDED
@@ -32,4 +33,6 @@ export T.first_child
 export T.last_child
 export T.first
 export T.find_all
+export T.tagged
+export T.first_tagged
 export T.position

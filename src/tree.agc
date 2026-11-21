@@ -1,11 +1,13 @@
 ## The parse tree the engine builds, and the queries user code runs on it.
 
-## A matched rule: its name, the characters it covered and the nodes inside it.
+## A matched rule: its name, the characters it covered, the nodes inside it and
+## the tag the grammar gave it (`#name = term`).
 struct Node
   rule: String
   start: Int
   stop: Int
   children: List[Node]
+  tag: Optional[String]
 end
 
 ## A place in the input, counted from 1.
@@ -72,6 +74,38 @@ def find_all(node: Node, name: String) -> List[Node]
     end
 
     for match in find_all(child, name)
+      found = found.push(match)
+    end
+  end
+
+  found
+end
+
+## The first node at any depth tagged `name`, depth first.
+def first_tagged(node: Node, name: String) -> Optional[Node]
+  found: Optional[Node] = none
+  for child in node.children
+    if child.tag == some(name)
+      found = some(child)
+    else
+      found = first_tagged(child, name)
+    end
+
+    break if found.some?
+  end
+
+  found
+end
+
+## Every node at any depth tagged `name`, depth first.
+def tagged(node: Node, name: String) -> List[Node]
+  found: List[Node] = []
+  for child in node.children
+    if child.tag == some(name)
+      found = found.push(child)
+    end
+
+    for match in tagged(child, name)
       found = found.push(match)
     end
   end

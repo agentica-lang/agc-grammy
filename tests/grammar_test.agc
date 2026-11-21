@@ -1,7 +1,7 @@
 ## Reading `.grammar` text: rules, bodies and validation.
 
 import Grammar from "../src/grammar"
-import {ClassItem, Expr, UNBOUNDED} from "../src/grammar"
+import {Atomicity, ClassItem, Expr, UNBOUNDED} from "../src/grammar"
 
 def main() -> Void
   Test.run([
@@ -106,9 +106,56 @@ def main() -> Void
       try Test.eq(rule.indents, true)
       Test.eq(rule.silent, true)
     end,
-    Test.test("an unsupported modifier fails") do
-      case Grammar.compile("a = @{ \"x\" }")
-        error(e) -> Test.assert(e.message.include?("not supported yet"), e.message)
+    Test.test("the atomic modifiers are read") do
+      atomic = try Grammar.compile("a = @{ \"x\" }")
+      compound = try Grammar.compile("b = ${ \"x\" }")
+      non_atomic = try Grammar.compile("c = !{ \"x\" }")
+      try Test.eq(atomic.rules[0].atomicity, Atomicity.Atomic)
+      try Test.eq(compound.rules[0].atomicity, Atomicity.Compound)
+      try Test.eq(non_atomic.rules[0].atomicity, Atomicity.NonAtomic)
+      Test.eq((try Grammar.compile("d = { \"x\" }")).rules[0].atomicity, Atomicity.Plain)
+    end,
+    Test.test("two of the same modifier fails") do
+      case Grammar.compile("a = @@{ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag wraps the term it names") do
+      grammar = try Grammar.compile("a = { #key = word }\nword = { ASCII_ALPHA }")
+      Test.eq(grammar.rules[0].body, Expr.Tagged("key", Expr.RuleRef("word")))
+    end,
+    Test.test("a tag without a node fails") do
+      case Grammar.compile("a = { #n = \"x\" }")
+        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag on a silent rule fails") do
+      case Grammar.compile("a = { #k = ws }\nws = _{ \" \"* }")
+        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag name is required") do
+      case Grammar.compile("a = { # = \"x\" }")
+        error(e) -> Test.assert(e.message.include?("expected a tag name"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("WHITESPACE and COMMENT are rule names") do
+      grammar = try Grammar.compile("WHITESPACE = _{ \" \" }\nCOMMENT = _{ \"#\" ~ ANY* }")
+      Test.eq(grammar.rules.size, 2)
+    end,
+    Test.test("a WHITESPACE that cannot fail is refused") do
+      case Grammar.compile("WHITESPACE = _{ \"\" }")
+        error(e) -> Test.assert(e.message.include?("cannot fail"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a WHITESPACE that never consumes input is refused") do
+      case Grammar.compile("WHITESPACE = _{ &\" \" }")
+        error(e) -> Test.assert(e.message.include?("must consume input"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

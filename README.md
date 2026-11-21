@@ -101,6 +101,7 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
+| `#name = a` | names the node `a` builds (queries: `Grammy.tagged`) |
 | `( ... )` | grouping |
 
 Single-character builtins, all matching one character: `ASCII_DIGIT`,
@@ -109,12 +110,37 @@ Single-character builtins, all matching one character: `ASCII_DIGIT`,
 `ASCII_ALPHANUMERIC` (alias `ASCII_ALNUM`), `ASCII`, `ANY`. `NEWLINE` matches
 `\n`, `\r\n` or `\r`; `SOI` and `EOI` match the ends of the input.
 
-Between `=` and `{` a rule takes modifiers: `_` builds no node, and `>` opens an
-indentation scope (`>_{` is both).
+Between `=` and `{` a rule takes modifiers: `_` builds no node, `>` opens an
+indentation scope, and `@`, `$`, `!` set the atomicity (`>_{` is both, and at
+most one of `_ @ $ !` may repeat).
 
-There is no implicit whitespace skipping: write `ws` into the grammar, or use a
-silent rule. A repetition without a bound stops on the first iteration that
-makes no progress. Left recursion is not supported (it will not terminate).
+## Whitespace and atomicity
+
+Define `WHITESPACE` and/or `COMMENT` and they are matched implicitly between the
+parts of a sequence, between the iterations of a repetition, and after the start
+rule — exactly `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. They are ordinary rules,
+so they are declared like any other, and the compiler refuses one that can fail
+or that cannot consume input:
+
+```
+WHITESPACE = _{ " " | "	" | NEWLINE }
+COMMENT = _{ "//" ~ (!NEWLINE ~ ANY)* }
+```
+
+Atomicity says what happens inside a rule:
+
+| Modifier | Whitespace inside | Nodes inside |
+|---|---|---|
+| none | skipped | built |
+| `@` atomic | not skipped | dropped: the rule is one token |
+| `$` compound-atomic | not skipped | built |
+| `!` non-atomic | skipped | built, even inside an atomic rule |
+
+A plain rule inherits the atomicity of its caller, which is how `@` swallows
+everything it calls. `!` restores normal behaviour inside it.
+
+A repetition without a bound stops on the first iteration that makes no
+progress. Left recursion is not supported (it will not terminate).
 
 ## Indentation
 
@@ -147,11 +173,13 @@ Grammy.children_of(node, name) -> List[Node]        # direct children
 Grammy.first_child(node, name) / Grammy.last_child(node) -> Optional[Node]
 Grammy.first(node, name) -> Optional[Node]          # depth first
 Grammy.find_all(node, name) -> List[Node]           # depth first
+Grammy.tagged(node, tag) -> List[Node]              # depth first, by tag
+Grammy.first_tagged(node, tag) -> Optional[Node]
 Grammy.position(input, offset) -> Position          # line, column, line_text
 ```
 
-`Grammar`, `Rule`, `Expr`, `ClassItem`, `UNBOUNDED`, `Node` and `Position` are
-re-exported types.
+`Grammar`, `Rule`, `Expr`, `ClassItem`, `Atomicity`, `UNBOUNDED`, `Node` and
+`Position` are re-exported types.
 
 ## The Python subset
 
@@ -197,8 +225,8 @@ live in `tests/` and are run as `agentica test tests`.
 
 ## Not there yet
 
-- no implicit whitespace and no atomicity (`@`, `$`, `!`)
-- no node tags (`#tag = expr`), no node stack (`PUSH`/`PEEK`/`POP`)
-- no packrat memoization and no left recursion
+- no node stack (`PUSH`/`PEEK`/`POP`)
+- a tag must name something that builds a node (pest drops such a tag silently)
+- no packrat memoization; left recursion is refused by the compiler
 - nodes keep no span information other than start/stop offsets
 - the Python example has no functions, lists, dicts or `//`

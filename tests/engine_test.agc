@@ -203,6 +203,106 @@ def main() -> Void
       try Test.eq(Tree.last_child(tree).unwrap!.start, 2)
       Test.eq(Tree.find_all(tree, "none").size, 0)
     end,
+    Test.test("WHITESPACE is skipped between parts") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { \"a\" ~ \"b\" }", "p", "a   b")
+      try Test.eq(tree.stop, 5)
+      Test.eq(Tree.text(tree, "a   b"), "a   b")
+    end,
+    Test.test("WHITESPACE is skipped between iterations") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { item* }\nitem = { ASCII_ALPHA }", "p", "a b c")
+      try Test.eq(Tree.find_all(tree, "item").size, 3)
+      Test.eq(tree.stop, 5)
+    end,
+    Test.test("WHITESPACE is skipped after the start rule") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { \"a\" }", "p", "a  ")
+      Test.eq(tree.stop, 3)
+    end,
+    Test.test("COMMENT is skipped with WHITESPACE") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\nCOMMENT = _{ \"/*\" ~ (!\"*/\" ~ ANY)* ~ \"*/\" }\np = { \"a\" ~ \"b\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "a /* x */ b")
+      Test.eq(tree.stop, 11)
+    end,
+    Test.test("an atomic rule skips nothing and builds one token") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { token }\ntoken = @{ ASCII_ALPHA ~ ASCII_ALPHA }", "p", "ab")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(tree.children[0].children.size, 0)
+    end,
+    Test.test("an atomic rule keeps the text inside it") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { \"a\" ~ token ~ \"z\" }\ntoken = @{ \"b\" ~ \"c\" }"
+      tree = try parse(grammar_text, "p", "a bc z")
+      Test.eq(Tree.text(tree.children[0], "a bc z"), "bc")
+    end,
+    Test.test("a compound-atomic rule keeps its children") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = { values }\nvalues = ${ value ~ \",\" ~ value }\nvalue = { ASCII_DIGIT+ }"
+      )
+
+      tree = try parse(grammar_text, "p", "1,2")
+      try Test.eq(tree.children[0].rule, "values")
+      Test.eq(Tree.find_all(tree, "value").size, 2)
+    end,
+    Test.test("a compound-atomic rule skips nothing") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { values }\nvalues = ${ \"a\" ~ \"b\" }"
+      Test.error?(parse(grammar_text, "p", "a b"))
+    end,
+    Test.test("a non-atomic rule restores skipping inside an atomic one") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { body }\nbody = @{ inner ~ \"!\" }\ninner = !{ \"a\" ~ \"b\" }"
+      tree = try parse(grammar_text, "p", "a b!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.find_all(tree, "inner").size, 1)
+    end,
+    Test.test("a non-atomic rule restores nodes inside an atomic one") do
+      tree = try parse("p = { body }\nbody = @{ inner }\ninner = !{ ASCII_ALPHA+ }\n", "p", "abc")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.children_of(tree.children[0], "inner").size, 1)
+    end,
+    Test.test("a tag names the node its term built") do
+      grammar_text = "p = { #left = digit ~ \",\" ~ #right = digit }\ndigit = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "1,2")
+      left = Tree.first_tagged(tree, "left").unwrap!
+      right = Tree.first_tagged(tree, "right").unwrap!
+      try Test.eq(Tree.text(left, "1,2"), "1")
+      try Test.eq(Tree.text(right, "1,2"), "2")
+      Test.eq(Tree.tagged(tree, "left").size, 1)
+    end,
+    Test.test("a tag over a repetition names every node") do
+      grammar_text = "p = { #d = digit* }\ndigit = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "123")
+      Test.eq(Tree.tagged(tree, "d").size, 3)
+    end,
+    Test.test("an untagged node has no tag") do
+      tree = try parse("p = { ASCII_DIGIT }", "p", "1")
+      try Test.eq(tree.tag, none)
+      Test.eq(Tree.first_tagged(tree, "left"), none)
+    end,
+    Test.test("a pest JSON grammar parses unchanged") do
+      grammar_text = "json = { SOI ~ value ~ EOI }\n"
+      grammar_text += "object = { \"{\" ~ pair ~ (\",\" ~ pair)* ~ \"}\" | \"{\" ~ \"}\" }\n"
+      grammar_text += "pair = { string ~ \":\" ~ value }\n"
+      grammar_text += "array = { \"[\" ~ value ~ (\",\" ~ value)* ~ \"]\" | \"[\" ~ \"]\" }\n"
+      grammar_text += "value = { string | number | object | array | bool | null }\n"
+      grammar_text += "string = @{ \"\\\"\" ~ inner ~ \"\\\"\" }\n"
+      grammar_text += "inner = @{ (!(\"\\\"\" | \"\\\\\" | '\\u{0000}'..'\\u{001F}') ~ ANY)* ~ (escape ~ inner)? }\n"
+      grammar_text += (
+        "escape = @{ \"\\\\\" ~ (\"\\\"\" | \"\\\\\" | \"/\" | \"b\" | \"f\" | \"n\" | \"r\" | \"t\" | unicode) }\n"
+      )
+
+      grammar_text += "unicode = @{ \"u\" ~ ASCII_HEX_DIGIT{4} }\n"
+      grammar_text += "number = @{ \"-\"? ~ int ~ (\".\" ~ ASCII_DIGIT+ ~ exp? | exp)? }\n"
+      grammar_text += "int = @{ \"0\" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }\n"
+      grammar_text += "exp = @{ (\"E\" | \"e\") ~ (\"+\" | \"-\")? ~ ASCII_DIGIT+ }\n"
+      grammar_text += "bool = { \"true\" | \"false\" }\n"
+      grammar_text += "null = { \"null\" }\n"
+      grammar_text += "WHITESPACE = _{ \" \" | \"\\t\" | \"\\r\" | \"\\n\" }"
+      input = "{\"a\": [1, -2.5e3, true, null], \"b\": {\"c\": \"x\\n\"}}"
+      tree = try parse(grammar_text, "json", input)
+      try Test.eq(Tree.find_all(tree, "pair").size, 3)
+      try Test.eq(Tree.find_all(tree, "string").size, 4)
+      Test.eq(Tree.find_all(tree, "inner").size, 0)
+    end,
     Test.test("position counts lines and columns") do
       where = Tree.position("ab\ncd\n", 4)
       try Test.eq(where.line, 2)
