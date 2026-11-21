@@ -154,10 +154,11 @@ def main() -> Void
           "  ok()",
           "end",
           "",
+          "e: String = \"\"",
           "case py_try_body0()",
           "  ok(_) -> nil",
           "  error(py_try_err0) ->",
-          "    e: String = py_try_err0.message",
+          "    e = py_try_err0.message",
           "    puts(e)",
           "end",
         ],
@@ -198,7 +199,8 @@ def main() -> Void
       )
 
       done = try acc_ok("unused", 0, res, "Void", [])
-      try Test.assert(done.code.include?("    e: String = py_try_err20.message"), done.code.join("\n"))
+      try Test.assert(done.code.include?("e: String = \"\""), done.code.join("\n"))
+      try Test.assert(done.code.include?("    e = py_try_err20.message"), done.code.join("\n"))
       try Test.assert(done.code.include?("    _ = e"), done.code.join("\n"))
       Test.eq(Map.get(done.scope, "e", ""), "String")
     end,
@@ -212,8 +214,68 @@ def main() -> Void
       )
 
       done = try acc_ok("litread", 0, res, "Void", [])
+      try Test.assert(done.code.include?("    e = py_try_err60.message"), done.code.join("\n"))
       try Test.assert(done.code.include?("    _ = e"), done.code.join("\n"))
       Test.eq(Map.get(done.scope, "e", ""), "String")
+    end,
+    Test.test("a trailing return omits the unreachable ok") do
+      res = EmitTry.emit_try(
+        ctx_for("pass", "Int", 70),
+        pass_body(),
+        ["return error(\"boom\")"],
+        ["puts(\"caught\")"],
+        none,
+      )
+
+      done = try acc_ok("tailret", 0, res, "Void", [])
+      try Test.eq(
+        done.code,
+        [
+          "def py_try_body70() -> Result[Void]",
+          "  return error(\"boom\")",
+          "end",
+          "",
+          "case py_try_body70()",
+          "  ok(_) -> nil",
+          "  error(_) ->",
+          "    puts(\"caught\")",
+          "end",
+        ],
+      )
+
+      Test.eq(done.next_temp, 71)
+    end,
+    Test.test("an already-bound e reuses without redeclaring") do
+      base = ctx_for("pass", "Int", 80)
+      ctx = EmitCtx.EmitCtx(
+        source: base.source,
+        file: base.file,
+        scope: {"e": "String"},
+        func_ret: base.func_ret,
+        in_try: base.in_try,
+        next_temp: base.next_temp,
+      )
+
+      res = EmitTry.emit_try(ctx, pass_body(), ["puts(1)"], ["puts(e)"], some(as_occ("e", 10, 11)))
+      done = try acc_ok("reuse", 0, res, "Void", ["e: String = \"old\""])
+      try Test.assert(!done.code.include?("e: String = \"\""), done.code.join("\n"))
+      try Test.assert(done.code.include?("    e = py_try_err80.message"), done.code.join("\n"))
+      Test.eq(Map.get(done.scope, "e", ""), "String")
+    end,
+    Test.test("an already-bound non-string e is refused") do
+      base = ctx_for("pass", "Int", 81)
+      ctx = EmitCtx.EmitCtx(
+        source: base.source,
+        file: base.file,
+        scope: {"e": "Int"},
+        func_ret: base.func_ret,
+        in_try: base.in_try,
+        next_temp: base.next_temp,
+      )
+
+      res = EmitTry.emit_try(ctx, pass_body(), ["puts(1)"], ["puts(e)"], some(as_occ("e", 10, 11)))
+      try assert_no(res, "pass", "PY-TYPE-MISMATCH", 10, 11)
+      ok()
     end,
     Test.test("empty bodies outline to nil and ok") do
       res = EmitTry.emit_try(ctx_for("pass", "", 30), pass_body(), [], [], none)
@@ -308,7 +370,10 @@ def main() -> Void
     end,
     Test.test("a bare return nested in an if reports at the body start") do
       source = "pass"
-      arm = Frontend.CondArm(cond: tnode("cond_expr", 5, 6, []), body: [Stmt.ReturnStmt(none, Frontend.Span(start: 0, stop: 4))])
+      arm = Frontend.CondArm(
+        cond: tnode("cond_expr", 5, 6, []),
+        body: [Stmt.ReturnStmt(none, Frontend.Span(start: 0, stop: 4))],
+      )
 
       body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.IfStmt([arm], [])]
       res = EmitTry.emit_try(ctx_for(source, "Void", 0), body, ["nil"], ["nil"], none)

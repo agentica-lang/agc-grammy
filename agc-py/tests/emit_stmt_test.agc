@@ -239,9 +239,91 @@ def main() -> Void
       try Test.eq(helper_defs(done.helpers), 1)
       try Test.assert(List.first(done.helpers).start_with?("def py_try_body0"), done.helpers.join("\n"))
       try Test.assert(done.code.join("\n").include?("case py_try_body0()"), done.code.join("\n"))
-      try Test.assert(done.code.join("\n").include?("e: String = py_try_err0.message"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("e: String = \"\""), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("e = py_try_err0.message"), done.code.join("\n"))
       try Test.eq(done.scope.get("e", ""), "String")
       try Test.eq(done.next_temp, 1)
+      ok()
+    end,
+    Test.test("top-level raise inside try returns to the handler") do
+      source = "try:\n  raise E(\"boom\")\nexcept:\n  print(9)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("topraise", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 2), stmts), [], [])
+      try Test.assert(done.helpers.join("\n").include?("return error(\"boom\")"), done.helpers.join("\n"))
+      try Test.assert(!done.helpers.join("\n").include?("System.exit"), done.helpers.join("\n"))
+      try Test.assert(!done.helpers.join("\n").include?("  ok()"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body2()"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("raise inside try returns in function context too") do
+      source = "try:\n  raise E(\"boom\")\nexcept:\n  print(9)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      res = EmitStmt.emit_block(stmt_ctx(source, {}, "Int", 0), stmts)
+      done = try assert_ok(res)
+      try Test.assert(done.helpers.join("\n").include?("return error(\"boom\")"), done.helpers.join("\n"))
+      try Test.assert(!done.helpers.join("\n").include?("  ok()"), done.helpers.join("\n"))
+      ok()
+    end,
+    Test.test("outer reads become typed captures") do
+      source = "x: int = 1\ntry:\n  print(x)\nexcept:\n  print(2)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "", 3)
+      done = try acc_ok("cap", 0, EmitStmt.emit_block(ctx, stmts), [], ["x"])
+      try Test.assert(done.helpers.join("\n").include?("def py_try_body3(x: Int)"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body3(x)"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("string literals never capture") do
+      source = "x: int = 1\ntry:\n  print(\"x\")\nexcept:\n  print(2)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "", 4)
+      done = try acc_ok("caplit", 0, EmitStmt.emit_block(ctx, stmts), [], ["x"])
+      try Test.assert(!done.helpers.join("\n").include?("py_try_body5(x"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body5()"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("outer writes are refused") do
+      source = "x: int = 1\ntry:\n  x = 2\nexcept:\n  print(3)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ref = try assert_no(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), "PY-OUT-OF-SUBSET")
+      try Test.assert(ref.message.include?("outer"), ref.message)
+      ok()
+    end,
+    Test.test("augmented outer writes are refused") do
+      source = "x: int = 1\ntry:\n  x += 1\nexcept:\n  print(3)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ref = try assert_no(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), "PY-OUT-OF-SUBSET")
+      try Test.assert(ref.message.include?("outer"), ref.message)
+      ok()
+    end,
+    Test.test("for targets over outer names are refused") do
+      source = "x: int = 0\ntry:\n  for x in xs:\n    print(x)\nexcept:\n  print(1)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"xs": "List[Int]"}, "", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-OUT-OF-SUBSET")
+      try Test.assert(ref.message.include?("outer"), ref.message)
+      ok()
+    end,
+    Test.test("int conversion unwraps inside try") do
+      source = "try:\n  y: int = int(\"bad\")\n  print(y)\nexcept:\n  print(0)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("intbad", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 8), stmts), [], [])
+      try Test.assert(done.helpers.join("\n").include?("y: Int = try \"bad\".to_i"), done.helpers.join("\n"))
+      ok()
+    end,
+    Test.test("bare catchable results unwrap inside try") do
+      source = "try:\n  int(\"bad\")\n  print(1)\nexcept:\n  print(0)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("intstmt", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 9), stmts), [], [])
+      try Test.assert(done.helpers.join("\n").include?("try \"bad\".to_i"), done.helpers.join("\n"))
+      ok()
+    end,
+    Test.test("except e stays visible after the handler") do
+      source = "try:\n  print(1)\nexcept E as e:\n  print(e)\nprint(e)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("eescape", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 7), stmts), [], ["e"])
+      try Test.eq(done.scope.get("e", ""), "String")
+      try Test.assert(done.code.join("\n").include?(quoted(interp("e"))), done.code.join("\n"))
       ok()
     end,
     Test.test("nested try keeps helpers separate with unique ids") do
@@ -253,6 +335,18 @@ def main() -> Void
       try Test.assert(done.helpers.join("\n").include?("def py_try_body11"), done.helpers.join("\n"))
       try Test.assert(done.code.join("\n").include?("case py_try_body11()"), done.code.join("\n"))
       try Test.eq(done.next_temp, 12)
+      ok()
+    end,
+    Test.test("nested try captures outer reads through both helpers") do
+      source = "x: int = 3\ntry:\n  try:\n    print(x)\n  except:\n    print(1)\nexcept:\n  print(2)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("nestcap", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 20), stmts), [], ["x"])
+      try Test.eq(helper_defs(done.helpers), 2)
+      try Test.assert(done.helpers.join("\n").include?("def py_try_body20(x: Int)"), done.helpers.join("\n"))
+      try Test.assert(done.helpers.join("\n").include?("def py_try_body21(x: Int)"), done.helpers.join("\n"))
+      try Test.assert(done.helpers.join("\n").include?("case py_try_body20(x)"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body21(x)"), done.code.join("\n"))
+      try Test.eq(done.next_temp, 22)
       ok()
     end,
     Test.test("return inside a try body is refused before lowering") do
@@ -305,6 +399,28 @@ def main() -> Void
       done = try acc_ok("assert", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), [], ["x"])
       try Test.assert(done.code.join("\n").include?("if !(x > 0)"), done.code.join("\n"))
       try Test.assert(done.code.join("\n").include?("System.exit(1)"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("generated try code catches at runtime") do
+      source = "x: int = 7\ntry:\n  print(x)\n  y: int = int(\"bad\")\n  print(y)\nexcept E as e:\n  print(e)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try assert_ok(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts))
+      helpers = done.helpers.join("\n")
+      inline = done.code.join("\n")
+      program = "#{helpers}\n\ndef main() -> Void\n#{inline.split("\n").map { |line| "  #{line}" }.join("\n")}\nend\n"
+      try File.write_text("/tmp/w3c-spine-try-runtime.agc", program)
+      proc = try Process.spawn_captured("agentica", ["/tmp/w3c-spine-try-runtime.agc"])
+      result = try Process.output(proc, 30000)
+      try Test.assert(
+        result.stdout.include?("7"),
+        "missing capture read:\n#{result.stdout}\n#{result.stderr}\n#{program}",
+      )
+
+      try Test.assert(
+        result.stdout.include?("cannot convert"),
+        "missing catchable int path:\n#{result.stdout}\n#{result.stderr}\n#{program}",
+      )
+
       ok()
     end,
     Test.test("all fragments check clean together") do

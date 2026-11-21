@@ -10,13 +10,17 @@
 ##
 ## The shapes below were each verified with a real `agentica check` on a temp
 ## file before they were written in: the `try` body is outlined into a
-## `def py_try_body{N}() -> Result[Void]` helper ending in `ok()` (a lone
-## `ok()` body checks, so an empty body still outlines), the call site is a
-## `case` with `ok(_) -> nil` and an `error(...)` arm, `raise E("msg")` is
+## `def py_try_body{N}() -> Result[Void]` helper ending in `ok()` unless it
+## already ends with `return` (a trailing `return error(...)` from `raise`
+## falls through without an unreachable `ok()`; a lone `ok()` body checks,
+## so an empty body still outlines), the call site is a `case` with
+## `ok(_) -> nil` and an `error(...)` arm, `raise E("msg")` is
 ## `return error("msg")` inside `-> Result[T]` (probed), failure paths are
 ## `IO.warn` plus `System.exit(1)` (probed, also for `break` inside a `case`
 ## inside a `for`), and `_ = e` marks a bound message read (a bare `error(e)`
-## with no read is `CHECK-UNUSED-VARIABLE`, probed).
+## with no read is `CHECK-UNUSED-VARIABLE`, probed). `except E as e`
+## hoists `e: String = ""` before the `case` (only when unbound) and
+## assigns inside the arm, so later uses see the frontend's flat scope.
 ##
 ## Layout contract: `emit_try` answers one `code` list holding the helper
 ## `def` block first, a blank line, then the `case` dispatch, so the assembler
@@ -25,8 +29,8 @@
 ## `next_temp` (`py_try_body{N}`, `py_try_err{N}`), which advances by one.
 ## `except` classes are accepted syntactically and ignored (classes are not
 ## modeled): every error value reaches the single handler, and `except E as e`
-## binds the message `String` as `e` (rebound in the arm from `e.message`, so
-## the handler sees the subset meaning of `e`). `raise` at the top level
+## binds the message `String` as `e` (hoisted before the `case` and assigned
+## from `e.message`, so the handler sees the subset meaning of `e`). `raise` at the top level
 ## (`func_ret == ""`, where `main` cannot `return`) halts with `IO.warn` plus
 ## `System.exit(1)`: an uncaught raise prints its message to stderr and exits
 ## nonzero, like the backend. A bare `return` carries no span through the
@@ -199,10 +203,16 @@ def is_kwarg?(node: Tree.Node) -> Bool
   node.rule == "arg" and !node.children.empty? and List.last(node.children).rule == "kwarg"
 end
 
-
 private
 
 # Builds the outlined-helper plus dispatch lines for a control-clean body.
+# The helper ends with `ok()` unless its last line already returns (a
+# trailing `return error(...)` from `raise` falls through to the caller
+# without an unreachable `ok()`). An `except ... as e` name is hoisted:
+# it is declared once before the `case` (only when not already bound)
+# and assigned inside the arm, so later uses see the frontend's flat
+# scope instead of a case-local that never escapes. Rebinding an
+# already-bound non-`String` name is refused.
 def ok_try(
   ctx: EmitCtx.EmitCtx,
   try_code: List[String],
@@ -216,18 +226,35 @@ def ok_try(
     body = ["nil"]
   end
 
-  helper_lines = ["def #{helper}() -> Result[Void]"] + EmitCtx.indented(body, 1) + ["  ok()", "end"]
+  tail: List[String] = ["  ok()"]
+  last = List.last(body).strip
+  if last == "return" or last.start_with?("return ")
+    tail = []
+  end
+
+  helper_lines = ["def #{helper}() -> Result[Void]"] + EmitCtx.indented(body, 1) + tail + ["end"]
   arm_head = "  error(_) ->"
   arm_body = handler_or_nil(handler_code)
   scope = ctx.scope
+  pre: List[String] = []
   case caught
     some(occ) ->
+      existing = ctx.scope.get(occ.name, "")
+      if existing != "" and existing != "String" and existing != "Unknown"
+        return EmitCtx.refuse_at(
+          "PY-TYPE-MISMATCH",
+          "except as `#{occ.name}` needs str, found #{existing}",
+          some("pick another name for the message"),
+          occ.span.start,
+          occ.span.stop,
+        )
+      end
+
       arm_head = "  error(#{err}) ->"
-      arm_body = (
-        ["#{occ.name}: String = #{err}.message"] +
-        read_mark(handler_code, occ.name) +
-        handler_or_nil(handler_code)
-      )
+      arm_body = ["#{occ.name} = #{err}.message"] + read_mark(handler_code, occ.name) + handler_or_nil(handler_code)
+      if existing == ""
+        pre = ["#{occ.name}: String = \"\""]
+      end
 
       scope = Map.put(scope, occ.name, "String")
     none -> scope = scope
@@ -236,6 +263,7 @@ def ok_try(
   code = (
     helper_lines +
     [""] +
+    pre +
     ["case #{helper}()", "  ok(_) -> nil", arm_head] +
     EmitCtx.indented(arm_body, 2) +
     ["end"]

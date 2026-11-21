@@ -24,11 +24,16 @@
 ## seeds a new target only for its body, `try` seeds
 ## `except ... as e` as `String` before the handler and keeps it after, and
 ## `while` keeps the incoming scope. Bindings inside `while`/`if`/`for`
-## bodies and reassignments inside an outlined `try` body do not escape to
-## the caller: the helper takes no parameters, so capturing enclosing
-## locals needs the phase 3d call ABI (reported, not implemented here).
+## bodies do not escape to the caller. A `try` body runs in an outlined
+## helper: reads of outer locals become typed read-only captures (helper
+## parameters, verified by `check`), while writes to outer locals are
+## refused at the source instead of silently discarding them. The helper
+## runs with a non-empty `func_ret` (top-level `""` becomes `"Void"`)
+## so `raise` returns an error to the handler instead of exiting.
 ## Catchable `Result` semantics inside a `try` body flow through
-## `EmitExpr` (`try v` unwraps inside the helper); halts stay uncatchable.
+## `EmitExpr` plus lane A `try` unwrapping (`try v` unwraps inside the
+## helper; directly consumed `Result` values unwrap, nested ones refuse);
+## halts stay uncatchable.
 ##
 ## Every failure is a `BlockRes.No` refusal with its span; unsupported
 ## shapes refuse as `PY-OUT-OF-SUBSET` instead of dropping or miscompiling.
@@ -244,9 +249,11 @@ def emit_expr_type(ctx: EmitCtx.EmitCtx, node: Tree.Node) -> Result[String]
 end
 
 # Outlines the `try` body into a helper and dispatches on it. Control is
-# probed before either body lowers, the handler starts from the incoming
-# scope plus `e: String` when bound, helper ids come from the threaded
-# supply, and nested helpers hoist past the new helper.
+# probed before either body lowers, outer writes inside the body are
+# refused, the helper runs with a non-empty `func_ret` so `raise` returns
+# to the handler, outer reads become typed captures, the handler starts
+# from the incoming scope plus `e: String` when bound, helper ids come
+# from the threaded supply, and nested helpers hoist past the new helper.
 def emit_try_block(
   ctx: EmitCtx.EmitCtx,
   try_body: List[Frontend.Stmt],
@@ -259,10 +266,55 @@ def emit_try_block(
     EmitCtx.StmtRes.Ok(_) -> probe = probe
   end
 
-  try_frag = emit_block(ctx.with(in_try: true), try_body)
+  outer_write = find_outer_write(try_body, ctx.scope)
+  case outer_write
+    some(occ) ->
+      return BlockRes.No(
+        EmitCtx.Refusal(
+          code: "PY-OUT-OF-SUBSET",
+          message: "assignment to outer `#{occ.name}` inside a try body has no backend form",
+          help: some("move it out of the try body or copy it to a new name"),
+          start: occ.span.start,
+          stop: occ.span.stop,
+        ),
+      )
+    none -> outer_write = outer_write
+  end
+
+  body_ret = ctx.func_ret
+  if body_ret == ""
+    body_ret = "Void"
+  end
+
+  try_frag = emit_block(ctx.with(in_try: true, func_ret: body_ret), try_body)
   case try_frag
     BlockRes.No(_) -> try_frag
     BlockRes.Ok(try_out) ->
+      caps = try_captures(try_out.code, ctx.scope)
+      cap_types: List[String] = []
+      for name in caps
+        cap_types = cap_types.push(ctx.scope.get(name, ""))
+      end
+
+      index = 0
+      for name in caps
+        ty = List.first(cap_types.drop(index))
+        if ty == "" or ty == "Unknown"
+          fallback = try_fallback(try_body)
+          return BlockRes.No(
+            EmitCtx.Refusal(
+              code: "PY-OUT-OF-SUBSET",
+              message: "try body reads outer `#{name}` with no backend capture form",
+              help: some("move it out of the try body or give it a concrete type"),
+              start: fallback.start,
+              stop: fallback.stop,
+            ),
+          )
+        end
+
+        index += 1
+      end
+
       handler_scope = ctx.scope
       case caught
         some(occ) -> handler_scope = handler_scope.put(occ.name, "String")
@@ -294,7 +346,8 @@ def emit_try_block(
           case res
             EmitCtx.StmtRes.No(ref) -> BlockRes.No(ref)
             EmitCtx.StmtRes.Ok(done) ->
-              parts = split_try(done.code)
+              shaped = with_captures(done.code, handler_out.next_temp, caps, cap_types)
+              parts = split_try(shaped)
               BlockRes.Ok(
                 BlockOut(
                   code: List.first(parts.drop(1)),
@@ -339,4 +392,243 @@ def split_try(lines: List[String]) -> List[List[String]]
   end
 
   [[], lines]
+end
+
+# The first write to an outer name inside `stmts`, if any: assignments
+# and `for` targets that name a caller local are refused instead of
+# silently discarding them in the by-value helper. New bindings inside
+# the body never match `outer`, so only true outer writes refuse.
+def find_outer_write(stmts: List[Frontend.Stmt], outer: Map[String, String]) -> Optional[Frontend.NameOcc]
+  for stmt in stmts
+    hit = write_in(stmt, outer)
+    case hit
+      some(_) -> return hit
+      none -> hit = hit
+    end
+  end
+
+  none
+end
+
+# Checks one statement for an outer write, recursing into nested bodies.
+# A nested `try` contributes both its body and its handler: both run
+# inside the outer helper, so both would discard an outer write.
+def write_in(stmt: Frontend.Stmt, outer: Map[String, String]) -> Optional[Frontend.NameOcc]
+  case stmt
+    Frontend.Stmt.Assigned(occ, _) ->
+      if outer.get(occ.name, "") != ""
+        some(occ)
+      else
+        none
+      end
+
+    Frontend.Stmt.AugAssigned(occ, _, _) ->
+      if outer.get(occ.name, "") != ""
+        some(occ)
+      else
+        none
+      end
+
+    Frontend.Stmt.ForLoop(target, _, body) ->
+      if outer.get(target.name, "") != ""
+        some(target)
+      else
+        find_outer_write(body, outer)
+      end
+
+    Frontend.Stmt.IfStmt(arms, else_body) ->
+      for arm in arms
+        hit = find_outer_write(arm.body, outer)
+        case hit
+          some(_) -> return hit
+          none -> hit = hit
+        end
+      end
+
+      find_outer_write(else_body, outer)
+    Frontend.Stmt.WhileStmt(_, body) -> find_outer_write(body, outer)
+    Frontend.Stmt.TryStmt(inner_try, handler, _) ->
+      hit = find_outer_write(inner_try, outer)
+      case hit
+        some(_) -> hit
+        none -> find_outer_write(handler, outer)
+      end
+
+    _ -> none
+  end
+end
+
+# Outer locals read by the outlined body, in caller scope order: the
+# typed read-only captures the helper takes as parameters.
+def try_captures(code: List[String], outer: Map[String, String]) -> List[String]
+  words = words_in(strip_strings(code.join("\n")))
+  caps: List[String] = []
+  for name in outer.keys()
+    if words.include?(name)
+      caps = caps.push(name)
+    end
+  end
+
+  caps
+end
+
+# Adds capture parameters to the outlined helper and arguments to its
+# call site (`def py_try_bodyN(a: Int)` / `case py_try_bodyN(a)`).
+def with_captures(code: List[String], num: Int, caps: List[String], types: List[String]) -> List[String]
+  return code if caps.empty?
+
+  params: List[String] = []
+  index = 0
+  for name in caps
+    params = params.push("#{name}: #{List.first(types.drop(index))}")
+    index += 1
+  end
+
+  decl = "def py_try_body#{num}(#{params.join(", ")}) -> Result[Void]"
+  call = "case py_try_body#{num}(#{caps.join(", ")})"
+  out: List[String] = []
+  for line in code
+    if line == "def py_try_body#{num}() -> Result[Void]"
+      out = out.push(decl)
+    else
+      if line == "case py_try_body#{num}()"
+        out = out.push(call)
+      else
+        out = out.push(line)
+      end
+    end
+  end
+
+  out
+end
+
+# The first span of a `try` body for capture refusals without a precise
+# name span: the first statement span, else file start.
+def try_fallback(stmts: List[Frontend.Stmt]) -> Frontend.Span
+  for stmt in stmts
+    found = stmt_span(stmt)
+    case found
+      some(span) -> return span
+      none -> found = found
+    end
+  end
+
+  Frontend.Span(start: 0, stop: 0)
+end
+
+# The first span a statement offers for diagnostics.
+def stmt_span(stmt: Frontend.Stmt) -> Optional[Frontend.Span]
+  case stmt
+    Frontend.Stmt.ReturnStmt(value, span) ->
+      case value
+        some(node) -> some(Frontend.Span(start: node.start, stop: node.stop))
+        none -> some(span)
+      end
+
+    Frontend.Stmt.Other(span) -> some(span)
+    Frontend.Stmt.Annotated(occ, _, _) -> some(occ.span)
+    Frontend.Stmt.AliasDef(occ, _) -> some(occ.span)
+    Frontend.Stmt.Assigned(occ, _) -> some(occ.span)
+    Frontend.Stmt.AugAssigned(occ, _, _) -> some(occ.span)
+    Frontend.Stmt.ForLoop(occ, _, _) -> some(occ.span)
+    Frontend.Stmt.WhileStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
+    Frontend.Stmt.IfStmt(arms, else_body) ->
+      for arm in arms
+        return some(Frontend.Span(start: arm.cond.start, stop: arm.cond.stop))
+      end
+
+      some(try_fallback(else_body))
+    Frontend.Stmt.TryStmt(inner_try, handler, _) -> some(try_fallback(inner_try + handler))
+    Frontend.Stmt.ExprStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
+    Frontend.Stmt.AssertStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
+    Frontend.Stmt.RaiseStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
+  end
+end
+
+# Blanks string literals so word scans never read inside them, keeping
+# `#{...}` interpolation as code: `puts("#{x}")` reads `x`, while
+# `puts("x")` does not.
+def strip_strings(text: String) -> String
+  out = ""
+  chars = text.split("")
+  i = 0
+  quote = 0
+  escaped = false
+  while i < chars.size
+    ch = chars[i]
+    code = ch.code
+    if quote == 0
+      if code == 34 or code == 39
+        quote = code
+        out = "#{out} "
+        i += 1
+      else
+        out = "#{out}#{ch}"
+        i += 1
+      end
+    elsif escaped
+      escaped = false
+      out = "#{out} "
+      i += 1
+    elsif code == 92
+      escaped = true
+      out = "#{out} "
+      i += 1
+    elsif code == quote
+      quote = 0
+      out = "#{out} "
+      i += 1
+    else
+      if ch == "#" and i + 1 < chars.size and chars[i + 1] == "{"
+        out = "#{out}#{ch}#{chars[i + 1]}"
+        i += 2
+        depth = 1
+        while i < chars.size and depth > 0
+          inner = chars[i]
+          if inner == "{"
+            depth += 1
+          end
+
+          if inner == "}"
+            depth -= 1
+          end
+
+          out = "#{out}#{inner}"
+          i += 1
+        end
+      else
+        out = "#{out} "
+        i += 1
+      end
+    end
+  end
+
+  out
+end
+
+# Splits text into whole identifier words.
+def words_in(text: String) -> List[String]
+  words: List[String] = []
+  current = ""
+  for ch in text.split("")
+    if word_char?(ch)
+      current = "#{current}#{ch}"
+    else
+      if current != ""
+        words = words.push(current)
+        current = ""
+      end
+    end
+  end
+
+  if current != ""
+    words = words.push(current)
+  end
+
+  words
+end
+
+def word_char?(ch: String) -> Bool
+  code = ch.code
+  (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 95
 end

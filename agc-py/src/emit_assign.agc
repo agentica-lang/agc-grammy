@@ -123,12 +123,29 @@ end
 
 ## Emits an expression statement (`expr_stmt`, `call_stmt`, or a bare
 ## expression node): the value emits through `EmitExpr.emit` and its code
-## stands alone, discarded.
+## stands alone, discarded. Inside a `try` body (`in_try`) a directly
+## consumed `Result[T]` unwraps with `try` so the error reaches the
+## handler; outside `try` it stays a type error (no handler to catch it).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
   case EmitExpr.emit(expr, source, ctx.scope)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
+      if ctx.in_try
+        inner = unwrap_result(out.type)
+        case inner
+          some(_) ->
+            return EmitCtx.StmtRes.Ok(
+              EmitCtx.StmtOut(
+                code: shifted.pre + ["try #{shifted.code}"],
+                scope: ctx.scope,
+                next_temp: ctx.next_temp + shifted.used,
+              ),
+            )
+          none -> shifted = shifted
+        end
+      end
+
       EmitCtx.StmtRes.Ok(
         EmitCtx.StmtOut(code: shifted.pre + [shifted.code], scope: ctx.scope, next_temp: ctx.next_temp + shifted.used),
       )
@@ -280,7 +297,9 @@ end
 
 # Emits `name: Want = <value>` for a declaration or `name = <value>` for a
 # rebinding: the value emits through `EmitExpr.emit` and must keep the
-# declared type.
+# declared type. Inside a `try` body a directly consumed `Result[Inner]`
+# unwraps with `try` when `Inner` keeps the declared type, so catchable
+# conversions like `int(s)` reach the handler.
 def emit_value_binding(
   ctx: EmitCtx.EmitCtx,
   name: String,
@@ -307,6 +326,30 @@ def emit_value_binding(
           ),
         )
       else
+        if ctx.in_try
+          inner = unwrap_result(out.type)
+          case inner
+            some(found) ->
+              if types_match?(want, found)
+                shifted = shift_out(out, ctx.next_temp)
+                line = "#{name} = try #{shifted.code}"
+                if decl
+                  line = "#{name}: #{want} = try #{shifted.code}"
+                end
+
+                return EmitCtx.StmtRes.Ok(
+                  EmitCtx.StmtOut(
+                    code: shifted.pre + [line],
+                    scope: ctx.scope.put(name, want),
+                    next_temp: ctx.next_temp + shifted.used,
+                  ),
+                )
+              end
+
+            none -> inner = inner
+          end
+        end
+
         EmitCtx.refuse_at(
           "PY-TYPE-MISMATCH",
           "cannot bind #{out.type} to `#{name}: #{want}`",
@@ -316,6 +359,14 @@ def emit_value_binding(
         )
       end
   end
+end
+
+# The inner type of `Result[T]`, or none when not a `Result`.
+def unwrap_result(found: String) -> Optional[String]
+  return none if !found.start_with?("Result[")
+  return none if !found.end_with?("]")
+
+  some(found.slice(7, found.length - 8))
 end
 
 # A bare `return` only checks under a `Void` return; anything else is
