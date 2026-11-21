@@ -1,0 +1,59 @@
+# A Python subset for grammy.
+#
+# One statement per line. A suite is one statement, or several joined by `;`,
+# which keeps the grammar free of indentation handling:
+#
+#   while i < 5: total = total + i; i = i + 1
+#
+# Supported: numbers, text, True/False, names, print(...), `+ - * /`,
+# comparisons, `and`, `or`, `not`, parentheses, assignment, `if`/`elif`/`else`
+# and `while`. Rules marked `_` build no node.
+
+ws = _{ (" " | "\t")* }
+nl = _{ "\r\n" | "\r" | "\n" }
+
+ident_start = _{ [a-zA-Z_] }
+ident_char = _{ [a-zA-Z0-9_] }
+word_end = _{ !ident_char }
+gap = _{ (nl | ws)* }
+
+program = _{ (ignored | line)* ~ ws ~ EOF }
+ignored = _{ ws ~ (nl | comment) }
+comment = _{ "#" ~ [^\n]* }
+line = _{ ws ~ statement }
+
+statement = _{ simple | if_stmt | while_loop }
+suite = _{ statement ~ (ws ~ ";" ~ ws ~ statement)* }
+
+simple = _{ assign | call_stmt }
+assign = { name ~ ws ~ "=" ~ ws ~ expr }
+call_stmt = { call }
+
+if_stmt = { "if" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite ~ (gap ~ elif_branch)* ~ (gap ~ else_branch)? }
+elif_branch = { "elif" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite }
+else_branch = { "else" ~ ws ~ ":" ~ ws ~ suite }
+while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite }
+
+expr = _{ or_expr }
+or_expr = { and_expr ~ (ws ~ "or" ~ word_end ~ ws ~ and_expr)* }
+and_expr = { not_expr ~ (ws ~ "and" ~ word_end ~ ws ~ not_expr)* }
+not_expr = _{ boolean_not | comparison }
+boolean_not = { "not" ~ word_end ~ ws ~ not_expr }
+comparison = { sum ~ (ws ~ cmp_op ~ ws ~ sum)? }
+cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+sum = { term ~ (ws ~ add_op ~ ws ~ term)* }
+add_op = { "+" | "-" }
+term = { unary ~ (ws ~ mul_op ~ ws ~ unary)* }
+mul_op = { "*" | "/" }
+unary = _{ minus | atom }
+minus = { "-" ~ ws ~ unary }
+
+atom = _{ number | text | boolean | call | name | group }
+group = { "(" ~ ws ~ expr ~ ws ~ ")" }
+call = { name ~ "(" ~ ws ~ (args ~ ws)? ~ ")" }
+args = _{ expr ~ (ws ~ "," ~ ws ~ expr)* }
+
+number = { ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+text = { "\"" ~ [^"\n]* ~ "\"" | "'" ~ [^'\n]* ~ "'" }
+boolean = { ("True" | "False") ~ word_end }
+name = { ident_start ~ ident_char* }
