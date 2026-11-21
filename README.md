@@ -120,8 +120,9 @@ Define `WHITESPACE` and/or `COMMENT` and they are matched implicitly between the
 parts of a sequence, between the iterations of a repetition, and after the start
 rule — exactly `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. They are ordinary rules,
 so they are declared like any other (write them silent, `= _{ ... }`: a skip rule
-is matched atomically and never builds nodes). The compiler refuses one that can
-never fail (an empty match would repeat forever) or that never consumes input:
+is matched atomically and never builds nodes). As in pest, the compiler refuses
+one that can never fail (so skipping would never move) or that never consumes
+input:
 
 ```
 WHITESPACE = _{ " " | "	" | NEWLINE }
@@ -162,10 +163,10 @@ deeper, and the enclosing scope continues from that line. Tabs count as one
 character each, and blank lines are skipped by `INDENT`/`SAME`, so they never
 close a block.
 
-`INDENT` and `SAME` read the indentation of the line they start on, so nothing is
-skipped before them even with `WHITESPACE` defined. Keep newlines out of
-`WHITESPACE` in an indentation grammar, or the skip will eat the line break they
-need.
+`INDENT` and `SAME` also accept a position that is already inside the leading
+spaces of a line, so implicit whitespace (even one that matches newlines) does
+not hide the indentation they measure: the skip may reach the content of the
+next line and `INDENT` still sees the indentation it left behind.
 
 ## API
 

@@ -61,10 +61,11 @@ its tests in `tests/`, so always pass the folder.
   keeps the nodes, `!` (`NonAtomic`) restores normal behaviour, and a plain rule
   inherits from its caller (`effective_atomicity`). A rule still builds its own
   node unless its caller was atomic (`creates_node?`).
-- Nothing is skipped before `INDENT`/`SAME` (`skip_before`): they measure the
-  indentation of the line they start on.
-- A tag (`#name = term`) lands on the last node its term built, and over `*` or
-  `?` on the last node of every iteration. The validator refuses a tag on an
+- `INDENT`/`SAME` accept a position already inside the leading spaces of a line
+  (`match_indent`), so a skip that crossed the line break does not hide the
+  indentation they measure.
+- A tag (`#name = term`) lands on the last node its term built, and over `*`,
+  `+`, `?` or `{n,m}` on the last node of every iteration. The validator refuses a tag on an
   expression that builds no node. `run` applies the start rule's own atomicity
   through `body_ctx`, so an `@`/`$` start rule behaves like any other.
 - The engine has no memoization and no left-recursion guard: a left-recursive

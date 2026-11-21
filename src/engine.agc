@@ -167,7 +167,7 @@ def match_seq(ctx: Ctx, parts: List[Grammar.Expr], pos: Int) -> Outcome
   first = true
   for part in parts
     if !first
-      at = skip_before(ctx, part, at)
+      at = skip(ctx, at)
     end
 
     first = false
@@ -204,7 +204,7 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
   while max < 0 or count < max
     before = at
     if count > 0
-      at = skip_before(ctx, inner, at)
+      at = skip(ctx, at)
     end
 
     outcome = match(ctx, inner, at)
@@ -378,14 +378,23 @@ def indent_holds?(deeper: Bool, level: Int, base: Int) -> Bool
 end
 
 def match_indent(ctx: Ctx, pos: Int, deeper: Bool) -> Outcome
+  start = line_start(ctx.chars, pos)
+  if pos > start and skip_spaces(ctx.chars, start) >= pos
+    # A skip already crossed the line break and part of the indentation, so the
+    # line is read from its own start and the rest of it is what INDENT takes.
+    after = skip_spaces(ctx.chars, start)
+    return indent_miss(after, deeper) if !indent_holds?(deeper, after - start, ctx.base)
+
+    return matched(Progress(pos: after, nodes: []))
+  end
+
   return indent_miss(pos, deeper) if !at_line_start?(ctx.chars, pos)
 
-  start = skip_blank_lines(ctx.chars, pos)
-  after = skip_spaces(ctx.chars, start)
-  level = after - start
-  return indent_miss(start, deeper) if !indent_holds?(deeper, level, ctx.base)
+  first = skip_blank_lines(ctx.chars, pos)
+  spaces = skip_spaces(ctx.chars, first)
+  return indent_miss(first, deeper) if !indent_holds?(deeper, spaces - first, ctx.base)
 
-  matched(Progress(pos: after, nodes: []))
+  matched(Progress(pos: spaces, nodes: []))
 end
 
 # pest's NEWLINE is `\n`, `\r\n` or `\r`.
@@ -480,21 +489,6 @@ def skip(ctx: Ctx, pos: Int) -> Int
   end
 
   at
-end
-
-# Nothing is skipped before `INDENT`/`SAME`: they measure the indentation of the
-# line they start on, and a skip would eat it.
-def skip_before(ctx: Ctx, next: Grammar.Expr, pos: Int) -> Int
-  return pos if measures_indent?(next)
-
-  skip(ctx, pos)
-end
-
-def measures_indent?(expr: Grammar.Expr) -> Bool
-  case expr
-    Grammar.Expr.Builtin(name) -> name == "INDENT" or name == "SAME"
-    _ -> false
-  end
 end
 
 # Skipping is on unless the enclosing rule is atomic; `NonAtomic` is what a

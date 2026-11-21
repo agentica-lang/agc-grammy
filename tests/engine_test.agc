@@ -352,6 +352,37 @@ def main() -> Void
       try Test.eq(Tree.first(tree, "item").unwrap!.start, 7)
       Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go \n   ab "), "ab")
     end,
+    Test.test("a lookahead for INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ &INDENT ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      Test.eq(Tree.text(tree.children[0], "go\n  ab"), "ab")
+    end,
+    Test.test("a silent alias for INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ block }\nblock = _{ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      Test.eq(Tree.text(tree.children[0], "go\n  ab"), "ab")
+    end,
+    Test.test("a repeated INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n  cd")
+      Test.eq(Tree.find_all(tree, "item").size, 2)
+    end,
+    Test.test("a WHITESPACE with newlines still feeds INDENT") do
+      grammar_text = "WHITESPACE = _{ \" \" | \"\\n\" }\np = >_{ \"go\" ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }"
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 5)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\n  ab"), "ab")
+    end,
     Test.test("an atomic indentation scope keeps the block base") do
       grammar_text = "p = >@{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
       tree = try parse(grammar_text, "p", "go\n  ab")

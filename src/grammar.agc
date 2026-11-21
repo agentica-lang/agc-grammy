@@ -771,15 +771,16 @@ end
 # The first problem in the grammar, if any.
 def first_problem(grammar: Grammar) -> Optional[String]
   rules = grammar.rules
+  cheap = first_of([reserved_problem(rules), duplicate_problem(rules), unknown_ref_problem(rules), tag_problem(rules)])
+  return cheap if cheap.some?
+
+  always = always_rules(rules)
+  still = still_rules(rules)
   first_of([
-    reserved_problem(rules),
-    duplicate_problem(rules),
-    whitespace_problem(rules),
-    unknown_ref_problem(rules),
-    tag_problem(rules),
+    whitespace_problem(rules, always, still),
     recursion_problem(rules),
-    repetition_problem(rules),
-    choice_problem(rules),
+    repetition_problem(rules, always, still),
+    choice_problem(rules, always),
   ])
 end
 
@@ -814,13 +815,14 @@ def duplicate_problem(rules: List[Rule]) -> Optional[String]
 end
 
 # `WHITESPACE` and `COMMENT` are repeated while they match, so a body that cannot
-# fail (it matches the empty string) or that never consumes input would spin.
-def whitespace_problem(rules: List[Rule]) -> Optional[String]
-  always = always_rules(rules)
-  still = still_rules(rules)
+# fail (it matches the empty string) or that never consumes input makes skipping
+# meaningless. pest refuses both, and so do we.
+def whitespace_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
   for candidate in rules
     next if candidate.name != "WHITESPACE" and candidate.name != "COMMENT"
-    return some("grammar: #{candidate.name} is skipped, so it cannot fail") if always_with?(candidate.body, always)
+    if always_with?(candidate.body, always)
+      return some("grammar: #{candidate.name} is skipped, so it must be able to fail")
+    end
 
     if still_with?(candidate.body, still)
       return some("grammar: #{candidate.name} is skipped, so it must consume input")
@@ -916,7 +918,7 @@ def builds_node?(expr: Expr, rules: List[Rule], seen: Set[String]) -> Bool
   case expr
     Expr.RuleRef(name) -> ref_builds_node?(name, rules, seen)
     Expr.Seq(parts) -> parts.any? { |part| builds_node?(part, rules, seen) }
-    Expr.Choice(options) -> options.all? { |option| builds_node?(option, rules, seen) }
+    Expr.Choice(options) -> options.any? { |option| builds_node?(option, rules, seen) }
     Expr.Repeat(inner, _, _) -> builds_node?(inner, rules, seen)
     Expr.Tagged(_, inner) -> builds_node?(inner, rules, seen)
     _ -> false
@@ -1018,9 +1020,7 @@ def left_reachable(start: String, edges: Map[String, Set[String]]) -> Set[String
 end
 
 # Reports a repetition of an expression that cannot end.
-def repetition_problem(rules: List[Rule]) -> Optional[String]
-  always = always_rules(rules)
-  still = still_rules(rules)
+def repetition_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
   for candidate in rules
     problem = repeat_in(candidate.name, candidate.body, always, still)
     return problem if problem.some?
@@ -1066,8 +1066,7 @@ def nested_repeat(owner: String, parts: List[Expr], always: Set[String], still: 
 end
 
 # Reports a choice arm that cannot fail, which hides the arms after it.
-def choice_problem(rules: List[Rule]) -> Optional[String]
-  always = always_rules(rules)
+def choice_problem(rules: List[Rule], always: Set[String]) -> Optional[String]
   for candidate in rules
     problem = choice_in(candidate.name, candidate.body, always)
     return problem if problem.some?

@@ -92,7 +92,7 @@ author almost always wrote something else.
 | the start rule must consume the whole input (`EOI`) | yes | yes |
 | `WHITESPACE`/`COMMENT` run between tokens | yes | yes |
 | indentation-aware matching (`INDENT`, `SAME`) | no | yes (extension) |
-| atomic rules stop whitespace skipping and child nodes | yes | yes |
+| atomic rules stop whitespace skipping and child nodes | yes | yes (`$`/`!` children keep theirs, as in pest) |
 | stack mutation with rollback on a failed alternative | yes | no |
 | furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |
@@ -172,13 +172,15 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
    into called rules; a plain rule inherits it, `!` restores it. `WHITESPACE`
    and `COMMENT` are skipped between sequence parts and repetition iterations
    and once after the start rule, as `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`;
-   atomic rules skip nothing and `@` drops the nodes of everything it calls.
+   atomic rules skip nothing and `@` drops the nodes of the rules it calls that
+   do not declare their own atomicity (`$` and `!` keep theirs, as pest does).
    The validator refuses a skipped rule that can never fail or that never
    consumes input, as pest's `validate_whitespace_comment` does.
    Deviation: a skip rule is matched atomically, so it never builds nodes even
    when it is not declared silent; pest inserts those nodes into the tree.
-   Also: a sequence does not skip before `INDENT`/`SAME`, which are ours and
-   measure the indentation a skip would eat (pest has no equivalent).
+   Also: `INDENT`/`SAME` are ours and accept a position inside the leading
+   spaces of a line, so implicit skipping cannot hide the indentation they
+   measure (pest has no equivalent).
 5. **Node tags** — done: `#name = term` parses to `Expr.Tagged`, `Node.tag`
    carries it, `Tree.tagged`/`first_tagged` query it. A tag names the last node
    its term built, and over `*` or `?` the last node of every iteration, which

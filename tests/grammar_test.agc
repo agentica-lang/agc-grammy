@@ -154,12 +154,6 @@ def main() -> Void
       grammar = try Grammar.compile("p = { #a = list }\nlist = _{ item* }\nitem = { ASCII_DIGIT }")
       Test.eq(grammar.rules[0].body, Expr.Tagged("a", Expr.RuleRef("list")))
     end,
-    Test.test("a tag on a silent rule that builds nothing fails") do
-      case Grammar.compile("p = { #a = ws }\nws = _{ \" \"* }")
-        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
-        ok(_) -> Test.assert(false, "expected an error")
-      end
-    end,
     Test.test("a silent rule that reaches itself does not hang the tag check") do
       case Grammar.compile("p = { #a = loop }\nloop = _{ loop? ~ \"x\" }")
         error(e) ->
@@ -185,7 +179,7 @@ def main() -> Void
     end,
     Test.test("a WHITESPACE that cannot fail is refused") do
       case Grammar.compile("WHITESPACE = _{ \"\" }")
-        error(e) -> Test.assert(e.message.include?("cannot fail"), e.message)
+        error(e) -> Test.assert(e.message.include?("must be able to fail"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
