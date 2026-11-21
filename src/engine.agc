@@ -68,6 +68,7 @@ end
 def match(ctx: Ctx, expr: Grammar.Expr, pos: Int) -> Outcome
   case expr
     Expr.Literal(text) -> match_literal(text, ctx.chars, pos)
+    Expr.Insensitive(text) -> match_insensitive(text, ctx.chars, pos)
     Expr.CharClass(negated, items) -> match_class(negated, items, ctx.chars, pos)
     Expr.AnyChar -> match_any(ctx.chars, pos)
     Expr.Builtin(name) -> match_builtin(ctx, name, pos)
@@ -159,6 +160,15 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int) ->
         nodes = append(nodes, found.nodes)
         at = found.pos
         count += 1
+        if stuck and max >= 0
+          # A zero-width iteration repeats the same empty match, so the rest of
+          # a bounded repetition is known without matching again.
+          while count < max
+            nodes = append(nodes, found.nodes)
+            count += 1
+          end
+        end
+
         break if stuck
     end
   end
@@ -187,6 +197,25 @@ def match_negative(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
       refused = Attempt(pos: pos, expected: [], unexpected: [Label(text: describe(inner), terminal: false)])
       Outcome(found: none, attempt: some(refused))
   end
+end
+
+# An insensitive literal compares case by case with an ASCII fold, as pest:
+# U+212A KELVIN SIGN is not an ASCII `K`, so `^"k"` does not match it.
+def match_insensitive(text: String, chars: List[String], pos: Int) -> Outcome
+  parts = text.split("")
+  for i in 0...parts.size
+    at = pos + i
+    return miss(at, ["^#{text.inspect}"]) if at >= chars.size or ascii_down(chars[at]) != ascii_down(parts[i])
+  end
+
+  matched(Progress(pos: pos + parts.size, nodes: []))
+end
+
+def ascii_down(c: String) -> String
+  code = c.code
+  return String.from_code(code + 32) if code >= 65 and code <= 90
+
+  c
 end
 
 def match_literal(text: String, chars: List[String], pos: Int) -> Outcome
@@ -424,6 +453,7 @@ end
 def describe(expr: Grammar.Expr) -> String
   case expr
     Expr.Literal(text) -> text.inspect
+    Expr.Insensitive(text) -> "^#{text.inspect}"
     Expr.CharClass(negated, items) -> class_text(negated, items)
     Expr.AnyChar -> "any character"
     Expr.Builtin(name) -> builtin_label(name)

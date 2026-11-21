@@ -150,6 +150,49 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("an insensitive literal ignores case") do
+      try Test.ok?(parse("p = { ^\"abc\" }", "p", "AbC"))
+      Test.error?(parse("p = { ^\"abc\" }", "p", "abd"))
+    end,
+    Test.test("repetition bounds") do
+      try Test.ok?(parse("p = { \"a\"{2} }", "p", "aa"))
+      try Test.error?(parse("p = { \"a\"{2} }", "p", "a"))
+      try Test.ok?(parse("p = { \"a\"{2,3} ~ EOI }", "p", "aaa"))
+      Test.error?(parse("p = { \"a\"{2,3} ~ EOI }", "p", "aaaa"))
+    end,
+    Test.test("a pest range matches one character") do
+      tree = try parse("p = { 'a'..'z'+ ~ EOI }", "p", "abc")
+      try Test.eq(tree.stop, 3)
+      Test.error?(parse("p = { 'a'..'z'+ }", "p", "ab1"))
+    end,
+    Test.test("a bounded repetition at match time") do
+      try Test.ok?(parse("p = { \"a\"{,2} ~ EOI }", "p", "a"))
+      try Test.ok?(parse("p = { \"a\"{,2} ~ EOI }", "p", "aa"))
+      try Test.error?(parse("p = { \"a\"{,2} ~ EOI }", "p", "aaa"))
+      Test.ok?(parse("p = { \"a\"{0} ~ \"b\" }", "p", "b"))
+    end,
+    Test.test("a bounded repetition repeats a zero-width expression") do
+      grammar_text = "p = { (&\"x\"){2} ~ \"x\" }"
+      tree = try parse(grammar_text, "p", "x")
+      try Test.eq(tree.stop, 1)
+      Test.ok?(parse("p = { \"\"{3} ~ \"x\" }", "p", "x"))
+    end,
+    Test.test("a bounded zero-width repetition is not slow") do
+      start = Time.monotonic_ms()
+      tree = try parse("p = { \"\"{5000} ~ \"x\" }", "p", "x")
+      elapsed = Time.monotonic_ms() - start
+      try Test.eq(tree.stop, 1)
+      Test.assert(elapsed < 1000, "5000 zero-width iterations took #{elapsed} ms")
+    end,
+    Test.test("escapes inside a character class") do
+      tree = try parse("p = { [\\x41-\\x43]+ }", "p", "ABC")
+      Test.eq(Tree.text(tree, "ABC"), "ABC")
+    end,
+    Test.test("a comment inside a body is skipped") do Test.ok?(parse("p = { \"a\" ~ /* c */ \"b\" }", "p", "ab")) end,
+    Test.test("an insensitive literal folds ASCII only") do
+      try Test.ok?(parse("p = { ^\"k\" }", "p", "K"))
+      Test.error?(parse("p = { ^\"k\" }", "p", String.from_code(8490)))
+    end,
     Test.test("tree queries") do
       grammar_text = "p = { item* }\nitem = { ASCII_DIGIT }"
       tree = try parse(grammar_text, "p", "123")

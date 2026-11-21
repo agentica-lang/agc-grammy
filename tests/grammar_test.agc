@@ -53,10 +53,52 @@ def main() -> Void
       grammar = try Grammar.compile("a = { \"a\\\"b\\n\" }")
       Test.eq(grammar.rules[0].body, Expr.Literal("a\"b\n"))
     end,
-    Test.test("comments, blanks and a missing separator") do
-      grammar = try Grammar.compile("# a grammar\n\na = { \"x\" }\n\nb = { a \"y\" }\n")
+    Test.test("line and block comments are skipped") do
+      grammar = try Grammar.compile("// a grammar\n/* nested /* x */ y */\n\na = { \"x\" }\n\nb = { a ~ \"y\" }\n")
       try Test.eq(grammar.rules.size, 2)
       Test.eq(grammar.rules[1].body, Expr.Seq([Expr.RuleRef("a"), Expr.Literal("y")]))
+    end,
+    Test.test("a missing ~ fails") do
+      case Grammar.compile("b = { \"x\" \"y\" }")
+        error(e) -> Test.assert(e.message.include?("expected ~"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("repetition bounds") do
+      grammar = try Grammar.compile("a = { \"x\"{3} ~ \"y\"{2,} ~ \"z\"{,4} ~ \"w\"{1,2} }")
+      expected = Expr.Seq([
+        Expr.Repeat(Expr.Literal("x"), 3, 3),
+        Expr.Repeat(Expr.Literal("y"), 2, UNBOUNDED),
+        Expr.Repeat(Expr.Literal("z"), 0, 4),
+        Expr.Repeat(Expr.Literal("w"), 1, 2),
+      ])
+
+      Test.eq(grammar.rules[0].body, expected)
+    end,
+    Test.test("a minimum above the maximum fails") do
+      case Grammar.compile("a = { \"x\"{3,2} }")
+        error(e) -> Test.assert(e.message.include?("above the maximum"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an insensitive literal") do
+      grammar = try Grammar.compile("a = { ^\"true\" }")
+      Test.eq(grammar.rules[0].body, Expr.Insensitive("true"))
+    end,
+    Test.test("a pest range is a class span") do
+      grammar = try Grammar.compile("a = { 'a'..'z' }")
+      Test.eq(grammar.rules[0].body, Expr.CharClass(false, [ClassItem.Span("a", "z")]))
+    end,
+    Test.test("escapes in literals") do
+      grammar = try Grammar.compile("a = { \"\\x41\" ~ \"\\u{1F600}\" ~ \"\\0\" ~ \"\\'\" }")
+      expected = Expr.Seq([
+        Expr.Literal("A"),
+        Expr.Literal(String.from_code(128512)),
+        Expr.Literal(String.from_code(0)),
+        Expr.Literal("'"),
+      ])
+
+      Test.eq(grammar.rules[0].body, expected)
     end,
     Test.test("modifiers combine") do
       grammar = try Grammar.compile("a = >_{ \"x\" }")
@@ -67,6 +109,87 @@ def main() -> Void
     Test.test("an unsupported modifier fails") do
       case Grammar.compile("a = @{ \"x\" }")
         error(e) -> Test.assert(e.message.include?("not supported yet"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a trailing ~ fails") do
+      case Grammar.compile("a = { \"x\" ~ }")
+        error(e) -> Test.assert(e.message.include?("expected an expression after ~"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a caret without a string fails") do
+      case Grammar.compile("a = { ^x }")
+        error(e) -> Test.assert(e.message.include?("expected a string after ^"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a malformed \\x escape fails") do
+      case Grammar.compile("a = { \"\\xZZ\" }")
+        error(e) -> Test.assert(e.message.include?("two hex digits"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a malformed \\u escape fails") do
+      short = Grammar.compile("a = { \"\\u{9}\" }")
+      surrogate = Grammar.compile("a = { \"\\u{D800}\" }")
+      above = Grammar.compile("a = { \"\\u{110000}\" }")
+      try Test.assert(short.message.include?("two to six hex digits"), short.message)
+      try Test.assert(surrogate.message.include?("is not a character code"), surrogate.message)
+      Test.assert(above.message.include?("is not a character code"), above.message)
+    end,
+    Test.test("a descending range fails") do
+      case Grammar.compile("a = { 'z'..'a' }")
+        error(e) -> Test.assert(e.message.include?("descending"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an unterminated block comment fails") do
+      case Grammar.compile("a = { /* x }")
+        error(e) -> Test.assert(e.message.include?("expected an expression"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an exact zero bound") do
+      grammar = try Grammar.compile("a = { \"x\"{0} }")
+      Test.eq(grammar.rules[0].body, Expr.Repeat(Expr.Literal("x"), 0, 0))
+    end,
+    Test.test("blanks inside a bound") do
+      grammar = try Grammar.compile("a = { \"x\"{ 2 , 3 } }")
+      Test.eq(grammar.rules[0].body, Expr.Repeat(Expr.Literal("x"), 2, 3))
+    end,
+    Test.test("a bound too large for Int fails") do
+      case Grammar.compile("a = { \"x\"{99999999999999999999} }")
+        error(e) -> Test.assert(e.message.include?("too large"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a bounded repetition of a non-consuming expression compiles") do
+      Test.ok?(Grammar.compile("a = { (&\"x\"){2} }"))
+    end,
+    Test.test("a blank after the caret is allowed") do
+      grammar = try Grammar.compile("a = { ^ \"abc\" }")
+      Test.eq(grammar.rules[0].body, Expr.Insensitive("abc"))
+    end,
+    Test.test("a comment inside a body is skipped") do
+      grammar = try Grammar.compile("a = { \"x\" ~ /* c */ \"y\" ~ // tail\n \"z\" }")
+      Test.eq(grammar.rules[0].body, Expr.Seq([Expr.Literal("x"), Expr.Literal("y"), Expr.Literal("z")]))
+    end,
+    Test.test("a huge bound on a zero-width expression fails") do
+      case Grammar.compile("a = { (&\"x\"){20000} }")
+        error(e) -> Test.assert(e.message.include?("zero-width"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("unicode properties are refused") do
+      case Grammar.compile("a = { \"\\p{L}\" }")
+        error(e) -> Test.assert(e.message.include?("unicode properties"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an unterminated character literal names the character") do
+      case Grammar.compile("a = { 'x }")
+        error(e) -> Test.assert(e.message.include?("unterminated character"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

@@ -1,13 +1,13 @@
-# A Python subset for grammy, with real indentation blocks.
-#
-# `suite = >_{ ... }` opens an indentation scope: grammy remembers the
-# indentation of the line the suite starts on, and the `INDENT`/`SAME` builtins
-# consume the next line's indentation and compare it with that scope. No input
-# is rewritten, so spans and error columns stay exact.
-#
-# Supported: numbers, text, True/False, names, print(...), `+ - * /`,
-# comparisons, `and`, `or`, `not`, parentheses, assignment, `if`/`elif`/`else`
-# and `while`. Rules marked `_` build no node.
+// A Python subset for grammy, with real indentation blocks.
+//
+// `suite = >_{ ... }` opens an indentation scope: grammy remembers the
+// indentation of the line the suite starts on, and the `INDENT`/`SAME` builtins
+// consume the next line's indentation and compare it with that scope. No input
+// is rewritten, so spans and error columns stay exact.
+//
+// Supported: numbers, text, True/False, names, print(...), `+ - * /`,
+// comparisons, `and`, `or`, `not`, parentheses, assignment, `if`/`elif`/`else`
+// and `while`. Rules marked `_` build no node.
 
 nl = _{ "\r\n" | "\n" | "\r" }
 ws = _{ (" " | "\t")* }
