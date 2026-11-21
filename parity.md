@@ -99,7 +99,7 @@ author almost always wrote something else.
 | `PEEK[a..b]` stack slices | yes (grammar-extras) | no |
 | compile-time check that a `POP` is protected by a `PUSH` | yes (call graph) | partial (whole grammar) |
 | left recursion through a stack read | analysed | refused (reads count as nullable, so the check is conservative) |
-| `DROP*` / a repetition that only shrinks the stack | allowed | allowed (drains, then stops) |
+| `DROP*` / a repetition that only shrinks the stack | allowed | allowed (drains, then stops); any other zero-width repetition over the limit is still refused |
 | stack use inside `WHITESPACE`/`COMMENT` | shares the parse stack | refused (skipping stays side-effect free) |
 | furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |

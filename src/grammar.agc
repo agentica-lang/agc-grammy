@@ -1186,12 +1186,28 @@ end
 def repeat_problem(owner: String, inner: Expr, max: Int, always: Set[String], still: Set[String]) -> Optional[String]
   if max < 0
     return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
-    return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+    # A `DROP` loop consumes no input but shrinks the stack, so it always ends.
+    if still_with?(inner, still) and !drains_stack?(inner)
+      return some("grammar: rule #{owner} repeats an expression that never consumes input")
+    end
   elsif still_with?(inner, still) and max > ZERO_WIDTH_LIMIT
     return some("grammar: rule #{owner} repeats a zero-width expression more than #{ZERO_WIDTH_LIMIT} times")
   end
 
   repeat_in(owner, inner, always, still)
+end
+
+# Whether the expression only pops the stack, so an endless repetition of it
+# still ends: `DROP*`, `(DROP ~ DROP)*`.
+def drains_stack?(expr: Expr) -> Bool
+  case expr
+    Expr.Drop -> true
+    Expr.Seq(parts) -> parts.all? { |part| drains_stack?(part) }
+    Expr.Choice(options) -> options.all? { |option| drains_stack?(option) }
+    Expr.Repeat(inner, _, _) -> drains_stack?(inner)
+    Expr.Tagged(_, inner) -> drains_stack?(inner)
+    _ -> false
+  end
 end
 
 def nested_repeat(owner: String, parts: List[Expr], always: Set[String], still: Set[String]) -> Optional[String]
@@ -1364,9 +1380,7 @@ def still_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Tagged(_, inner) -> still_with?(inner, names)
     Expr.Push(inner) -> still_with?(inner, names)
     Expr.PushLiteral(_) -> true
-    # `DROP` consumes no input, but it shrinks the stack, so `DROP*` drains and
-    # stops: refusing it would contradict the engine, which drains too.
-    Expr.Drop -> false
+    Expr.Drop -> true
     Expr.Pop -> false
     Expr.PopAll -> false
     Expr.Peek -> false

@@ -170,6 +170,13 @@ def main() -> Void
       grammar = try Grammar.compile("a = { PUSH_LITERAL(\"x\") ~ DROP* }")
       Test.eq(grammar.rules.size, 1)
     end,
+    Test.test("a bound does not become an excuse to build nodes") do
+      grammar_text = "p = { PUSH_LITERAL(\"x\") ~ (SOI | DROP){0,50000} }"
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("more than 10000 times"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a PUSH_LITERAL repetition is still refused") do
       case Grammar.compile("a = { PUSH_LITERAL(\"x\")* }")
         error(e) ->
