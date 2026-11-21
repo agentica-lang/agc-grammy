@@ -48,6 +48,7 @@ import EmitExpr from "emit_expr"
 import EmitFlow from "emit_flow"
 import EmitTry from "emit_try"
 import Frontend from "frontend"
+import {Stmt} from "frontend"
 import Tree from "../../src/tree"
 
 ## One emitted block: inline lines plus hoisted top-level helper lines, the
@@ -67,7 +68,7 @@ end
 
 ## Emits every statement in `body` in order through `ctx`, threading the
 ## immutable scope and temp supply. A refusal anywhere stops the block.
-def emit_block(ctx: EmitCtx.EmitCtx, body: List[Frontend.Stmt]) -> BlockRes
+def emit_block(ctx: EmitCtx.EmitCtx, body: List[Stmt]) -> BlockRes
   current = ctx
   code: List[String] = []
   helpers: List[String] = []
@@ -88,21 +89,21 @@ end
 private
 
 # Emits one statement as a block fragment (helpers empty except for `try`).
-def emit_one(ctx: EmitCtx.EmitCtx, stmt: Frontend.Stmt) -> BlockRes
+def emit_one(ctx: EmitCtx.EmitCtx, stmt: Stmt) -> BlockRes
   case stmt
-    Frontend.Stmt.Annotated(occ, ann, value) -> from_res(EmitAssign.emit_annotated(ctx, occ, ann, value, ctx.source))
-    Frontend.Stmt.AliasDef(occ, ann) -> from_res(EmitAssign.emit_alias(ctx, occ, ann, ctx.source))
-    Frontend.Stmt.Assigned(occ, value) -> from_res(EmitAssign.emit_assigned(ctx, occ, value, ctx.source))
-    Frontend.Stmt.AugAssigned(occ, op, value) -> from_res(EmitAssign.emit_augassigned(ctx, occ, op, value, ctx.source))
-    Frontend.Stmt.ExprStmt(expr) -> from_res(EmitAssign.emit_expr_stmt(ctx, expr, ctx.source))
-    Frontend.Stmt.ReturnStmt(value, span) -> from_res(EmitAssign.emit_return(ctx, value, span, ctx.source))
-    Frontend.Stmt.Other(span) -> emit_other(ctx, span)
-    Frontend.Stmt.IfStmt(arms, else_body) -> emit_if_block(ctx, arms, else_body)
-    Frontend.Stmt.WhileStmt(cond, body) -> emit_while_block(ctx, cond, body)
-    Frontend.Stmt.ForLoop(target, iterable, body) -> emit_for_block(ctx, target, iterable, body)
-    Frontend.Stmt.TryStmt(try_body, handler_body, caught) -> emit_try_block(ctx, try_body, handler_body, caught)
-    Frontend.Stmt.AssertStmt(cond, msg) -> from_res(EmitChecks.emit_assert(ctx, cond, msg))
-    Frontend.Stmt.RaiseStmt(expr) -> from_res(EmitChecks.emit_raise(ctx, expr))
+    Stmt.Annotated(occ, ann, value) -> from_res(EmitAssign.emit_annotated(ctx, occ, ann, value, ctx.source))
+    Stmt.AliasDef(occ, ann) -> from_res(EmitAssign.emit_alias(ctx, occ, ann, ctx.source))
+    Stmt.Assigned(occ, value) -> from_res(EmitAssign.emit_assigned(ctx, occ, value, ctx.source))
+    Stmt.AugAssigned(occ, op, value) -> from_res(EmitAssign.emit_augassigned(ctx, occ, op, value, ctx.source))
+    Stmt.ExprStmt(expr) -> from_res(EmitAssign.emit_expr_stmt(ctx, expr, ctx.source))
+    Stmt.ReturnStmt(value, span) -> from_res(EmitAssign.emit_return(ctx, value, span, ctx.source))
+    Stmt.Other(span) -> emit_other(ctx, span)
+    Stmt.IfStmt(arms, else_body) -> emit_if_block(ctx, arms, else_body)
+    Stmt.WhileStmt(cond, body) -> emit_while_block(ctx, cond, body)
+    Stmt.ForLoop(target, iterable, body) -> emit_for_block(ctx, target, iterable, body)
+    Stmt.TryStmt(try_body, handler_body, caught) -> emit_try_block(ctx, try_body, handler_body, caught)
+    Stmt.AssertStmt(cond, msg) -> from_res(EmitChecks.emit_assert(ctx, cond, msg))
+    Stmt.RaiseStmt(expr) -> from_res(EmitChecks.emit_raise(ctx, expr))
   end
 end
 
@@ -128,7 +129,7 @@ end
 # Emits each arm body from the incoming scope with a threaded temp supply,
 # then the lane splices the inline lines under its guards. Arm bindings do
 # not escape; temps never overlap between bodies and guards.
-def emit_if_block(ctx: EmitCtx.EmitCtx, arms: List[Frontend.CondArm], else_body: List[Frontend.Stmt]) -> BlockRes
+def emit_if_block(ctx: EmitCtx.EmitCtx, arms: List[Frontend.CondArm], else_body: List[Stmt]) -> BlockRes
   temp = ctx.next_temp
   helpers: List[String] = []
   then_codes: List[List[String]] = []
@@ -170,7 +171,7 @@ end
 
 # Emits the body first, then the lane re-evaluates the guard around it.
 # Body bindings do not escape; the guard preamble sits past body temps.
-def emit_while_block(ctx: EmitCtx.EmitCtx, cond: Tree.Node, body: List[Frontend.Stmt]) -> BlockRes
+def emit_while_block(ctx: EmitCtx.EmitCtx, cond: Tree.Node, body: List[Stmt]) -> BlockRes
   frag = emit_block(ctx, body)
   case frag
     BlockRes.No(_) -> frag
@@ -186,12 +187,7 @@ end
 
 # Seeds a new loop target from the iterable element type for the body.
 # A prebound target keeps its declared type; body bindings do not escape.
-def emit_for_block(
-  ctx: EmitCtx.EmitCtx,
-  target: Frontend.NameOcc,
-  iterable: Tree.Node,
-  body: List[Frontend.Stmt],
-) -> BlockRes
+def emit_for_block(ctx: EmitCtx.EmitCtx, target: Frontend.NameOcc, iterable: Tree.Node, body: List[Stmt]) -> BlockRes
   elem = for_elem(ctx, iterable)
   case elem
     error(e) -> block_no(ctx, iterable, e)
@@ -256,8 +252,8 @@ end
 # from the threaded supply, and nested helpers hoist past the new helper.
 def emit_try_block(
   ctx: EmitCtx.EmitCtx,
-  try_body: List[Frontend.Stmt],
-  handler_body: List[Frontend.Stmt],
+  try_body: List[Stmt],
+  handler_body: List[Stmt],
   caught: Optional[Frontend.NameOcc],
 ) -> BlockRes
   probe = EmitTry.emit_try(ctx, try_body, [], [], caught)
@@ -398,7 +394,7 @@ end
 # and `for` targets that name a caller local are refused instead of
 # silently discarding them in the by-value helper. New bindings inside
 # the body never match `outer`, so only true outer writes refuse.
-def find_outer_write(stmts: List[Frontend.Stmt], outer: Map[String, String]) -> Optional[Frontend.NameOcc]
+def find_outer_write(stmts: List[Stmt], outer: Map[String, String]) -> Optional[Frontend.NameOcc]
   for stmt in stmts
     hit = write_in(stmt, outer)
     case hit
@@ -413,30 +409,30 @@ end
 # Checks one statement for an outer write, recursing into nested bodies.
 # A nested `try` contributes both its body and its handler: both run
 # inside the outer helper, so both would discard an outer write.
-def write_in(stmt: Frontend.Stmt, outer: Map[String, String]) -> Optional[Frontend.NameOcc]
+def write_in(stmt: Stmt, outer: Map[String, String]) -> Optional[Frontend.NameOcc]
   case stmt
-    Frontend.Stmt.Assigned(occ, _) ->
+    Stmt.Assigned(occ, _) ->
       if outer.get(occ.name, "") != ""
         some(occ)
       else
         none
       end
 
-    Frontend.Stmt.AugAssigned(occ, _, _) ->
+    Stmt.AugAssigned(occ, _, _) ->
       if outer.get(occ.name, "") != ""
         some(occ)
       else
         none
       end
 
-    Frontend.Stmt.ForLoop(target, _, body) ->
+    Stmt.ForLoop(target, _, body) ->
       if outer.get(target.name, "") != ""
         some(target)
       else
         find_outer_write(body, outer)
       end
 
-    Frontend.Stmt.IfStmt(arms, else_body) ->
+    Stmt.IfStmt(arms, else_body) ->
       for arm in arms
         hit = find_outer_write(arm.body, outer)
         case hit
@@ -446,8 +442,8 @@ def write_in(stmt: Frontend.Stmt, outer: Map[String, String]) -> Optional[Fronte
       end
 
       find_outer_write(else_body, outer)
-    Frontend.Stmt.WhileStmt(_, body) -> find_outer_write(body, outer)
-    Frontend.Stmt.TryStmt(inner_try, handler, _) ->
+    Stmt.WhileStmt(_, body) -> find_outer_write(body, outer)
+    Stmt.TryStmt(inner_try, handler, _) ->
       hit = find_outer_write(inner_try, outer)
       case hit
         some(_) -> hit
@@ -504,7 +500,7 @@ end
 
 # The first span of a `try` body for capture refusals without a precise
 # name span: the first statement span, else file start.
-def try_fallback(stmts: List[Frontend.Stmt]) -> Frontend.Span
+def try_fallback(stmts: List[Stmt]) -> Frontend.Span
   for stmt in stmts
     found = stmt_span(stmt)
     case found
@@ -517,31 +513,31 @@ def try_fallback(stmts: List[Frontend.Stmt]) -> Frontend.Span
 end
 
 # The first span a statement offers for diagnostics.
-def stmt_span(stmt: Frontend.Stmt) -> Optional[Frontend.Span]
+def stmt_span(stmt: Stmt) -> Optional[Frontend.Span]
   case stmt
-    Frontend.Stmt.ReturnStmt(value, span) ->
+    Stmt.ReturnStmt(value, span) ->
       case value
         some(node) -> some(Frontend.Span(start: node.start, stop: node.stop))
         none -> some(span)
       end
 
-    Frontend.Stmt.Other(span) -> some(span)
-    Frontend.Stmt.Annotated(occ, _, _) -> some(occ.span)
-    Frontend.Stmt.AliasDef(occ, _) -> some(occ.span)
-    Frontend.Stmt.Assigned(occ, _) -> some(occ.span)
-    Frontend.Stmt.AugAssigned(occ, _, _) -> some(occ.span)
-    Frontend.Stmt.ForLoop(occ, _, _) -> some(occ.span)
-    Frontend.Stmt.WhileStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
-    Frontend.Stmt.IfStmt(arms, else_body) ->
+    Stmt.Other(span) -> some(span)
+    Stmt.Annotated(occ, _, _) -> some(occ.span)
+    Stmt.AliasDef(occ, _) -> some(occ.span)
+    Stmt.Assigned(occ, _) -> some(occ.span)
+    Stmt.AugAssigned(occ, _, _) -> some(occ.span)
+    Stmt.ForLoop(occ, _, _) -> some(occ.span)
+    Stmt.WhileStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
+    Stmt.IfStmt(arms, else_body) ->
       for arm in arms
         return some(Frontend.Span(start: arm.cond.start, stop: arm.cond.stop))
       end
 
       some(try_fallback(else_body))
-    Frontend.Stmt.TryStmt(inner_try, handler, _) -> some(try_fallback(inner_try + handler))
-    Frontend.Stmt.ExprStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
-    Frontend.Stmt.AssertStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
-    Frontend.Stmt.RaiseStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
+    Stmt.TryStmt(inner_try, handler, _) -> some(try_fallback(inner_try + handler))
+    Stmt.ExprStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
+    Stmt.AssertStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
+    Stmt.RaiseStmt(expr) -> some(Frontend.Span(start: expr.start, stop: expr.stop))
   end
 end
 

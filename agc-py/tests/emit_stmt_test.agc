@@ -285,14 +285,16 @@ def main() -> Void
     Test.test("outer writes are refused") do
       source = "x: int = 1\ntry:\n  x = 2\nexcept:\n  print(3)\n"
       stmts = try stmts_of(compiled.unwrap!, source)
-      ref = try assert_no(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), "PY-OUT-OF-SUBSET")
+      ctx = stmt_ctx(source, {}, "", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-OUT-OF-SUBSET")
       try Test.assert(ref.message.include?("outer"), ref.message)
       ok()
     end,
     Test.test("augmented outer writes are refused") do
       source = "x: int = 1\ntry:\n  x += 1\nexcept:\n  print(3)\n"
       stmts = try stmts_of(compiled.unwrap!, source)
-      ref = try assert_no(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), "PY-OUT-OF-SUBSET")
+      ctx = stmt_ctx(source, {}, "", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-OUT-OF-SUBSET")
       try Test.assert(ref.message.include?("outer"), ref.message)
       ok()
     end,
@@ -404,7 +406,8 @@ def main() -> Void
     Test.test("generated try code catches at runtime") do
       source = "x: int = 7\ntry:\n  print(x)\n  y: int = int(\"bad\")\n  print(y)\nexcept E as e:\n  print(e)\n"
       stmts = try stmts_of(compiled.unwrap!, source)
-      done = try assert_ok(EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts))
+      ctx = stmt_ctx(source, {}, "", 0)
+      done = try assert_ok(EmitStmt.emit_block(ctx, stmts))
       helpers = done.helpers.join("\n")
       inline = done.code.join("\n")
       program = "#{helpers}\n\ndef main() -> Void\n#{inline.split("\n").map { |line| "  #{line}" }.join("\n")}\nend\n"
