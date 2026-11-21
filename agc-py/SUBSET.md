@@ -176,15 +176,15 @@ is rebinding:
   one character each and must not be mixed with spaces on the same block
   level (`PY-INDENT`).
 - Strings decode at the frontend to plain characters, then emit with only
-  the escapes the backend lexer accepts — `\"`, `\\`, `\n`, `\r`, `\t`,
-  `\'` — and every other character raw in the UTF-8 source (verified:
-  `\0`, `\xNN`, `\u{...}` are all `LEX-INVALID-ESCAPE`, while raw
-  non-ASCII and even a raw NUL byte lex fine). So the frontend decodes the
-  whole Python set (`\a \b \f \v \0 \xNN \uNNNN`, `\n \r \t \' \"`)
-  and re-encodes minimally; `\N{...}` is excluded (no Unicode tables in the
-  frontend). `r"..."` disables escapes; `f"..."` interpolates subset
-  expressions with `{{`/`}}` for literal braces. Triple-quoted strings are
-  plain strings, not heredocs.
+  the escapes the backend lexer accepts — `\"`, `\\`, `\n`, `\r`, `\t`
+  — and every other character raw in the UTF-8 source, including `'` (verified:
+  `\0`, `\xNN`, `\u{...}` and even `\'` are all `LEX-INVALID-ESCAPE`,
+  while raw non-ASCII, raw `'` and even a raw NUL byte lex fine). So the
+  frontend decodes the whole Python set (`\a \b \f \v \0 \xNN \uNNNN`,
+  `\n \r \t \' \"`) and re-encodes minimally; `\N{...}` is excluded (no
+  Unicode tables in the frontend). `r"..."` disables escapes; `f"..."`
+  interpolates subset expressions with `{{`/`}}` for literal braces.
+  Triple-quoted strings are plain strings, not heredocs.
 
 ## 9. Excluded, each a frontend error with its own code
 
