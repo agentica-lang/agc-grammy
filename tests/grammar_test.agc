@@ -133,8 +133,10 @@ def main() -> Void
     Test.test("a malformed \\u escape fails") do
       short = Grammar.compile("a = { \"\\u{9}\" }")
       surrogate = Grammar.compile("a = { \"\\u{D800}\" }")
+      above = Grammar.compile("a = { \"\\u{110000}\" }")
       try Test.assert(short.message.include?("two to six hex digits"), short.message)
-      Test.assert(surrogate.message.include?("is not a character code"), surrogate.message)
+      try Test.assert(surrogate.message.include?("is not a character code"), surrogate.message)
+      Test.assert(above.message.include?("is not a character code"), above.message)
     end,
     Test.test("a descending range fails") do
       case Grammar.compile("a = { 'z'..'a' }")
@@ -164,6 +166,10 @@ def main() -> Void
     end,
     Test.test("a bounded repetition of a non-consuming expression compiles") do
       Test.ok?(Grammar.compile("a = { (&\"x\"){2} }"))
+    end,
+    Test.test("a blank after the caret is allowed") do
+      grammar = try Grammar.compile("a = { ^ \"abc\" }")
+      Test.eq(grammar.rules[0].body, Expr.Insensitive("abc"))
     end,
     Test.test("a comment inside a body is skipped") do
       grammar = try Grammar.compile("a = { \"x\" ~ /* c */ \"y\" ~ // tail\n \"z\" }")

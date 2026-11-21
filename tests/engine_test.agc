@@ -171,6 +171,12 @@ def main() -> Void
       try Test.error?(parse("p = { \"a\"{,2} ~ EOI }", "p", "aaa"))
       Test.ok?(parse("p = { \"a\"{0} ~ \"b\" }", "p", "b"))
     end,
+    Test.test("a bounded repetition repeats a zero-width expression") do
+      grammar_text = "p = { (&\"x\"){2} ~ \"x\" }"
+      tree = try parse(grammar_text, "p", "x")
+      try Test.eq(tree.stop, 1)
+      Test.ok?(parse("p = { \"\"{3} ~ \"x\" }", "p", "x"))
+    end,
     Test.test("escapes inside a character class") do
       tree = try parse("p = { [\\x41-\\x43]+ }", "p", "ABC")
       Test.eq(Tree.text(tree, "ABC"), "ABC")

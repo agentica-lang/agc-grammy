@@ -160,7 +160,8 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int) ->
         nodes = append(nodes, found.nodes)
         at = found.pos
         count += 1
-        break if stuck
+        # Only an unbounded repetition can spin; a bounded one stops at `max`.
+        break if stuck and max < 0
     end
   end
 

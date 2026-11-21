@@ -55,6 +55,9 @@ worth having, **no** = deliberately out of scope.
 | Unicode properties `\p{L}`, `\p{Emoji}` | yes (tables) | missing | no (tables; revisit on demand) |
 | grammar file extension | `.pest` | `.grammar` | accept both |
 
+Known deviation: an unknown escape (`\d`) keeps its character instead of
+being refused as pest does; the `\x`/`\u` forms are strict.
+
 Naming note: `ANY`/`EOF`/`ASCII_ALNUM`/`ASCII_HEX` are our own names; pest parity
 means `ANY`/`EOI`/`ASCII_ALPHANUMERIC`/`ASCII_HEX_DIGIT`, with our old names kept
 as aliases so existing grammars keep working.

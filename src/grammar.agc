@@ -5,8 +5,9 @@
 ## `^"text"` (insensitive), `'a'..'z'`, `[a-z]`, `[^0-9]`, `.` (any char), a
 ## rule name, a builtin (`ANY`, `SOI`, `EOI`, `NEWLINE`, `INDENT`, `SAME`, the
 ## `ASCII_*` family), `~` sequence, `|` ordered choice, `*`, `+`, `?`,
-## `{n,m}`, `!` and `&` lookahead, and `( )`. Escapes: `\" \\ \n \r \t \
-## \0 \' \xNN \u{NNNN}`. `//` starts a comment and `/* */` nests.
+## `{n,m}`, `!` and `&` lookahead, and `( )`. Escapes: `\"`, `\\`, `\n`,
+## `\r`, `\t`, `\0`, `\'`, `\xNN` and `\u{2-6 hex digits}`. `//` starts a
+## comment and `/* */` nests.
 
 ## The max of a `Repeat` that never stops, as in `*` and `+`.
 UNBOUNDED = -1
@@ -368,9 +369,10 @@ def parse_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
 end
 
 def parse_insensitive(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  return error("grammar: expected a string after ^ at character #{pos}") if char_at(chars, pos + 1) != "\""
+  at = skip_blanks(chars, pos + 1)
+  return error("grammar: expected a string after ^ at character #{pos}") if char_at(chars, at) != "\""
 
-  text = try parse_string(chars, pos + 1)
+  text = try parse_string(chars, at)
   ok(ParsedExpr(expr: Expr.Insensitive(text.text), pos: text.pos))
 end
 
@@ -528,6 +530,8 @@ def read_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
   return ok(some(ParsedChar(value: String.from_code(0), pos: pos + 2))) if code == "0"
   return read_code_escape(chars, pos) if code == "x" or code == "u"
 
+  # Known deviation: pest refuses an unknown escape, we keep the character
+  # (`\d` is `d`). Tracked in parity.md; the escapable set is closed here.
   ok(some(ParsedChar(value: Map.get(ESCAPES, code, code), pos: pos + 2)))
 end
 
@@ -540,7 +544,11 @@ end
 def read_hex_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
   high = hex_value(char_at(chars, pos + 2))
   low = hex_value(char_at(chars, pos + 3))
-  return error("grammar: \\x needs two hex digits at character #{pos}") if high.none? or low.none?
+  if high.none? or low.none?
+    return error(
+      "grammar: \\x needs two hex digits at character #{pos}, found #{char_at(chars, pos + 2).inspect}#{char_at(chars, pos + 3).inspect}",
+    )
+  end
 
   # Both sides are hex digits, so the conversions cannot fail.
   code = high.unwrap! * 16 + low.unwrap!

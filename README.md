@@ -88,8 +88,8 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 
 | In a body | Means |
 |---|---|
-| `"text"` | a literal (`\"`, `\\`, `\n`, `\r`, `\t`, `\0`, `\'`, `\xNN`, `\u{NNNN}`) |
-| `^"text"` | the same literal, case insensitively |
+| `"text"` | a literal (`\"`, `\\`, `\n`, `\r`, `\t`, `\0`, `\'`, `\xNN`, `\u{2-6 hex digits}`) |
+| `^"text"` | the same literal, ASCII case insensitively |
 | `'a'..'z'` | one character in a pest range |
 | `a{n}`, `a{n,}`, `a{,n}`, `a{n,m}` | repetition bounds |
 | `[a-z]`, `[^0-9]` | one character, in or out of the set; `\-` and `\]` are literal |
