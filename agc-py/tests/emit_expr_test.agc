@@ -456,7 +456,11 @@ def main() -> Void
           cased("+2 ** 3", empty_scope(), [], "Int", "2.pow(3)"),
           cased("2 ** -x", {"x": "Int"}, ["x: Int = 1"], "Int", "2.pow(-x)"),
         ],
-        [errcased("2 ** -1", empty_scope(), "PY-OPERATOR"), errcased("2.0 ** 3", empty_scope(), "PY-OPERATOR")],
+        [
+          errcased("2 ** -1", empty_scope(), "PY-OPERATOR"),
+          errcased("2 ** -(1)", empty_scope(), "PY-OPERATOR"),
+          errcased("2.0 ** 3", empty_scope(), "PY-OPERATOR"),
+        ],
       )
     end,
     Test.test("strings concat and repeat") do
@@ -540,6 +544,8 @@ def main() -> Void
         ],
         [
           errcased("1 == True", empty_scope(), "PY-TYPE-MISMATCH"),
+          errcased("True == 1", empty_scope(), "PY-TYPE-MISMATCH"),
+          errcased("1.0 == True", empty_scope(), "PY-TYPE-MISMATCH"),
           errcased("0 == False", empty_scope(), "PY-TYPE-MISMATCH"),
           errcased("1 != True", empty_scope(), "PY-TYPE-MISMATCH"),
         ],
@@ -786,6 +792,9 @@ def main() -> Void
         [
           errcased("nosuchfn(x)", {"x": "Int"}, "PY-NAME-UNKNOWN"),
           errcased("len", empty_scope(), "PY-OUT-OF-SUBSET"),
+          errcased("(len)", empty_scope(), "PY-OUT-OF-SUBSET"),
+          errcased("-len", empty_scope(), "PY-OUT-OF-SUBSET"),
+          errcased("len + 1", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("str", empty_scope(), "PY-OUT-OF-SUBSET"),
         ],
       )
@@ -941,6 +950,7 @@ def main() -> Void
           errcased("map(len, xs)", {"xs": "List[Int]"}, "PY-OPERATOR"),
           errcased("enumerate(xs)", {"xs": "List[Int]"}, "PY-OUT-OF-SUBSET"),
           errcased("map(nosuch, xs)", {"xs": "List[Int]"}, "PY-NAME-UNKNOWN"),
+          errcased("filter(nosuch, xs)", {"xs": "List[Int]"}, "PY-NAME-UNKNOWN"),
           errcased("map(nosuch(x), xs)", {"xs": "List[Int]", "x": "Int"}, "PY-NAME-UNKNOWN"),
           errcased("reversed(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
           errcased("all(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),

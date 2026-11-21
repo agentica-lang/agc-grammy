@@ -417,16 +417,20 @@ end
 # `xs[1:2:3]` and `xs[-1:2]` refuse with `PY-SLICE` instead of the raw
 # engine error. Only `[...:...:...]` (a step) or a bound starting with a
 # literal `-number` counts; dynamic bounds like `xs[-a:b]` stay parseable
-# elsewhere and never trigger this fallback.
+# elsewhere and never trigger this fallback. Strings and comments mask out
+# first (same length, so spans still line up): `"[1:2:3]"` in a string or
+# `# xs[::-1]` in a comment keeps the real parse error instead of a
+# misattributed `PY-SLICE`.
 def slice_exclusion(source: String) -> Optional[Diagnostic]
-  chars = source.split("")
+  masked = mask_strings_comments(source)
+  chars = masked.split("")
   i = 0
   while i < chars.size
     if chars[i] == "["
       close = slice_close(chars, i)
       if close.some?
         stop = close.unwrap!
-        inner = source.slice(i + 1, stop - i - 1)
+        inner = masked.slice(i + 1, stop - i - 1)
         if inner.include?(":")
           if is_step_slice?(inner)
             return some(
@@ -522,6 +526,117 @@ def is_literal_neg_bound?(text: String) -> Bool
 end
 
 def slice_blank?(ch: String) -> Bool = ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "("
+
+# Blanks string literals and comments to spaces (newlines kept, so spans
+# still line up): the slice fallback scans bracket structure, never text.
+# An unterminated single-line quote ends at its newline, like Python.
+def mask_strings_comments(source: String) -> String
+  chars = source.split("")
+  out: List[String] = []
+  quote = ""
+  escaped = false
+  comment = false
+  i = 0
+  while i < chars.size
+    ch = chars[i]
+    if comment
+      if ch == "\n"
+        comment = false
+        out = out.push(ch)
+      else
+        out = out.push(" ")
+      end
+
+      i += 1
+    else
+      if quote != ""
+        if escaped
+          escaped = false
+          out = out.push(keep_break(ch))
+          i += 1
+        else
+          if ch == "\\"
+            escaped = true
+            out = out.push(" ")
+            i += 1
+          else
+            if starts_quote?(chars, i, quote)
+              for _ in 0...quote.length
+                out = out.push(" ")
+              end
+
+              i += quote.length
+              quote = ""
+            else
+              if ch == "\n" and quote.length == 1
+                quote = ""
+              end
+
+              out = out.push(keep_break(ch))
+              i += 1
+            end
+          end
+        end
+      else
+        if ch == "#"
+          comment = true
+          out = out.push(" ")
+          i += 1
+        else
+          found = quote_at(chars, i)
+          case found
+            some(q) ->
+              for _ in 0...q.length
+                out = out.push(" ")
+              end
+
+              i += q.length
+              quote = q
+            none ->
+              out = out.push(ch)
+              i += 1
+          end
+        end
+      end
+    end
+  end
+
+  out.join("")
+end
+
+# A newline survives masking (line numbers feed `render`); anything else in
+# a string or comment blanks out.
+def keep_break(ch: String) -> String
+  if ch == "\n"
+    "\n"
+  else
+    " "
+  end
+end
+
+# The quote opening at `at`, longest first (`'''` before `'`).
+def quote_at(chars: List[String], at: Int) -> Optional[String]
+  if at + 2 < chars.size
+    triple = chars[at] + chars[at + 1] + chars[at + 2]
+    return some(triple) if triple == "'''" or triple == "\"\"\""
+  end
+
+  return some(chars[at]) if chars[at] == "\"" or chars[at] == "'"
+
+  none
+end
+
+# Whether `quote` opens or closes at `at`.
+def starts_quote?(chars: List[String], at: Int, quote: String) -> Bool
+  window = ""
+  index = 0
+  while index < quote.length and at + index < chars.size
+    window = window + chars[at + index]
+    index += 1
+  end
+
+  window == quote
+end
 
 def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
   name_node = try Tree.first_child(node, "name").to_result("agc-py: def without a name")

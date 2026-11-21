@@ -60,25 +60,78 @@ def emit(node: Tree.Node, source: String, scope: Map[String, String]) -> Result[
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
 end
 
-# A bare builtin through single-child chain nodes: `len` alone is a value,
-# while `len(...)` is a call and `map(len, xs)` stays a map-specific
-# `PY-OPERATOR` (its `len` never reaches here as the top node).
+# A bare builtin through single-child wrappers (`(len)`, `-len`) or in an
+# operand or argument slot (`len + 1`, `print(len)`): `len(...)` is a call
+# and `map(len, xs)` stays a map-specific `PY-OPERATOR` (its function slot
+# never scans as a value use).
 def bare_builtin_name(node: Tree.Node, source: String) -> Optional[String]
   cur = node
-  while single_chain?(cur.rule) and cur.children.size == 1
+  while bare_wrap?(cur.rule) and cur.children.size == 1
     cur = List.first(cur.children)
   end
 
-  if cur.rule == "term" and cur.children.size == 1
-    cur = List.first(cur.children)
+  if cur.rule == "name"
+    text = Tree.text(cur, source)
+    return some(text) if BUILTINS.include?(text)
+
+    return none
   end
 
-  return none if cur.rule != "name"
+  scan_bare_builtin(cur, source)
+end
 
-  text = Tree.text(cur, source)
-  return some(text) if BUILTINS.include?(text)
+# Wrappers that never hide a value use: chain and argument slots, parens,
+# and unary signs.
+def bare_wrap?(rule: String) -> Bool
+  return true if single_chain?(rule)
+
+  return true if rule == "term" or rule == "group"
+
+  return true if rule == "minus" or rule == "plus"
+
+  rule == "arg"
+end
+
+# A bare builtin hiding in operand or argument position: a call head is a
+# call, not a value, and the function slot of `map` / `filter` keeps its
+# own `PY-OPERATOR` refusal. Attribute paths never scan (`s.strip` names a
+# method slot, not a value).
+def scan_bare_builtin(node: Tree.Node, source: String) -> Optional[String]
+  if node.rule == "call" and !node.children.empty?
+    rest = node.children.drop(1)
+    if is_map_filter_head?(List.first(node.children), source) and !rest.empty?
+      rest = rest.drop(1)
+    end
+
+    return scan_bare_list(rest, source)
+  end
+
+  return none if node.rule == "attr"
+
+  return scan_bare_list(node.children.drop(1), source) if node.rule == "kwarg" and !node.children.empty?
+
+  scan_bare_list(node.children, source)
+end
+
+def scan_bare_list(nodes: List[Tree.Node], source: String) -> Optional[String]
+  for child in nodes
+    found = bare_builtin_name(child, source)
+    case found
+      some(name) -> return some(name)
+      none -> found = found
+    end
+  end
 
   none
+end
+
+# The head of a `map` / `filter` call: its first argument is a function
+# slot with its own refusal, never a value use.
+def is_map_filter_head?(head: Tree.Node, source: String) -> Bool
+  return false if head.rule != "name"
+
+  text = Tree.text(head, source)
+  text == "map" or text == "filter"
 end
 
 ## The helper preamble every emitted fragment may call: Python-signed `%`,

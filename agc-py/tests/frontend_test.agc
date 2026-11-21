@@ -317,5 +317,23 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected PY-SLICE")
       end
     end,
+    Test.test("a nested literal-negative bound refuses with PY-SLICE") do
+      case check(compiled, "x: list[int] = xs[ys[-1:2]]\n")
+        error(e) -> Test.assert(e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected PY-SLICE")
+      end
+    end,
+    Test.test("a slice-like string keeps the real parse error") do
+      case check(compiled, "s: str = \"[1:2:3]\"\nx: int = 1 +\n")
+        error(e) -> Test.assert(!e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected a parse error")
+      end
+    end,
+    Test.test("a slice-like comment keeps the real parse error") do
+      case check(compiled, "# xs[::-1]\nx: int = 1 +\n")
+        error(e) -> Test.assert(!e.message.include?("error[PY-SLICE]"), e.message)
+        ok(_) -> Test.assert(false, "expected a parse error")
+      end
+    end,
   ])
 end
