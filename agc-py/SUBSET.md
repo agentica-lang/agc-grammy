@@ -32,10 +32,12 @@ plain types only.
 
 - The first binding of a name carries its annotation: `x: int = 0`.
   Rebinding keeps the type (`x = x + 1`); changing it is `PY-TYPE-MISMATCH`.
-- `x += e` (and `-=`, `*=`, `//=`, `%=`, `**=`) is sugar for `x = x OP e`.
-- No nested `def`, no `global`/`nonlocal`, no `del`. Module level plus one
-  function level; closures read outer names but never assign them (the backend
-  cannot, so the subset does not pretend otherwise).
+- `x += e` (and `-=`, `*=`, `/=`, `%=`) is sugar for `x = x OP e`. There is
+  no `//=` or `**=` because there is no `//` or `**` operator to desugar
+  from (see §3).
+- No nested `def`, no `lambda`, no comprehensions, no `global`/`nonlocal`,
+  no `del`. Module level plus one function level; with no function values
+  in the subset there is nothing to close over.
 - `pass` is a no-op. `...` (Ellipsis) is excluded.
 
 ## 3. Expressions
@@ -43,50 +45,105 @@ plain types only.
 - Literals: ints (decimal/hex/oct/bin, underscores), floats (exponents),
   strings (prefixes `r`/`f`/plain, single/double/triple-quoted, escapes
   decoded), `True`/`False`/`None`. `b""` strings are excluded.
-- Operators with the usual precedence: `+ - * / // % **` (`/` on `int` is
-  truncating, as the backend; `**` on `int` only), unary `-`/`not`,
-  comparisons (`== != < <= > >=`), chained comparisons (evaluated once per
-  operand, desugared with `and`).
+- Arithmetic is same-type only (`1 + 1.5` is `PY-TYPE-MISMATCH`; convert
+  explicitly): `+ - * / %` on two `int` or two `float`. `/` on `int`
+  truncates toward zero, exactly like the backend — which is why Python `/`
+  on two `int`s does NOT map to `/`: it lowers to float division
+  (`a / b` → `a.to_f / b.to_f`). Mixed or unknown combos are `PY-OPERATOR`.
+- `//` on `int` lowers to a `floor_div` helper (truncating `/` corrected by
+  one when the remainder is nonzero and the signs differ — verified:
+  `-7 // 2 == -4` while the backend's `/` gives `-3`). `//` on `float` is
+  `PY-OPERATOR`. `**` is `int` base with non-negative `int` exponent only,
+  lowered to a `pow_i` loop (overflow halts like the backend); anything else
+  is `PY-OPERATOR`. `%` is `int`-only with Python signs, lowered to a
+  `pymod` helper (`-7 % 2 == 1` while the backend gives `-1`); float `%` is
+  `PY-OPERATOR`.
+- `+` concatenates two `str` (or two same-typed lists); `s * n` repeats a
+  string (`n: int`, that order only). `[1, 2] * 2` and `3 * "ab"` are
+  `PY-OPERATOR`.
+- Comparisons `== !=` on anything; ordering `< <= > >=` on two numbers, or
+  on two strings via `a.compare(b) < 0` (probed). Chained comparisons
+  evaluate each operand once (temp + `and`).
 - `and`/`or` short-circuit over `bool`; `not x` needs `bool`.
-- Conditional expression `a if c else b` (lowers to the backend `if`
-  expression, which was probed to work).
-- Slices `xs[a:b]` with `0 <= a <= b`, no step, no negative bounds
-  (negative or stepped slices are `PY-SLICE`).
+- Conditional expression `a if c else b`: the backend `if` is
+  statement-only, so it lowers to a temp plus a statement `if`/`else`.
+- Slices `xs[a:b]`: static negative bounds or a step are `PY-SLICE`; dynamic
+  bounds clamp to `[0, len]` at run time (`a > b` and out-of-range `b` give
+  empty, they never halt). Lowered to a `slice` helper over `take`/`drop`.
+- `x in xs` / `x not in xs`: `List` via `include?`, `String` via
+  `include?`, `Map` keys via `key?`. Unpacking (`a, b = ...`, `a, b = b, a`)
+  is excluded with the tuple it would need.
 - Calls are positional or keyword (`f(x=1)` works — probed), no `*args`,
-  no `**kwargs`. Subscripting `xs[i]`, `d[k]`; out-of-range halts like the
-  backend, it is not a Python `IndexError` you can catch (see `try` below).
-- Conversions and builtins: `int()`, `float()`, `str()`, `bool()`, `len()`,
-  `range()` (1–3 args), `print(...)` (space-joined, one line).
-- `x is None` / `x is not None` only; any other `is` is `PY-IS`.
+  no `**kwargs`. Subscripting `xs[i]`, `d[k]`; out-of-range or a missing key
+  halts like the backend, it is not a catchable error — use `d.get(k)`,
+  which is included and yields `Optional[V]` (`none` when absent, probed).
+- Conversions and builtins, each with its lowering:
+  `int(s)` → `s.to_i` (catchable `Result`, like `ValueError`),
+  `int(f)` → `f.to_i`, `float(s)` → `s.to_f`, `float(n)` → `n.to_f`,
+  `str(x)` → interpolation, `int`/`float` of the wrong kind →
+  `PY-TYPE-MISMATCH`. `bool(x)` accepts `Bool` only, else `PY-TYPE-MISMATCH`
+  (there is no truthiness to convert from, §6). `len()` → `size`/`length`.
+  `range(a)` / `range(a, b)` map to ranges; 3-arg `range(a, b, step)`
+  desugars to a `while`. `print(a, b, ...)` joins with single spaces via
+  interpolation (one backend arg); `sep=`/`end=`/`file=` kwargs are
+  `PY-OUT-OF-SUBSET`.
+- `x is None` / `x is not None` only (→ `.none?()` checks); any other `is`
+  is `PY-IS`.
+- `x in xs` / `x not in xs` over `List`/`String` and `Map` keys (→
+  `include?`/`key?`).
+- `None` outside `Optional`: an unannotated `x = None` is `PY-UNTYPED-NAME`,
+  `x: int = None` is `PY-TYPE-MISMATCH`, and an explicit `return None` is
+  allowed only under `-> None`.
 
 ## 4. Statements
 
-- Expression statements, assignment, `assert c` / `assert c, msg` (failure
-  halts with the message, it is not catchable).
-- `if`/`elif`/`else`, `while`, `for x in ...` over `List`, `Range` and
-  `String` (one-character strings). No `for`/`while` `else`. `break` is
-  included; the spelling is `next` for continue (the backend has no
-  `continue` — verified by probe).
-- `return` (bare `return` only under `-> None`), `raise E("msg")` (message
-  only, the class is not modeled).
-- `try`/`except` (bare, `except E`, `except E as e`, several handlers in
-  order) mapping onto `Result`: the `try` block is the fallible call, each
-  handler is an `error` arm. No `finally`, no `else`, no `raise ... from`.
-- `def` with full annotations, defaults allowed (`def f(x: int = 3)` —
-  probed), keyword calls allowed. One file is one module (§5).
+- Expression statements, assignment, `pass` (emits `nil`, so a body never
+  ends up empty), `assert c` / `assert c, msg` with `c: bool` and `msg: str`
+  (failure prints the message to stderr and exits `1` via `System.exit`;
+  it is not catchable).
+- `if`/`elif`/`else`, `while`, `for x in ...` over `List` and `Range`.
+  String iteration desugars through `split("")` (Unicode scalar values,
+  and `Bytes` is not an iteration source). No `for`/`while` `else`.
+  `break` is included; the spelling is `next` for continue (the backend has
+  no `continue` — verified by probe). Top-level statements in file order
+  form the `main` body; top-level bindings are `main`-locals.
+- `return` (a value only under a non-`Void` return; bare `return` only under
+  `-> None`; anything else is `PY-TYPE-MISMATCH`). `raise E("msg")`
+  lowers to `return error("msg")` — message only, the class is not modeled —
+  so any function that can raise returns `Result[T]` and every caller
+  handles it; the ripple is explicit, not inferred.
+- `try`/`except` with exactly one handler (bare, `except E` or
+  `except E as e`; the class is accepted syntactically but ignored, since
+  classes are not modeled — `e`, when bound, is the message `String`).
+  The body is outlined into a `-> Result[T]` helper; `return`, `break` and
+  `next` inside a `try` body are `PY-TRY-CONTROL`. Catchable means exactly
+  the `error(...)` values of `Result`-returning calls (`to_i`, helpers that
+  `return error(...)`); halts (out-of-range, overflow, failed assert) are
+  never catchable. No `finally`, no `try`/`else`, no `raise ... from`, no
+  bare `raise`.
+- `def` with full annotations, defaults allowed and re-evaluated per call
+  (values are immutable, so sharing is unobservable — `def f(x: list = [])`
+  is fine), keyword calls allowed. One file is one module (§5).
 
 ## 5. Imports and modules
 
-- `import x`, `import x as y`, `from x import a, b` (top of file). One file is
-  one module; the module name is the file stem.
+- `import x`, `import x as y`, `import x, y`, `from x import a, b`
+  (parenthesized lists allowed). Imports come first in the file; anything
+  after the first non-import statement is `PY-IMPORT-POSITION`. One file is
+  one module; the module name is the file stem, which must be a valid
+  identifier (else `PY-IMPORT-UNKNOWN`).
 - Search path: the file's folder first, then an explicit list (CLI flag in
-  phase 4). Circular imports are `PY-IMPORT-CYCLE` with both spans.
+  phase 4). Circular imports are `PY-IMPORT-CYCLE`, carrying every import
+  span of the cycle. Relative imports, packages (`__init__`), and
+  `TYPE_CHECKING`-gated imports are excluded.
 - Unknown modules/names are `PY-IMPORT-UNKNOWN` / `PY-NAME-UNKNOWN` at the
   importing span.
-- Stdlib surface (closed, each mapped in phase 3): `math.sqrt`, `math.floor`,
-  `math.ceil`, `sys.argv` (→ `System.args`), string methods used through
-  calls stay method calls (`s.strip()`, `s.split(",")`, ...). Anything else
-  from the stdlib is `PY-IMPORT-UNKNOWN`.
+- Stdlib surface (closed, each mapped in phase 3): `math.sqrt` (→
+  `Math.sqrt`), `math.floor`/`math.ceil` (→ the `Float` methods
+  `x.floor()`/`x.ceil()`), `sys.argv` (→ `System.args()`), and string
+  methods `strip`, `split`, `join`, `replace`, `upcase`, `downcase`,
+  `start_with?`, `end_with?`, `include?` (all probed in the backend docs).
+  Anything else from the stdlib is `PY-IMPORT-UNKNOWN`.
 
 ## 6. Truthiness
 
@@ -97,7 +154,8 @@ operands, the ternary guard) must be `bool`; anything else is
 
 ## 7. Mutation and aliasing
 
-Values are immutable; "mutation" is rebinding:
+All values are immutable, so there is no observable aliasing; "mutation"
+is rebinding:
 
 - `xs.append(x)` and friends do not exist: `PY-MUTATION` names the
   rebinding (`xs = xs.push(x)`).
@@ -113,25 +171,40 @@ Values are immutable; "mutation" is rebinding:
 - Indentation is significant (`INDENT`/`SAME` in grammy terms); tabs count as
   one character each and must not be mixed with spaces on the same block
   level (`PY-INDENT`).
+- Strings decode at the frontend to plain characters, then emit backend
+  escapes (`\" \\ \n \r \t \0 \'` and `\xNN`/`\u{...}`): `\"`, `\\`,
+  `\n`, `\r`, `\t`, `\0`, `\'` map to themselves; `\a \b \f \v` map to
+  their control codes; `\xNN`/`\uNNNN` decode the digits; `\N{...}` is
+  excluded (no Unicode tables in the frontend). `r"..."` disables escapes;
+  `f"..."` interpolates subset expressions with `{{`/`}}` for literal
+  braces. Triple-quoted strings are plain strings, not heredocs.
 
 ## 9. Excluded, each a frontend error with its own code
 
 Classes, decorators, `yield`/`async`/`await`, `with`, `match`, `lambda`,
 comprehensions, generator expressions, `global`/`nonlocal`, `del`, starred
-assignment, `*args`/`**kwargs`, keyword-only markers, `tuple`/`set`/`bytes`/
-`complex`, `Any`, `Final`, `print(..., file=)`, `eval`/`exec`/`getattr`/
-`setattr`/`globals`/`locals`/`vars`/`dir` (the dynamic family:
-`PY-DYNAMIC`), `is` outside `None`, negative/stepped slices, `finally`,
-`try`/`else`, loop `else`, `raise from`, `b""`, `...`.
+assignment, tuple unpacking, `*args`/`**kwargs`, bare `*`, keyword-only
+markers, `tuple`/`set`/`bytes`/`complex`, `Any`, `Final`, `ClassVar`,
+`cast`, `TYPE_CHECKING`, `print` kwargs (`sep=`/`end=`/`file=`),
+`eval`/`exec`/`getattr`/`setattr`/`globals`/`locals`/`vars`/`dir` (the
+dynamic family: `PY-DYNAMIC`), `is` outside `None`, `finally`,
+`try`/`else`, loop `else`, `raise from`, bare `raise`, `b""`, `...`,
+relative imports, `__init__` packages, `\N{...}` escapes, `nan`/`inf`
+spellings, float `//`/`%`/`**`, mixed `int`/`float` arithmetic without an
+explicit conversion.
 
 ## 10. Error catalog (stable `PY*` codes)
 
 Every code carries file/line/column, the offending span, an explanation and a
-`= help:` when the fix is known (agc-py diagnostics principle).
+`= help:` when the fix is known (agc-py diagnostics principle). When several
+codes could apply, the most specific one wins: `PY-MUTATION` over unknown-name,
+`PY-IS` over out-of-subset, `PY-SLICE` over out-of-subset, `PY-DYNAMIC` over
+out-of-subset, `PY-COND-NOT-BOOL` over `PY-TYPE-MISMATCH`, and an unknown name
+inside an annotation is `PY-ANNOTATION-UNKNOWN`, not `PY-NAME-UNKNOWN`.
 
 | Code | Meaning | Span |
 |---|---|---|
-| `PY-UNTYPED-DEF` | `def` without full annotations | the `def` line |
+| `PY-UNTYPED-DEF` | `def` without full annotations | the `def` header |
 | `PY-UNTYPED-NAME` | first binding without annotation | the name |
 | `PY-ANY` | `Any` (or `object` as an escape hatch) | the annotation |
 | `PY-ANNOTATION-UNKNOWN` | unknown name in an annotation | the name |
@@ -144,7 +217,10 @@ Every code carries file/line/column, the offending span, an explanation and a
 | `PY-IMPORT-CYCLE` | circular import | both import spans |
 | `PY-IMPORT-UNKNOWN` | unknown module or stdlib member | the import |
 | `PY-NAME-UNKNOWN` | unknown name | the name |
-| `PY-OUT-OF-SUBSET` | anything else from §9, naming it | the construct |
+| `PY-OUT-OF-SUBSET` | anything else from §9 (the list is complete), naming it | the construct |
+| `PY-OPERATOR` | operand combination the backend has no operator for | the operator |
+| `PY-TRY-CONTROL` | `return`/`break`/`next` inside a `try` body | the statement |
+| `PY-IMPORT-POSITION` | import after the first non-import statement | the import |
 | `PY-INDENT` | mixed tabs/spaces on one level | the line |
 
 ## 11. Worked example
