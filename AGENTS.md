@@ -43,8 +43,9 @@ its tests in `tests/`, so always pass the folder.
 ## Invariants to keep
 
 - The start rule must consume the whole input; `Engine.run` reports the rest.
-- A repetition stops when an iteration makes no progress, so nullable
-  expressions terminate.
+- An *unbounded* repetition stops when an iteration makes no progress, so
+  nullable expressions terminate; a bounded one repeats the same empty match
+  up to its maximum without matching again.
 - Indentation never rewrites the input: a `>` rule sets `Ctx.base` to the
   indentation of the line it starts on, and `INDENT`/`SAME` consume the next
   non-blank line's indentation and compare it with that base. Blank lines are
@@ -60,7 +61,8 @@ its tests in `tests/`, so always pass the folder.
   and the terminals of named rules show up in a message.
 - `Grammar.compile` validates before matching: reserved names, duplicates,
   unknown refs, left recursion (through nullable prefixes), non-failing and
-  non-progressing repetitions, and unreachable choice arms. Keep those checks
+  non-progressing *unbounded* repetitions, a zero-width repetition asking for
+  more than `ZERO_WIDTH_LIMIT` nodes, and unreachable choice arms. Keep those checks
   cheap and tolerant of an already-broken grammar.
 - Public code gets `##`; private code (after `private`) gets `#` only.
 - `agentica.toml` sets `blank_line_after_end = true`; `make fmt` fixes spacing.

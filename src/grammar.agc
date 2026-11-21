@@ -112,6 +112,9 @@ BUILTIN_NAMES = Set.new([
 
 ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "\"": "\""}
 
+# A bounded repetition of a zero-width expression may not ask for more nodes.
+ZERO_WIDTH_LIMIT = 10_000
+
 # Names a rule must not take: pest keywords and the builtin rules.
 RESERVED = Set.new([
   "ANY",
@@ -395,6 +398,7 @@ end
 
 def parse_char_literal(chars: List[String], pos: Int) -> Result[ParsedChar]
   return error("grammar: expected a character at character #{pos}") if char_at(chars, pos) != "'"
+  return error("grammar: unterminated character at character #{pos}") if char_at(chars, pos + 1) == ""
 
   inner = try read_class_char(chars, pos + 1)
   return error("grammar: unterminated character at character #{pos}") if char_at(chars, inner.pos) != "'"
@@ -528,6 +532,10 @@ def read_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
   code = char_at(chars, pos + 1)
   return error("grammar: dangling \\ at character #{pos}") if code == ""
   return ok(some(ParsedChar(value: String.from_code(0), pos: pos + 2))) if code == "0"
+  if code == "p" or code == "P"
+    return error("grammar: unicode properties (\\p{...}) are not supported at character #{pos}")
+  end
+
   return read_code_escape(chars, pos) if code == "x" or code == "u"
 
   # Known deviation: pest refuses an unknown escape, we keep the character
@@ -545,9 +553,8 @@ def read_hex_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar
   high = hex_value(char_at(chars, pos + 2))
   low = hex_value(char_at(chars, pos + 3))
   if high.none? or low.none?
-    return error(
-      "grammar: \\x needs two hex digits at character #{pos}, found #{char_at(chars, pos + 2).inspect}#{char_at(chars, pos + 3).inspect}",
-    )
+    found = "#{char_at(chars, pos + 2)}#{char_at(chars, pos + 3)}"
+    return error("grammar: \\x needs two hex digits at character #{pos}, found #{found.inspect}")
   end
 
   # Both sides are hex digits, so the conversions cannot fail.
@@ -556,10 +563,13 @@ def read_hex_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar
 end
 
 def read_brace_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
-  return error("grammar: \\u needs {NNNNNN} at character #{pos}") if char_at(chars, pos + 2) != "{"
+  if char_at(chars, pos + 2) != "{"
+    return error("grammar: \\u needs two to six hex digits in braces at character #{pos}")
+  end
 
   digits = read_hex_run(chars, pos + 3, 6)
-  return error("grammar: \\u needs two to six hex digits at character #{pos}") if digits.text.size < 2
+  return error("grammar: \\u needs two to six hex digits in braces at character #{pos}") if digits.text.size < 2
+
   if char_at(chars, digits.pos) != "}"
     return error("grammar: expected } after a \\u escape at character #{digits.pos}")
   end
@@ -636,7 +646,7 @@ def skip_one(chars: List[String], pos: Int) -> Int
   c = chars[pos]
   return pos + 1 if c == " " or c == "\t" or c == "\r" or c == "\n"
   return skip_line(chars, pos) if starts_with?(chars, pos, "//")
-  return skip_block(chars, pos, 1) if starts_with?(chars, pos, "/*")
+  return skip_block(chars, pos) if starts_with?(chars, pos, "/*")
 
   pos
 end
@@ -652,9 +662,9 @@ end
 
 # Block comments nest, as in pest. An unterminated one stops at its own start,
 # so the parser reports the stray `/` instead of swallowing the file.
-def skip_block(chars: List[String], pos: Int, depth: Int) -> Int
+def skip_block(chars: List[String], pos: Int) -> Int
   at = pos + 2
-  level = depth
+  level = 1
   while at < chars.size and level > 0
     if starts_with?(chars, at, "/*")
       level += 1
@@ -875,11 +885,15 @@ def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]
   end
 end
 
-# Only an unbounded repetition can run forever; a bounded one terminates.
+# Only an unbounded repetition can run forever; a bounded one terminates. A
+# zero-width expression may repeat a few times, but a huge bound is refused
+# instead of building that many identical nodes.
 def repeat_problem(owner: String, inner: Expr, max: Int, always: Set[String], still: Set[String]) -> Optional[String]
   if max < 0
     return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
     return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+  elsif still_with?(inner, still) and max > ZERO_WIDTH_LIMIT
+    return some("grammar: rule #{owner} repeats a zero-width expression more than #{ZERO_WIDTH_LIMIT} times")
   end
 
   repeat_in(owner, inner, always, still)

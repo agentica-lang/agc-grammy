@@ -175,6 +175,24 @@ def main() -> Void
       grammar = try Grammar.compile("a = { \"x\" ~ /* c */ \"y\" ~ // tail\n \"z\" }")
       Test.eq(grammar.rules[0].body, Expr.Seq([Expr.Literal("x"), Expr.Literal("y"), Expr.Literal("z")]))
     end,
+    Test.test("a huge bound on a zero-width expression fails") do
+      case Grammar.compile("a = { (&\"x\"){20000} }")
+        error(e) -> Test.assert(e.message.include?("zero-width"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("unicode properties are refused") do
+      case Grammar.compile("a = { \"\\p{L}\" }")
+        error(e) -> Test.assert(e.message.include?("unicode properties"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an unterminated character literal names the character") do
+      case Grammar.compile("a = { 'x }")
+        error(e) -> Test.assert(e.message.include?("unterminated character"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a rule declared twice fails") do
       case Grammar.compile("a = { \"x\" }\na = { \"y\" }")
         error(e) -> Test.assert(e.message.include?("declared twice"), e.message)

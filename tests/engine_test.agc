@@ -177,6 +177,13 @@ def main() -> Void
       try Test.eq(tree.stop, 1)
       Test.ok?(parse("p = { \"\"{3} ~ \"x\" }", "p", "x"))
     end,
+    Test.test("a bounded zero-width repetition is not slow") do
+      start = Time.monotonic_ms()
+      tree = try parse("p = { \"\"{5000} ~ \"x\" }", "p", "x")
+      elapsed = Time.monotonic_ms() - start
+      try Test.eq(tree.stop, 1)
+      Test.assert(elapsed < 1000, "5000 zero-width iterations took #{elapsed} ms")
+    end,
     Test.test("escapes inside a character class") do
       tree = try parse("p = { [\\x41-\\x43]+ }", "p", "ABC")
       Test.eq(Tree.text(tree, "ABC"), "ABC")
