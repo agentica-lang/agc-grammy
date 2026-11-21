@@ -41,7 +41,7 @@ word_end = _{ !ident_char }
 program = _{ skipped* ~ (import_stmt ~ top_end ~ skipped*)* ~ (top ~ skipped*)* ~ ws ~ EOF }
 
 // Imports are handled separately in the module preamble.
-top = _{ (def_stmt | type_alias | statement) ~ top_end }
+top = _{ (def_stmt | statement) ~ top_end }
 
 top_end = _{ eol | hws ~ comment? ~ EOF }
 
@@ -67,6 +67,7 @@ statement = _{
   !continue_keyword ~ !match_header ~ !case_header ~ (
     annotated
     | augmented_assign
+    | type_alias
     | assign
     | return_stmt
     | pass_stmt
@@ -85,15 +86,15 @@ statement = _{
 }
 
 // Check at the header start so the diagnostic points at the soft keyword.
-match_header = { "match" ~ word_end ~ ws ~ expr ~ ws ~ ":" }
+match_header = _{ "match" ~ word_end ~ ws ~ expr ~ ws ~ ":" }
 
-case_header = { "case" ~ word_end ~ ws ~ (expr | "...") ~ ws ~ ":" }
+case_header = _{ "case" ~ word_end ~ ws ~ (expr | "...") ~ ws ~ ":" }
 
 // Bare excluded statements must not fall back to name expressions.
 expr_stmt = { !(("raise" | "yield") ~ word_end ~ top_end) ~ expr }
 
 // Reject the statement spelling, not the same text in a name position.
-continue_keyword = _{ "continue" ~ word_end ~ (eol | ws ~ comment? ~ EOF) }
+continue_keyword = _{ "continue" ~ word_end ~ (eol | hws ~ comment? ~ EOF) }
 
 suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
 

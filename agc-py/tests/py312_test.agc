@@ -84,6 +84,11 @@ def main() -> Void
       try Test.eq(annotation_texts(tree, "y: str\n"), ["str"])
       Test.eq(Tree.find_all(tree, "annotated").size, 1)
     end,
+    Test.test("a type alias parses inside a def body") do
+      program = "def f() -> None:\n    type Alias = int\n    pass\n"
+      tree = try parse_py(compiled, program)
+      Test.eq(Tree.find_all(tree, "type_alias").size, 1)
+    end,
     Test.test("a ternary parses in a return") do
       tree = try parse_py(compiled, "def f(a: int) -> int:\n    return a if a else b\n")
       try Test.eq(Tree.find_all(tree, "cond_expr").size, 2)
