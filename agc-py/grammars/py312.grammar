@@ -1,5 +1,6 @@
-// Python 3.12, typed subset, phase 2a: typed `def`, annotations, and an
-// expression core. Later phases add data (2b), control (2c) and layout (2d).
+// Python 3.12, typed subset, phases 2a-2b: typed `def`, annotations, data
+// forms (subscripts, slices, attributes, full strings and numbers) and an
+// expression core. Later phases add control (2c) and layout (2d).
 //
 // Style follows `grammars/python.grammar` on purpose: explicit `ws` (no
 // newline) and `eol` everywhere, no implicit `WHITESPACE`, so indentation
@@ -90,7 +91,6 @@ type_args = { annotation ~ (ws ~ "," ~ ws ~ annotation)* }
 
 dotted = { ident ~ ("." ~ ident)* }
 
-// Escape decoding arrives with phase 2b strings; for now the raw text.
 fwd = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
 
 expr = _{ cond_expr }
@@ -121,25 +121,127 @@ unary = _{ minus | atom }
 
 minus = { "-" ~ ws ~ unary }
 
-atom = _{ number | text | boolean | none_lit | call | name | group }
+atom = _{ postfix }
 
 group = { "(" ~ ws ~ expr ~ ws ~ ")" }
 
-call = { name ~ "(" ~ ws ~ (args ~ ws ~ (",")? ~ ws)? ~ ")" }
+attr = { name ~ ("." ~ ident)+ }
 
-// Keyword args come last: once a `kwarg` matches, only `kwarg` may follow,
-// so `f(x=1, y)` fails while `f(x == 1)` still parses as an expression.
-// The tree shape is asymmetric: all-keyword calls yield bare `kwarg` nodes,
-// mixed calls yield `arg`-wrapped `kwarg` nodes — phase 4 lowering handles both.
-args = _{ kwarg ~ (ws ~ "," ~ ws ~ kwarg)* | expr ~ (ws ~ "," ~ ws ~ arg)* }
+// Keep the original call and name nodes for bare named calls. The head
+// then takes trailers in order, dispatched by their opening character.
+call = { (attr | name) ~ call_body }
 
-arg = { kwarg | expr }
+call_body = _{ "(" ~ ws ~ (args ~ ws ~ ","? ~ ws)? ~ ")" }
 
-kwarg = { name ~ ws ~ "=" ~ ws ~ expr }
+postfix = _{ postfix_head ~ postfix_trailer* }
 
-number = { ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+postfix_head = _{ number | text | list_lit | dict_lit | boolean | none_lit | named_primary | group }
 
-text = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
+// A malformed named call must not retry its arguments as a trailer.
+named_primary = _{ call | !(ident ~ ("." ~ ident)* ~ "(") ~ (attr | name) }
+
+postfix_trailer = _{ call_trailer | index | attr_trailer }
+
+call_trailer = { call_body }
+
+attr_trailer = { "." ~ ident }
+
+// Parse the lower expression once, then decide between index and slice
+// at the colon. A literal negative lower bound can only be an index.
+index = { "[" ~ ws ~ (negative_index | !negative_literal ~ expr ~ (ws ~ slice)? | slice) ~ ws ~ "]" }
+
+negative_index = _{ &negative_literal ~ expr ~ &(ws ~ "]") }
+
+negative_literal = _{ negative_value ~ &(ws ~ (":" | "]")) }
+
+negative_value = _{ "-" ~ ws ~ number | "(" ~ ws ~ negative_value ~ ws ~ ")" }
+
+slice = { ":" ~ ws ~ (!negative_literal ~ expr)? }
+
+// Once a keyword appears, reject an immediately following positional
+// argument. Keep the existing `arg` wrappers in mixed calls.
+args = _{ kwarg ~ (ws ~ "," ~ ws ~ kwarg)* | !kwarg_head ~ expr ~ (ws ~ "," ~ ws ~ arg)* }
+
+arg = { kwarg ~ !(ws ~ "," ~ ws ~ !kwarg_head ~ !")") | !kwarg_head ~ expr }
+
+kwarg_head = _{ ident ~ ws ~ "=" ~ !"=" }
+
+kwarg = { &kwarg_head ~ name ~ ws ~ "=" ~ ws ~ expr }
+
+// A list (`[1, x]`, `[]`) or dict (`{"k": v}`, `{}`) literal, with an
+// optional trailing comma. Also a postfix head, so `[1][0]`, `{"k": 1}["k"]`
+// and `"sep".join(xs)` chain like names do.
+list_lit = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)* ~ (ws ~ ",")? ~ ws)? ~ "]" }
+
+dict_lit = { "{" ~ ws ~ (dict_entry ~ (ws ~ "," ~ ws ~ dict_entry)* ~ (ws ~ ",")? ~ ws)? ~ "}" }
+
+dict_entry = { expr ~ ws ~ ":" ~ ws ~ expr }
+
+// Integers in decimal, hex, octal and binary with `_` separators; floats
+// with exponents and leading/trailing dots per Python. Each prefixed form
+// precedes the plain decimal run, so `0xFF` never lexes as `0` plus a name.
+number = { hex_num | oct_num | bin_num | float_num | decimal_int }
+
+decimal_int = _{ "0" ~ ("_" ~ "0")* | [1-9] ~ ("_"? ~ ASCII_DIGIT)* }
+
+hex_num = _{ "0" ~ ("x" | "X") ~ "_"? ~ ASCII_HEX_DIGIT ~ (("_")? ~ ASCII_HEX_DIGIT)* }
+
+oct_num = _{ "0" ~ ("o" | "O") ~ "_"? ~ ASCII_OCT_DIGIT ~ (("_")? ~ ASCII_OCT_DIGIT)* }
+
+bin_num = _{ "0" ~ ("b" | "B") ~ "_"? ~ ASCII_BIN_DIGIT ~ (("_")? ~ ASCII_BIN_DIGIT)* }
+
+float_num = _{
+  decimal_int ~ "." ~ (ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)? ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)?
+  | "." ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)* ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)?
+  | decimal_int ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*
+}
+
+// Strings: plain, raw (`r` keeps backslashes literal; a trailing lone `\`
+// still fails because `"\\" ~ .` needs the second character) and
+// interpolated (`f` holes hold subset expressions, `{{`/`}}` spell literal
+// braces, a lone `}` fails). Triple-quoted forms span lines through `.`;
+// single-quoted forms stop at the line break. `b` strings have no arm and
+// fail; `\N{...}` is not an `escape` arm, so it fails too (both excluded
+// per SUBSET sections 3 and 8).
+text = { f_string | r_string | plain_string }
+
+f_string = _{
+  ("f" | "F") ~ (
+    "\"\"\"" ~ (escape | "{{" | "}}" | hole | !"\"\"\"" ~ [^"\\{}"])* ~ "\"\"\""
+    | "'''" ~ (escape | "{{" | "}}" | hole | !"'''" ~ [^"\\{}"])* ~ "'''"
+    | "\"" ~ (escape | "{{" | "}}" | hole | [^"\"\\{}\n"])* ~ "\""
+    | "'" ~ (escape | "{{" | "}}" | hole | [^"'\\{}\n"])* ~ "'"
+  )
+}
+
+// Multi-line holes are rejected until phase 2d line joining.
+hole = { "{" ~ ws ~ expr ~ ws ~ "}" }
+
+r_string = _{
+  ("r" | "R") ~ (
+    "\"\"\"" ~ ("\\" ~ . | !"\"\"\"" ~ [^"\\"])* ~ "\"\"\""
+    | "'''" ~ ("\\" ~ . | !"'''" ~ [^"\\"])* ~ "'''"
+    | "\"" ~ ("\\" ~ [^"\n"] | [^"\"\\\n"])* ~ "\""
+    | "'" ~ ("\\" ~ [^"\n"] | [^"'\\\n"])* ~ "'"
+  )
+}
+
+plain_string = _{
+  "\"\"\"" ~ (escape | !"\"\"\"" ~ [^"\\"])* ~ "\"\"\""
+  | "'''" ~ (escape | !"'''" ~ [^"\\"])* ~ "'''"
+  | "\"" ~ (escape | [^"\"\\\n"])* ~ "\""
+  | "'" ~ (escape | [^"'\\\n"])* ~ "'"
+}
+
+// The SUBSET escape set: `\n \r \t \\ \" \' \0 \a \b \f \v \xNN
+// \uNNNN`. `\N{...}` and `\U........` have no arm here and fail.
+escape = _{
+  "\\" ~ (
+    "n" | "r" | "t" | "\\" | "\"" | "'" | "0" | "a" | "b" | "f" | "v"
+    | "x" ~ ASCII_HEX_DIGIT ~ ASCII_HEX_DIGIT
+    | "u" ~ ASCII_HEX_DIGIT ~ ASCII_HEX_DIGIT ~ ASCII_HEX_DIGIT ~ ASCII_HEX_DIGIT
+  )
+}
 
 boolean = { ("True" | "False") ~ word_end }
 

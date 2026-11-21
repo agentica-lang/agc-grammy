@@ -47,6 +47,11 @@ plain types only.
 - Literals: ints (decimal/hex/oct/bin, underscores), floats (exponents),
   strings (prefixes `r`/`f`/plain, single/double/triple-quoted, escapes
   decoded), `True`/`False`/`None`. `b""` strings are excluded.
+  The decimal leading-zero rule (`0` followed only by optional `_0` groups,
+  or a digit run starting with `[1-9]`) is intentionally stricter than CPython
+  to keep the grammar simpler and avoid normalization surprises: CPython 3.13.5
+  accepts `00_0` and `01.0` (only `01` raises `SyntaxError`), but both are
+  `PY-OUT-OF-SUBSET` here.
 - Arithmetic is same-type only (`1 + 1.5` is `PY-TYPE-MISMATCH`; convert
   explicitly): `+ - * / %` on two `int` or two `float`. `/` on `int`
   truncates toward zero, exactly like the backend — which is why Python `/`
@@ -228,6 +233,7 @@ is rebinding:
   `\n \r \t \' \"`) and re-encodes minimally; `\N{...}` is excluded (no
   Unicode tables in the frontend). `r"..."` disables escapes; `f"..."`
   interpolates subset expressions with `{{`/`}}` for literal braces.
+  Combined prefixes (including mixed-case forms) and the `u`/`U` prefix are excluded.
   Triple-quoted strings are plain strings, not heredocs.
 
 ## 9. Excluded, each a frontend error with its own code
