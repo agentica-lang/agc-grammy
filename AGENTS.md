@@ -30,8 +30,8 @@ its tests in `tests/`, so always pass the folder.
   `{n,m}`, `//` and nested `/* */` comments) plus `[a-z]` classes and `.` as
   extensions; it also validates the grammar.
 - `src/engine.agc`: the PEG matcher. It threads a
-  `Ctx(grammar, chars, base, atomicity, skips)` and returns an `Outcome` (found
-  or the furthest `Attempt`); only `run` is public.
+  `Ctx(grammar, chars, base, atomicity, whitespace, comment)` and returns an
+  `Outcome` (found or the furthest `Attempt`); only `run` is public.
 - `src/tree.agc`: `Node(rule, start, stop, children, tag)`, `Position` and the
   queries user code calls.
 - `src/grammy.agc`: re-exports; add every new public name here or importers
@@ -56,11 +56,13 @@ its tests in `tests/`, so always pass the folder.
   start rule. `Ctx` carries the two rules resolved once by `run`, so the hot
   path does no lookup. They are matched atomically with skipping disabled, so
   they never build nodes nor re-enter `skip`.
-- Atomicity flows down: `@` (`Atomic`) drops the nodes of everything it calls
-  and skips nothing, `$` (`Compound`) keeps the nodes, `!` (`NonAtomic`)
-  restores normal behaviour, and a plain rule inherits from its caller
-  (`effective_atomicity`). A rule still builds its own node unless its caller
-  was atomic (`creates_node?`).
+- Atomicity flows down: `@` (`Atomic`) drops the nodes of the rules it calls
+  that do not declare their own atomicity and skips nothing, `$` (`Compound`)
+  keeps the nodes, `!` (`NonAtomic`) restores normal behaviour, and a plain rule
+  inherits from its caller (`effective_atomicity`). A rule still builds its own
+  node unless its caller was atomic (`creates_node?`).
+- Nothing is skipped before `INDENT`/`SAME` (`skip_before`): they measure the
+  indentation of the line they start on.
 - A tag (`#name = term`) lands on the last node its term built, and over `*` or
   `?` on the last node of every iteration. The validator refuses a tag on an
   expression that builds no node. `run` applies the start rule's own atomicity
@@ -74,7 +76,8 @@ its tests in `tests/`, so always pass the folder.
   Silent rules drop terminal labels (`without_terminals`), so only rule names
   and the terminals of named rules show up in a message.
 - `Grammar.compile` validates before matching: reserved names, duplicates,
-  a `WHITESPACE`/`COMMENT` that can fail or cannot consume input, unknown refs,
+  a `WHITESPACE`/`COMMENT` that can never fail or that never consumes input,
+  unknown refs,
   tags with no node to name, left recursion (through nullable prefixes),
   non-failing and non-progressing *unbounded* repetitions, a zero-width
   repetition asking for more than `ZERO_WIDTH_LIMIT` nodes, and unreachable

@@ -101,7 +101,7 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
-| `#name = a` | names the last node `a` builds, or every iteration's last for `a*`/`a?` |
+| `#name = a` | names the last node `a` builds, or every iteration's last for `a*`, `a?`, `a+`, `a{n,m}` |
 | `( ... )` | grouping |
 
 Single-character builtins, all matching one character: `ASCII_DIGIT`,
@@ -111,8 +111,8 @@ Single-character builtins, all matching one character: `ASCII_DIGIT`,
 `\n`, `\r\n` or `\r`; `SOI` and `EOI` match the ends of the input.
 
 Between `=` and `{` a rule takes modifiers: `_` builds no node, `>` opens an
-indentation scope, and `@`, `$`, `!` set the atomicity (`>_{` is both, and at
-most one of `_ @ $ !` may repeat).
+indentation scope, and `@`, `$`, `!` set the atomicity. They combine (`>_{` is
+both) and each may appear at most once.
 
 ## Whitespace and atomicity
 
@@ -120,8 +120,8 @@ Define `WHITESPACE` and/or `COMMENT` and they are matched implicitly between the
 parts of a sequence, between the iterations of a repetition, and after the start
 rule — exactly `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. They are ordinary rules,
 so they are declared like any other (write them silent, `= _{ ... }`: a skip rule
-is matched atomically and never builds nodes), and the compiler refuses one that
-can fail or that cannot consume input:
+is matched atomically and never builds nodes). The compiler refuses one that can
+never fail (an empty match would repeat forever) or that never consumes input:
 
 ```
 WHITESPACE = _{ " " | "	" | NEWLINE }
@@ -138,7 +138,8 @@ Atomicity says what happens inside a rule:
 | `!` non-atomic | skipped | built, even inside an atomic rule |
 
 A plain rule inherits the atomicity of its caller, which is how `@` swallows
-everything it calls. `!` restores normal behaviour inside it.
+everything it calls that does not declare its own atomicity. `!` restores normal
+behaviour inside it.
 
 A repetition without a bound stops on the first iteration that makes no
 progress. Left recursion is not supported (it will not terminate).
@@ -160,6 +161,11 @@ A block ends by itself: the repetition fails on the first line that is not
 deeper, and the enclosing scope continues from that line. Tabs count as one
 character each, and blank lines are skipped by `INDENT`/`SAME`, so they never
 close a block.
+
+`INDENT` and `SAME` read the indentation of the line they start on, so nothing is
+skipped before them even with `WHITESPACE` defined. Keep newlines out of
+`WHITESPACE` in an indentation grammar, or the skip will eat the line break they
+need.
 
 ## API
 

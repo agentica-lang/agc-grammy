@@ -117,7 +117,7 @@ def main() -> Void
     end,
     Test.test("two of the same modifier fails") do
       case Grammar.compile("a = @@{ \"x\" }")
-        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        error(e) -> Test.assert(e.message.include?("two @ modifiers on one rule"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
@@ -130,13 +130,13 @@ def main() -> Void
     end,
     Test.test("two atomic modifiers fail") do
       case Grammar.compile("a = @${ \"x\" }")
-        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        error(e) -> Test.assert(e.message.include?("two $ modifiers on one rule"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
     Test.test("a repeated silent modifier fails") do
       case Grammar.compile("a = __{ \"x\" }")
-        error(e) -> Test.assert(e.message.include?("two modifiers on one rule"), e.message)
+        error(e) -> Test.assert(e.message.include?("two _ modifiers on one rule"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
@@ -147,6 +147,23 @@ def main() -> Void
     Test.test("a tag without a node fails") do
       case Grammar.compile("a = { #n = \"x\" }")
         error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag on a silent wrapper is allowed") do
+      grammar = try Grammar.compile("p = { #a = list }\nlist = _{ item* }\nitem = { ASCII_DIGIT }")
+      Test.eq(grammar.rules[0].body, Expr.Tagged("a", Expr.RuleRef("list")))
+    end,
+    Test.test("a tag on a silent rule that builds nothing fails") do
+      case Grammar.compile("p = { #a = ws }\nws = _{ \" \"* }")
+        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a silent rule that reaches itself does not hang the tag check") do
+      case Grammar.compile("p = { #a = loop }\nloop = _{ loop? ~ \"x\" }")
+        error(e) ->
+          Test.assert(e.message.include?("left recursive") or e.message.include?("has no node to tag"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

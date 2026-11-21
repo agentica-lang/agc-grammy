@@ -173,18 +173,24 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
    and `COMMENT` are skipped between sequence parts and repetition iterations
    and once after the start rule, as `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`;
    atomic rules skip nothing and `@` drops the nodes of everything it calls.
-   The validator refuses a skipped rule that can fail or cannot consume input.
+   The validator refuses a skipped rule that can never fail or that never
+   consumes input, as pest's `validate_whitespace_comment` does.
    Deviation: a skip rule is matched atomically, so it never builds nodes even
    when it is not declared silent; pest inserts those nodes into the tree.
+   Also: a sequence does not skip before `INDENT`/`SAME`, which are ours and
+   measure the indentation a skip would eat (pest has no equivalent).
 5. **Node tags** — done: `#name = term` parses to `Expr.Tagged`, `Node.tag`
    carries it, `Tree.tagged`/`first_tagged` query it. A tag names the last node
    its term built, and over `*` or `?` the last node of every iteration, which
-   is what pest's `tag_node` does after each iteration. Deviations: `+` tags
-   every iteration too, where pest falls through to the default arm and tags
-   only the final node of the whole repetition (a pest inconsistency we do not
-   copy); and a tag on an expression that builds no node (a literal, a class, a
-   builtin, a silent rule) is a compile error, where pest leaves it pending and
-   drops it.
+   is what pest's `tag_node` does after each iteration. Deviations: `+` and
+   `{n,m}` tag every iteration too, where pest falls through to the default arm
+   and tags only the final node of the whole repetition (a pest inconsistency we
+   do not copy); and a tag on an expression that builds no node is a compile
+   error, where pest writes the tag onto the last pair already queued (a
+   preceding sibling) or no-ops inside a lookahead. The validator follows a
+   silent rule into its body, so tagging a silent wrapper is allowed. A tag
+   inside an atomic rule names nothing in grammy, since `@` builds no inner
+   nodes.
 
 ### Milestone 3 — power and speed
 

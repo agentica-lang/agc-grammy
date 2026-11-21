@@ -167,7 +167,7 @@ def match_seq(ctx: Ctx, parts: List[Grammar.Expr], pos: Int) -> Outcome
   first = true
   for part in parts
     if !first
-      at = skip(ctx, at)
+      at = skip_before(ctx, part, at)
     end
 
     first = false
@@ -204,7 +204,7 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
   while max < 0 or count < max
     before = at
     if count > 0
-      at = skip(ctx, at)
+      at = skip_before(ctx, inner, at)
     end
 
     outcome = match(ctx, inner, at)
@@ -252,17 +252,22 @@ end
 def last_tagged(outcome: Outcome, name: String) -> Outcome
   case outcome.found
     none -> outcome
-    some(found) -> matched(Progress(pos: found.pos, nodes: tag_nodes(found.nodes, some(name))))
+    some(found) ->
+      tagged = tag_nodes(found.nodes, some(name))
+      Outcome(found: some(Progress(pos: found.pos, nodes: tagged)), attempt: outcome.attempt)
   end
 end
 
 def tag_nodes(nodes: List[Tree.Node], tag: Optional[String]) -> List[Tree.Node]
-  name = tag.unwrap_or("")
-  return nodes if nodes.empty? or name.empty?
+  return nodes if nodes.empty?
 
-  last = nodes[nodes.size - 1]
-  tagged = Tree.Node(rule: last.rule, start: last.start, stop: last.stop, children: last.children, tag: some(name))
-  nodes.take(nodes.size - 1).push(tagged)
+  case tag
+    none -> nodes
+    some(name) ->
+      last = nodes[nodes.size - 1]
+      marked = Tree.Node(rule: last.rule, start: last.start, stop: last.stop, children: last.children, tag: some(name))
+      nodes.take(nodes.size - 1).push(marked)
+  end
 end
 
 def match_lookahead(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
@@ -475,6 +480,21 @@ def skip(ctx: Ctx, pos: Int) -> Int
   end
 
   at
+end
+
+# Nothing is skipped before `INDENT`/`SAME`: they measure the indentation of the
+# line they start on, and a skip would eat it.
+def skip_before(ctx: Ctx, next: Grammar.Expr, pos: Int) -> Int
+  return pos if measures_indent?(next)
+
+  skip(ctx, pos)
+end
+
+def measures_indent?(expr: Grammar.Expr) -> Bool
+  case expr
+    Grammar.Expr.Builtin(name) -> name == "INDENT" or name == "SAME"
+    _ -> false
+  end
 end
 
 # Skipping is on unless the enclosing rule is atomic; `NonAtomic` is what a

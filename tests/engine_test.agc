@@ -325,6 +325,39 @@ def main() -> Void
       tree = try parse(grammar_text, "p", "123")
       Test.eq(Tree.tagged(tree, "d").size, 3)
     end,
+    Test.test("a tag over an optional names the node when it is there") do
+      grammar_text = "p = { #e = value? }\nvalue = { ASCII_DIGIT }"
+      try Test.eq(Tree.tagged(try parse(grammar_text, "p", "7"), "e").size, 1)
+      Test.eq(Tree.tagged(try parse(grammar_text, "p", ""), "e").size, 0)
+    end,
+    Test.test("a tag over + and {n,m} names every iteration") do
+      grammar_text = "p = { #d = digit+ }\ndigit = { ASCII_DIGIT }"
+      try Test.eq(Tree.tagged(try parse(grammar_text, "p", "123"), "d").size, 3)
+      bounded = "q = { #d = digit{2,3} }\ndigit = { ASCII_DIGIT }"
+      Test.eq(Tree.tagged(try parse(bounded, "q", "12"), "d").size, 2)
+    end,
+    Test.test("a tag keeps the deepest attempt") do
+      grammar_text = "p = { #a = (b ~ c | b) ~ \"!\" }\nb = { \"b\" }\nc = { \"c\" }"
+      case parse(grammar_text, "p", "b?")
+        error(e) -> Test.assert(e.message.include?("\"c\""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an indentation scope works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go \n   ab ")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 7)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go \n   ab "), "ab")
+    end,
+    Test.test("an atomic indentation scope keeps the block base") do
+      grammar_text = "p = >@{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      try Test.eq(tree.children.size, 0)
+      Test.eq(tree.stop, 7)
+    end,
     Test.test("an untagged node has no tag") do
       tree = try parse("p = { ASCII_DIGIT }", "p", "1")
       try Test.eq(tree.tag, none)

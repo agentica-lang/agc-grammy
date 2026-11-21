@@ -263,15 +263,20 @@ def read_modifiers(chars: List[String], pos: Int) -> Result[ParsedFlags]
   while true
     case char_at(chars, at)
       "_" ->
-        return error("grammar: two modifiers on one rule at character #{at}") if silent
+        return error("grammar: two _ modifiers on one rule at character #{at}") if silent
+
         silent = true
         at = skip_blanks(chars, at + 1)
       ">" ->
-        return error("grammar: two modifiers on one rule at character #{at}") if indents
+        return error("grammar: two > modifiers on one rule at character #{at}") if indents
+
         indents = true
         at = skip_blanks(chars, at + 1)
       "@", "$", "!" ->
-        return error("grammar: two modifiers on one rule at character #{at}") if atomicity != Atomicity.Plain
+        if atomicity != Atomicity.Plain
+          return error("grammar: two #{char_at(chars, at)} modifiers on one rule at character #{at}")
+        end
+
         atomicity = modifier_atomicity(char_at(chars, at))
         at = skip_blanks(chars, at + 1)
       _ -> break
@@ -347,7 +352,7 @@ def read_tag(chars: List[String], pos: Int) -> Result[ParsedTag]
   at = skip_blanks(chars, pos)
   return ok(ParsedTag(name: none, pos: pos)) if char_at(chars, at) != "#"
   ident = try read_ident(chars, skip_blanks(chars, at + 1)).to_result(
-    "grammar: expected a tag name at character #{at}",
+    "grammar: expected a tag name after #, found #{char_at(chars, skip_blanks(chars, at + 1)).inspect} at character #{at}",
   )
 
   equals = try expect_char(chars, skip_blanks(chars, ident.pos), "=")
@@ -808,8 +813,8 @@ def duplicate_problem(rules: List[Rule]) -> Optional[String]
   none
 end
 
-# `WHITESPACE` and `COMMENT` are skipped between expressions, so a body that can
-# fail or cannot consume input would stall every sequence that uses them.
+# `WHITESPACE` and `COMMENT` are repeated while they match, so a body that cannot
+# fail (it matches the empty string) or that never consumes input would spin.
 def whitespace_problem(rules: List[Rule]) -> Optional[String]
   always = always_rules(rules)
   still = still_rules(rules)
@@ -869,60 +874,73 @@ end
 
 # A tag lands on the last node its term builds, so the term must build one.
 def tag_problem(rules: List[Rule]) -> Optional[String]
-  silent = silent_names(rules)
   for candidate in rules
-    problem = tag_in(candidate.name, candidate.body, silent)
+    problem = tag_in(candidate.name, candidate.body, rules)
     return problem if problem.some?
   end
 
   none
 end
 
-def silent_names(rules: List[Rule]) -> Set[String]
-  names: Set[String] = Set.new([])
-  for candidate in rules
-    if candidate.silent
-      names = names.add(candidate.name)
-    end
-  end
-
-  names
-end
-
-def tag_in(owner: String, expr: Expr, silent: Set[String]) -> Optional[String]
+def tag_in(owner: String, expr: Expr, rules: List[Rule]) -> Optional[String]
   case expr
     Expr.Tagged(name, inner) ->
-      return some("grammar: the tag ##{name} in rule #{owner} has no node to tag") if !builds_node?(inner, silent)
+      if !builds_node?(inner, rules, Set.new([]))
+        return some("grammar: the tag ##{name} in rule #{owner} has no node to tag")
+      end
 
-      tag_in(owner, inner, silent)
-    Expr.Seq(parts) -> nested_tag(owner, parts, silent)
-    Expr.Choice(options) -> nested_tag(owner, options, silent)
-    Expr.Repeat(inner, _, _) -> tag_in(owner, inner, silent)
-    Expr.Lookahead(inner) -> tag_in(owner, inner, silent)
-    Expr.Negative(inner) -> tag_in(owner, inner, silent)
+      tag_in(owner, inner, rules)
+    Expr.Seq(parts) -> nested_tag(owner, parts, rules)
+    Expr.Choice(options) -> nested_tag(owner, options, rules)
+    Expr.Repeat(inner, _, _) -> tag_in(owner, inner, rules)
+    Expr.Lookahead(inner) -> tag_in(owner, inner, rules)
+    Expr.Negative(inner) -> tag_in(owner, inner, rules)
     _ -> none
   end
 end
 
-def nested_tag(owner: String, parts: List[Expr], silent: Set[String]) -> Optional[String]
+def nested_tag(owner: String, parts: List[Expr], rules: List[Rule]) -> Optional[String]
   found: Optional[String] = none
   for part in parts
     break if found.some?
-    found = tag_in(owner, part, silent)
+    found = tag_in(owner, part, rules)
   end
 
   found
 end
 
-def builds_node?(expr: Expr, silent: Set[String]) -> Bool
+# Whether the expression can build a node at all. A silent rule builds none of
+# its own, but passes its children up, so it is followed into its body; `seen`
+# stops a silent rule that reaches itself.
+def builds_node?(expr: Expr, rules: List[Rule], seen: Set[String]) -> Bool
   case expr
-    Expr.RuleRef(name) -> !silent.include?(name)
-    Expr.Seq(parts) -> parts.any? { |part| builds_node?(part, silent) }
-    Expr.Choice(options) -> options.all? { |option| builds_node?(option, silent) }
-    Expr.Repeat(inner, _, _) -> builds_node?(inner, silent)
-    Expr.Tagged(_, inner) -> builds_node?(inner, silent)
+    Expr.RuleRef(name) -> ref_builds_node?(name, rules, seen)
+    Expr.Seq(parts) -> parts.any? { |part| builds_node?(part, rules, seen) }
+    Expr.Choice(options) -> options.all? { |option| builds_node?(option, rules, seen) }
+    Expr.Repeat(inner, _, _) -> builds_node?(inner, rules, seen)
+    Expr.Tagged(_, inner) -> builds_node?(inner, rules, seen)
     _ -> false
   end
+end
+
+def ref_builds_node?(name: String, rules: List[Rule], seen: Set[String]) -> Bool
+  return false if seen.include?(name)
+  case body_of(rules, name)
+    none -> false
+    some(candidate) -> !candidate.silent or builds_node?(candidate.body, rules, seen.add(name))
+  end
+end
+
+def body_of(rules: List[Rule], name: String) -> Optional[Rule]
+  found: Optional[Rule] = none
+  for candidate in rules
+    if candidate.name == name
+      found = some(candidate)
+      break
+    end
+  end
+
+  found
 end
 
 def ref_problem(owner: String, name: String, known: Set[String]) -> Optional[String]
