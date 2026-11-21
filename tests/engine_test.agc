@@ -481,6 +481,65 @@ def main() -> Void
       try Test.eq(Tree.find_all(tree, "string").size, 4)
       Test.eq(Tree.find_all(tree, "inner").size, 0)
     end,
+    Test.test("PUSH stores the text and POP matches it") do
+      tree = try parse("p = { PUSH(word) ~ \" \" ~ POP }\nword = { ASCII_ALPHA+ }", "p", "abc abc")
+      try Test.eq(tree.stop, 7)
+      Test.eq(Tree.find_all(tree, "word").size, 1)
+    end,
+    Test.test("PUSH_LITERAL stores a fixed string") do
+      tree = try parse("p = { PUSH_LITERAL(\"ab\") ~ \"cd\" ~ POP }", "p", "cdab")
+      Test.eq(tree.stop, 4)
+    end,
+    Test.test("PEEK matches without popping") do
+      tree = try parse("p = { PUSH_LITERAL(\"ab\") ~ \"|\" ~ PEEK ~ \"|\" ~ POP }", "p", "|ab|ab")
+      Test.eq(tree.stop, 6)
+    end,
+    Test.test("POP_ALL walks the stack from its top") do
+      tree = try parse("p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ \"-\" ~ POP_ALL }", "p", "-ba")
+      try Test.eq(tree.stop, 3)
+      Test.error?(parse("p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ \"-\" ~ POP_ALL }", "p", "-ab"))
+    end,
+    Test.test("PEEK_ALL matches the whole stack twice") do
+      grammar_text = "p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ \"-\" ~ PEEK_ALL ~ PEEK_ALL }"
+      tree = try parse(grammar_text, "p", "-baba")
+      Test.eq(tree.stop, 5)
+    end,
+    Test.test("DROP pops without matching") do
+      tree = try parse("p = { PUSH_LITERAL(\"<\") ~ PUSH_LITERAL(\">\") ~ DROP ~ \"x\" ~ POP }", "p", "x<")
+      Test.eq(tree.stop, 2)
+    end,
+    Test.test("a failed alternative rolls the stack back") do
+      grammar_text = "p = { (PUSH_LITERAL(\"x\") ~ \"q\")? ~ \"a\" ~ PEEK }"
+      try Test.error?(parse(grammar_text, "p", "ax"))
+      Test.ok?(parse("p = { PUSH_LITERAL(\"x\") ~ \"a\" ~ PEEK }", "p", "ax"))
+    end,
+    Test.test("a repetition rolls the stack back too") do
+      grammar_text = "p = { (PUSH_LITERAL(\"x\") ~ \"q\")* ~ \"a\" ~ PEEK }"
+      Test.error?(parse(grammar_text, "p", "ax"))
+    end,
+    Test.test("a lookahead does not leak a push") do
+      grammar_text = "p = { &(PUSH_LITERAL(\"x\")) ~ \"a\" ~ PEEK }"
+      Test.error?(parse(grammar_text, "p", "ax"))
+    end,
+    Test.test("an empty stack fails instead of crashing") do
+      case parse("p = { \"a\" ~ POP }\nunused = _{ PUSH_LITERAL(\"x\") }", "p", "a")
+        error(e) -> Test.assert(e.message.include?("a value on the stack"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("the stack balances nested parentheses") do
+      grammar_text = (
+        "p = { nested }\nnested = { \"(\" ~ PUSH_LITERAL(\")\") ~ (nested | inner)* ~ POP }\ninner = { (!(\"(\" | \")\") ~ ANY)+ }"
+      )
+
+      try Test.eq((try parse(grammar_text, "p", "((x)(y))")).stop, 8)
+      Test.error?(parse(grammar_text, "p", "((a)"))
+    end,
+    Test.test("a stack operation inside an atomic rule still works") do
+      tree = try parse("p = { item }\nitem = @{ PUSH_LITERAL(\"ab\") ~ \"cd\" ~ POP }", "p", "cdab")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.text(tree.children[0], "cdab"), "cdab")
+    end,
     Test.test("position counts lines and columns") do
       where = Tree.position("ab\ncd\n", 4)
       try Test.eq(where.line, 2)

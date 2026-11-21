@@ -97,6 +97,8 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 | `name` | that rule; silent rules pass their children up |
 | `ANY`, `SOI`, `EOI` (alias `EOF`), `NEWLINE` | builtins |
 | `INDENT`, `SAME` | consume a line's indentation, compared with the `>` scope |
+| `PUSH(a)`, `PUSH_LITERAL("t")` | push the text `a` matched, or the fixed string |
+| `POP`, `PEEK`, `POP_ALL`, `PEEK_ALL`, `DROP` | match the stack top (or all of it) and pop it, or drop it |
 | `a ~ b` | sequence (`~` is required between terms, as in pest) |
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
@@ -144,6 +146,28 @@ behaviour inside it.
 
 A repetition without a bound stops on the first iteration that makes no
 progress. Left recursion is not supported (it will not terminate).
+
+## The stack
+
+Grammars can remember text and match it again later — pest's stack, used for
+balanced constructs without left recursion:
+
+```
+nested = { "(" ~ PUSH_LITERAL(")") ~ (nested | inner)* ~ POP }
+inner  = { (!("(" | ")") ~ ANY)+ }
+```
+
+`nested` accepts `((a)(b))`: each `(` stores the `)` that must close it, and `POP`
+only matches when that `)` is really there. `PUSH(e)` works the same way when the
+closing text is what `e` matched (`PUSH(ASCII_DIGIT+) ~ " #" ~ POP`).
+
+`PUSH(a)` stores the text `a` covered, `PUSH_LITERAL("t")` stores a fixed
+string, `POP` matches the top and pops it, `PEEK` matches it without popping,
+`POP_ALL`/`PEEK_ALL` walk the whole stack from its top down, and `DROP` pops
+without matching. The stack is part of the matched value, so a failed
+alternative (or a repetition that stops, or a lookahead) leaves it untouched.
+An operation on an empty stack fails the match; the compiler refuses a grammar
+that reads the stack without ever pushing to it.
 
 ## Indentation
 

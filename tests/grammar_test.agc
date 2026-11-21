@@ -106,6 +106,36 @@ def main() -> Void
       try Test.eq(rule.indents, true)
       Test.eq(rule.silent, true)
     end,
+    Test.test("the stack builtins are read") do
+      grammar = try Grammar.compile("a = { PUSH(ASCII_DIGIT+) ~ POP }")
+      try Test.eq(
+        grammar.rules[0].body,
+        Expr.Seq([Expr.Push(Expr.Repeat(Expr.Builtin("ASCII_DIGIT"), 1, UNBOUNDED)), Expr.Pop]),
+      )
+
+      literal = try Grammar.compile("b = { PUSH_LITERAL(\"x\") ~ PEEK ~ DROP }")
+      try Test.eq(literal.rules[0].body, Expr.Seq([Expr.PushLiteral("x"), Expr.Peek, Expr.Drop]))
+      all = try Grammar.compile("c = { PUSH_LITERAL(\"x\") ~ POP_ALL ~ PEEK_ALL }")
+      Test.eq(all.rules[0].body, Expr.Seq([Expr.PushLiteral("x"), Expr.PopAll, Expr.PeekAll]))
+    end,
+    Test.test("PUSH without parentheses fails") do
+      case Grammar.compile("a = { PUSH }")
+        error(e) -> Test.assert(e.message.include?("PUSH needs an expression in parentheses"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("PUSH_LITERAL needs a string") do
+      case Grammar.compile("a = { PUSH_LITERAL(x) }")
+        error(e) -> Test.assert(e.message.include?("PUSH_LITERAL needs a string"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("reading the stack without pushing anything fails") do
+      case Grammar.compile("a = { POP }")
+        error(e) -> Test.assert(e.message.include?("the stack is read but nothing pushes"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("the atomic modifiers are read") do
       atomic = try Grammar.compile("a = @{ \"x\" }")
       compound = try Grammar.compile("b = ${ \"x\" }")
