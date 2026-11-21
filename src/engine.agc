@@ -23,6 +23,7 @@ def run(grammar: Grammar.Grammar, rule_name: String, text: String) -> Result[Tre
   rule = try Grammar.rule(grammar, rule_name)
   ctx = Ctx(
     grammar: grammar,
+    text: text,
     chars: text.split(""),
     base: 0,
     atomicity: Grammar.Atomicity.Plain,
@@ -31,7 +32,7 @@ def run(grammar: Grammar.Grammar, rule_name: String, text: String) -> Result[Tre
   )
 
   inner = body_ctx(ctx, rule, 0)
-  outcome = match(inner, rule.body, 0)
+  outcome = match(inner, [], rule.body, 0)
   case outcome.found
     none -> error(failure(text, rule_name, outcome.attempt))
     some(found) ->
@@ -52,6 +53,7 @@ LABEL_LIMIT = 6
 # whitespace, and the two rules to skip (resolved once, as it is a hot path).
 struct Ctx
   grammar: Grammar.Grammar
+  text: String
   chars: List[String]
   base: Int
   atomicity: Grammar.Atomicity
@@ -59,10 +61,13 @@ struct Ctx
   comment: Optional[Grammar.Rule]
 end
 
-# What one expression matched: where it stopped and the nodes it built.
+# What one expression matched: where it stopped, the nodes it built and the rule
+# stack it leaves behind. The stack rides on the matched value, so a failed
+# alternative drops its pushes for free (no snapshot, nothing to restore).
 struct Progress
   pos: Int
   nodes: List[Tree.Node]
+  stack: List[String]
 end
 
 # One expectation, from the author's point of view: a rule name or a terminal.
@@ -70,6 +75,12 @@ end
 struct Label
   text: String
   terminal: Bool
+end
+
+# Whether matching the whole stack also empties it (`POP_ALL` does).
+enum StackMatch
+  Keep
+  Take
 end
 
 # The furthest trouble seen: where, what was expected and what was not.
@@ -84,40 +95,47 @@ struct Outcome
   attempt: Optional[Attempt]
 end
 
-def match(ctx: Ctx, expr: Grammar.Expr, pos: Int) -> Outcome
+def match(ctx: Ctx, stack: List[String], expr: Grammar.Expr, pos: Int) -> Outcome
   case expr
-    Expr.Literal(text) -> match_literal(text, ctx.chars, pos)
-    Expr.Insensitive(text) -> match_insensitive(text, ctx.chars, pos)
-    Expr.CharClass(negated, items) -> match_class(negated, items, ctx.chars, pos)
-    Expr.AnyChar -> match_any(ctx.chars, pos)
-    Expr.Builtin(name) -> match_builtin(ctx, name, pos)
-    Expr.RuleRef(name) -> match_ref(ctx, name, pos)
-    Expr.Seq(parts) -> match_seq(ctx, parts, pos)
-    Expr.Choice(options) -> match_choice(ctx, options, pos)
-    Expr.Repeat(inner, min, max) -> match_repeat(ctx, inner, min, max, pos, none)
-    Expr.Lookahead(inner) -> match_lookahead(ctx, inner, pos)
-    Expr.Negative(inner) -> match_negative(ctx, inner, pos)
-    Expr.Tagged(name, inner) -> match_tagged(ctx, name, inner, pos)
+    Expr.Literal(text) -> match_literal(text, ctx.chars, pos, stack)
+    Expr.Insensitive(text) -> match_insensitive(text, ctx.chars, pos, stack)
+    Expr.CharClass(negated, items) -> match_class(negated, items, ctx.chars, pos, stack)
+    Expr.AnyChar -> match_any(ctx.chars, pos, stack)
+    Expr.Builtin(name) -> match_builtin(ctx, stack, name, pos)
+    Expr.RuleRef(name) -> match_ref(ctx, stack, name, pos)
+    Expr.Seq(parts) -> match_seq(ctx, stack, parts, pos)
+    Expr.Choice(options) -> match_choice(ctx, stack, options, pos)
+    Expr.Repeat(inner, min, max) -> match_repeat(ctx, stack, inner, min, max, pos, none)
+    Expr.Lookahead(inner) -> match_lookahead(ctx, stack, inner, pos)
+    Expr.Negative(inner) -> match_negative(ctx, stack, inner, pos)
+    Expr.Tagged(name, inner) -> match_tagged(ctx, stack, name, inner, pos)
+    Expr.Push(inner) -> match_push(ctx, stack, inner, pos)
+    Expr.PushLiteral(text) -> matched(Progress(pos: pos, nodes: [], stack: stack.push(text)))
+    Expr.Pop -> match_pop(ctx, stack, pos)
+    Expr.Peek -> match_peek(ctx, stack, pos)
+    Expr.PopAll -> match_stack_all(ctx, stack, pos, StackMatch.Take)
+    Expr.PeekAll -> match_stack_all(ctx, stack, pos, StackMatch.Keep)
+    Expr.Drop -> match_drop(stack, pos)
   end
 end
 
 # A named rule builds a node and reports its name when it fails; a silent one
 # (`_`) passes its children up and keeps only rule names, not its own terminals.
-def match_ref(ctx: Ctx, name: String, pos: Int) -> Outcome
+def match_ref(ctx: Ctx, stack: List[String], name: String, pos: Int) -> Outcome
   case Grammar.find(ctx.grammar, name)
     none -> miss(pos, [name])
     some(rule) ->
       if rule.silent
-        outcome = match(body_ctx(ctx, rule, pos), rule.body, pos)
+        outcome = match(body_ctx(ctx, rule, pos), stack, rule.body, pos)
         Outcome(found: outcome.found, attempt: without_terminals(outcome.attempt))
       else
-        match_rule(ctx, rule, pos)
+        match_rule(ctx, stack, rule, pos)
       end
   end
 end
 
-def match_rule(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Outcome
-  outcome = match(body_ctx(ctx, rule, pos), rule.body, pos)
+def match_rule(ctx: Ctx, stack: List[String], rule: Grammar.Rule, pos: Int) -> Outcome
+  outcome = match(body_ctx(ctx, rule, pos), stack, rule.body, pos)
   case outcome.found
     none ->
       named = Attempt(pos: pos, expected: [Label(text: rule.name, terminal: false)], unexpected: [])
@@ -125,7 +143,7 @@ def match_rule(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Outcome
     some(found) ->
       return Outcome(found: some(found), attempt: outcome.attempt) if !creates_node?(ctx, rule)
       node = Tree.Node(rule: rule.name, start: pos, stop: found.pos, children: found.nodes, tag: none)
-      matched(Progress(pos: found.pos, nodes: [node]))
+      matched(Progress(pos: found.pos, nodes: [node], stack: found.stack))
   end
 end
 
@@ -160,10 +178,11 @@ def creates_node?(ctx: Ctx, rule: Grammar.Rule) -> Bool
   end
 end
 
-def match_seq(ctx: Ctx, parts: List[Grammar.Expr], pos: Int) -> Outcome
+def match_seq(ctx: Ctx, stack: List[String], parts: List[Grammar.Expr], pos: Int) -> Outcome
   nodes: List[Tree.Node] = []
   attempt: Optional[Attempt] = none
   at = pos
+  current = stack
   first = true
   for part in parts
     if !first
@@ -171,23 +190,24 @@ def match_seq(ctx: Ctx, parts: List[Grammar.Expr], pos: Int) -> Outcome
     end
 
     first = false
-    outcome = match(ctx, part, at)
+    outcome = match(ctx, current, part, at)
     attempt = merge(attempt, outcome.attempt)
     case outcome.found
       none -> return Outcome(found: none, attempt: attempt)
       some(found) ->
         nodes = append(nodes, found.nodes)
         at = found.pos
+        current = found.stack
     end
   end
 
-  Outcome(found: some(Progress(pos: at, nodes: nodes)), attempt: attempt)
+  Outcome(found: some(Progress(pos: at, nodes: nodes, stack: current)), attempt: attempt)
 end
 
-def match_choice(ctx: Ctx, options: List[Grammar.Expr], pos: Int) -> Outcome
+def match_choice(ctx: Ctx, stack: List[String], options: List[Grammar.Expr], pos: Int) -> Outcome
   attempt: Optional[Attempt] = none
   for option in options
-    outcome = match(ctx, option, pos)
+    outcome = match(ctx, stack, option, pos)
     attempt = merge(attempt, outcome.attempt)
     return Outcome(found: outcome.found, attempt: attempt) if outcome.found.some?
   end
@@ -196,27 +216,41 @@ def match_choice(ctx: Ctx, options: List[Grammar.Expr], pos: Int) -> Outcome
 end
 
 # Stops on no progress, so a repetition of a nullable expression terminates.
-def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, tag: Optional[String]) -> Outcome
+def match_repeat(
+  ctx: Ctx,
+  stack: List[String],
+  inner: Grammar.Expr,
+  min: Int,
+  max: Int,
+  pos: Int,
+  tag: Optional[String],
+) -> Outcome
   nodes: List[Tree.Node] = []
   attempt: Optional[Attempt] = none
   count = 0
   at = pos
+  current = stack
   while max < 0 or count < max
     before = at
     if count > 0
       at = skip(ctx, at)
     end
 
-    outcome = match(ctx, inner, at)
+    size_before = current.size
+    outcome = match(ctx, current, inner, at)
     attempt = merge(attempt, outcome.attempt)
     case outcome.found
       none ->
         at = before
         break
       some(found) ->
-        stuck = found.pos == at
+        # Stuck means neither the input nor the stack moved: the rest of a
+        # bounded repetition is that same empty match.
+        stuck = found.pos == at and found.stack == current
+        stopped = found.pos == at
         nodes = append(nodes, tag_nodes(found.nodes, tag))
         at = found.pos
+        current = found.stack
         count += 1
         if stuck and max >= 0
           # A zero-width iteration repeats the same empty match, so the rest of
@@ -229,6 +263,9 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
         end
 
         break if stuck
+        # An unbounded repetition that moves only the stack (a `DROP` loop) keeps
+        # going while it shrinks, so it cannot spin forever.
+        break if stopped and max < 0 and found.stack.size >= size_before
     end
   end
 
@@ -237,15 +274,79 @@ def match_repeat(ctx: Ctx, inner: Grammar.Expr, min: Int, max: Int, pos: Int, ta
     return Outcome(found: none, attempt: merge(attempt, some(wanted)))
   end
 
-  Outcome(found: some(Progress(pos: at, nodes: nodes)), attempt: attempt)
+  Outcome(found: some(Progress(pos: at, nodes: nodes, stack: current)), attempt: attempt)
+end
+
+# `PUSH(expr)` pushes the text the expression matched; the stack rides on the
+# matched value, so a failed alternative simply drops the push.
+def match_push(ctx: Ctx, stack: List[String], inner: Grammar.Expr, pos: Int) -> Outcome
+  outcome = match(ctx, stack, inner, pos)
+  case outcome.found
+    none -> outcome
+    some(found) ->
+      pushed = ctx.text.slice(pos, found.pos - pos)
+      matched(Progress(pos: found.pos, nodes: found.nodes, stack: found.stack.push(pushed)))
+  end
+end
+
+# `POP` and `PEEK` match the text they hold, `*_ALL` walks the stack from its top
+# down, and `DROP` only pops. `POP`, `PEEK` and `DROP` fail on an empty stack
+# (pest panics there, because its validator rules that out); `POP_ALL` and
+# `PEEK_ALL` match nothing, as in pest.
+def match_pop(ctx: Ctx, stack: List[String], pos: Int) -> Outcome
+  return stack_miss(pos) if stack.empty?
+
+  match_literal(stack_top(stack), ctx.chars, pos, stack_rest(stack))
+end
+
+def match_peek(ctx: Ctx, stack: List[String], pos: Int) -> Outcome
+  return stack_miss(pos) if stack.empty?
+
+  match_literal(stack_top(stack), ctx.chars, pos, stack)
+end
+
+def match_stack_all(ctx: Ctx, stack: List[String], pos: Int, how: StackMatch) -> Outcome
+  at = pos
+  i = stack.size - 1
+  while i >= 0
+    outcome = match_literal(stack[i], ctx.chars, at, stack)
+    case outcome.found
+      none -> return Outcome(found: none, attempt: outcome.attempt)
+      some(found) -> at = found.pos
+    end
+
+    i -= 1
+  end
+
+  case how
+    StackMatch.Keep -> matched(Progress(pos: at, nodes: [], stack: stack))
+    StackMatch.Take -> matched(Progress(pos: at, nodes: [], stack: []))
+  end
+end
+
+# `DROP` only pops, so it takes no context.
+def match_drop(stack: List[String], pos: Int) -> Outcome
+  return stack_miss(pos) if stack.empty?
+
+  matched(Progress(pos: pos, nodes: [], stack: stack_rest(stack)))
+end
+
+def stack_top(stack: List[String]) -> String = stack[stack.size - 1]
+
+def stack_rest(stack: List[String]) -> List[String] = stack.take(stack.size - 1)
+
+# Not terminal: a silent rule must keep the hint, as with the indentation labels.
+def stack_miss(pos: Int) -> Outcome
+  label = Label(text: "a value on the stack", terminal: false)
+  Outcome(found: none, attempt: some(Attempt(pos: pos, expected: [label], unexpected: [])))
 end
 
 # A tag names the last node its term built, and over a repetition or an
 # optional the last node of every iteration (as pest tags each iteration).
-def match_tagged(ctx: Ctx, name: String, inner: Grammar.Expr, pos: Int) -> Outcome
+def match_tagged(ctx: Ctx, stack: List[String], name: String, inner: Grammar.Expr, pos: Int) -> Outcome
   case inner
-    Expr.Repeat(each, min, max) -> match_repeat(ctx, each, min, max, pos, some(name))
-    _ -> last_tagged(match(ctx, inner, pos), name)
+    Expr.Repeat(each, min, max) -> match_repeat(ctx, stack, each, min, max, pos, some(name))
+    _ -> last_tagged(match(ctx, stack, inner, pos), name)
   end
 end
 
@@ -254,7 +355,7 @@ def last_tagged(outcome: Outcome, name: String) -> Outcome
     none -> outcome
     some(found) ->
       tagged = tag_nodes(found.nodes, some(name))
-      Outcome(found: some(Progress(pos: found.pos, nodes: tagged)), attempt: outcome.attempt)
+      Outcome(found: some(Progress(pos: found.pos, nodes: tagged, stack: found.stack)), attempt: outcome.attempt)
   end
 end
 
@@ -270,18 +371,18 @@ def tag_nodes(nodes: List[Tree.Node], tag: Optional[String]) -> List[Tree.Node]
   end
 end
 
-def match_lookahead(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
-  outcome = match(ctx, inner, pos)
+def match_lookahead(ctx: Ctx, stack: List[String], inner: Grammar.Expr, pos: Int) -> Outcome
+  outcome = match(ctx, stack, inner, pos)
   case outcome.found
     none -> Outcome(found: none, attempt: outcome.attempt)
-    some(_) -> matched(Progress(pos: pos, nodes: []))
+    some(_) -> matched(Progress(pos: pos, nodes: [], stack: stack))
   end
 end
 
-def match_negative(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
-  outcome = match(ctx, inner, pos)
+def match_negative(ctx: Ctx, stack: List[String], inner: Grammar.Expr, pos: Int) -> Outcome
+  outcome = match(ctx, stack, inner, pos)
   case outcome.found
-    none -> matched(Progress(pos: pos, nodes: []))
+    none -> matched(Progress(pos: pos, nodes: [], stack: stack))
     some(_) ->
       refused = Attempt(pos: pos, expected: [], unexpected: [Label(text: describe(inner), terminal: false)])
       Outcome(found: none, attempt: some(refused))
@@ -290,14 +391,14 @@ end
 
 # An insensitive literal compares case by case with an ASCII fold, as pest:
 # U+212A KELVIN SIGN is not an ASCII `K`, so `^"k"` does not match it.
-def match_insensitive(text: String, chars: List[String], pos: Int) -> Outcome
+def match_insensitive(text: String, chars: List[String], pos: Int, stack: List[String]) -> Outcome
   parts = text.split("")
   for i in 0...parts.size
     at = pos + i
     return miss(at, ["^#{text.inspect}"]) if at >= chars.size or ascii_down(chars[at]) != ascii_down(parts[i])
   end
 
-  matched(Progress(pos: pos + parts.size, nodes: []))
+  matched(Progress(pos: pos + parts.size, nodes: [], stack: stack))
 end
 
 def ascii_down(c: String) -> String
@@ -307,23 +408,29 @@ def ascii_down(c: String) -> String
   c
 end
 
-def match_literal(text: String, chars: List[String], pos: Int) -> Outcome
+def match_literal(text: String, chars: List[String], pos: Int, stack: List[String]) -> Outcome
   parts = text.split("")
   for i in 0...parts.size
     at = pos + i
     return miss(at, [text.inspect]) if at >= chars.size or chars[at] != parts[i]
   end
 
-  matched(Progress(pos: pos + parts.size, nodes: []))
+  matched(Progress(pos: pos + parts.size, nodes: [], stack: stack))
 end
 
-def match_any(chars: List[String], pos: Int) -> Outcome
+def match_any(chars: List[String], pos: Int, stack: List[String]) -> Outcome
   return miss(pos, ["any character"]) if pos >= chars.size
 
-  matched(Progress(pos: pos + 1, nodes: []))
+  matched(Progress(pos: pos + 1, nodes: [], stack: stack))
 end
 
-def match_class(negated: Bool, items: List[Grammar.ClassItem], chars: List[String], pos: Int) -> Outcome
+def match_class(
+  negated: Bool,
+  items: List[Grammar.ClassItem],
+  chars: List[String],
+  pos: Int,
+  stack: List[String],
+) -> Outcome
   label = class_text(negated, items)
   return miss(pos, [label]) if pos >= chars.size
 
@@ -331,7 +438,7 @@ def match_class(negated: Bool, items: List[Grammar.ClassItem], chars: List[Strin
   inside = items.any? { |item| item_holds?(item, c) }
   return miss(pos, [label]) if inside == negated
 
-  matched(Progress(pos: pos + 1, nodes: []))
+  matched(Progress(pos: pos + 1, nodes: [], stack: stack))
 end
 
 def item_holds?(item: Grammar.ClassItem, c: String) -> Bool
@@ -341,16 +448,19 @@ def item_holds?(item: Grammar.ClassItem, c: String) -> Bool
   end
 end
 
-def match_builtin(ctx: Ctx, name: String, pos: Int) -> Outcome
-  return matched(Progress(pos: pos, nodes: [])) if (name == "EOF" or name == "EOI") and pos >= ctx.chars.size
-  return matched(Progress(pos: pos, nodes: [])) if name == "SOI" and pos == 0
-  return match_indent(ctx, pos, true) if name == "INDENT"
-  return match_indent(ctx, pos, false) if name == "SAME"
+def match_builtin(ctx: Ctx, stack: List[String], name: String, pos: Int) -> Outcome
+  if (name == "EOF" or name == "EOI") and pos >= ctx.chars.size
+    return matched(Progress(pos: pos, nodes: [], stack: stack))
+  end
+
+  return matched(Progress(pos: pos, nodes: [], stack: stack)) if name == "SOI" and pos == 0
+  return match_indent(ctx, stack, pos, true) if name == "INDENT"
+  return match_indent(ctx, stack, pos, false) if name == "SAME"
   return miss(pos, [builtin_label(name)]) if pos >= ctx.chars.size
-  return match_newline(ctx.chars, pos) if name == "NEWLINE"
+  return match_newline(ctx.chars, pos, stack) if name == "NEWLINE"
 
   if builtin_holds?(name, ctx.chars[pos])
-    matched(Progress(pos: pos + 1, nodes: []))
+    matched(Progress(pos: pos + 1, nodes: [], stack: stack))
   else
     miss(pos, [builtin_label(name)])
   end
@@ -377,7 +487,7 @@ def indent_holds?(deeper: Bool, level: Int, base: Int) -> Bool
   level == base
 end
 
-def match_indent(ctx: Ctx, pos: Int, deeper: Bool) -> Outcome
+def match_indent(ctx: Ctx, stack: List[String], pos: Int, deeper: Bool) -> Outcome
   line = line_start(ctx.chars, pos)
   head = skip_spaces(ctx.chars, line)
   start = line
@@ -397,7 +507,7 @@ def match_indent(ctx: Ctx, pos: Int, deeper: Bool) -> Outcome
   spaces = skip_spaces(ctx.chars, start)
   return indent_miss(start, deeper) if !indent_holds?(deeper, spaces - start, ctx.base)
 
-  matched(Progress(pos: spaces, nodes: []))
+  matched(Progress(pos: spaces, nodes: [], stack: stack))
 end
 
 def line_end?(chars: List[String], pos: Int) -> Bool
@@ -407,12 +517,12 @@ def line_end?(chars: List[String], pos: Int) -> Bool
 end
 
 # pest's NEWLINE is `\n`, `\r\n` or `\r`.
-def match_newline(chars: List[String], pos: Int) -> Outcome
-  return matched(Progress(pos: pos + 1, nodes: [])) if chars[pos] == "\n"
+def match_newline(chars: List[String], pos: Int, stack: List[String]) -> Outcome
+  return matched(Progress(pos: pos + 1, nodes: [], stack: stack)) if chars[pos] == "\n"
   return miss(pos, ["NEWLINE"]) if chars[pos] != "\r"
-  return matched(Progress(pos: pos + 2, nodes: [])) if pos + 1 < chars.size and chars[pos + 1] == "\n"
+  return matched(Progress(pos: pos + 2, nodes: [], stack: stack)) if pos + 1 < chars.size and chars[pos + 1] == "\n"
 
-  matched(Progress(pos: pos + 1, nodes: []))
+  matched(Progress(pos: pos + 1, nodes: [], stack: stack))
 end
 
 # A single character, by its code point; the callers pass one character.
@@ -536,7 +646,7 @@ end
 # cannot re-enter `skip` through a `!` rule of its own.
 def skipped(ctx: Ctx, rule: Grammar.Rule, pos: Int) -> Int
   inner = body_ctx(ctx, rule, pos).with(atomicity: Grammar.Atomicity.Atomic, whitespace: none, comment: none)
-  outcome = match(inner, rule.body, pos)
+  outcome = match(inner, [], rule.body, pos)
   case outcome.found
     none -> pos
     some(found) -> found.pos
@@ -631,6 +741,13 @@ def describe(expr: Grammar.Expr) -> String
     Expr.Lookahead(inner) -> describe(inner)
     Expr.Negative(inner) -> describe(inner)
     Expr.Tagged(_, inner) -> describe(inner)
+    Expr.Push(inner) -> describe(inner)
+    Expr.PushLiteral(text) -> text.inspect
+    Expr.Pop -> "POP"
+    Expr.PopAll -> "POP_ALL"
+    Expr.Peek -> "PEEK"
+    Expr.PeekAll -> "PEEK_ALL"
+    Expr.Drop -> "DROP"
     Expr.Seq(_) -> "a sequence"
     Expr.Choice(_) -> "one of several alternatives"
   end

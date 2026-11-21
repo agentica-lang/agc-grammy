@@ -65,6 +65,16 @@ its tests in `tests/`, so always pass the folder.
   (`match_indent`), so a skip that crossed the line break does not hide the
   indentation they measure. A line holding only spaces is blank there too, and
   `line_start` treats `\r` as a break.
+- The rule stack travels in `Progress.stack` (`List[String]`, top last), so a
+  failed alternative drops its pushes for free: nothing to snapshot or restore.
+  `match` threads it as `match(ctx, stack, expr, pos)`; `POP`/`PEEK` match the
+  stored text, `*_ALL` walk it from the top down. `POP`/`PEEK`/`DROP` fail on an
+  empty stack, `*_ALL` match nothing, and `skip` runs with an empty stack
+  because a skipped rule may not use it (the validator refuses one that does).
+  A zero-width repetition only takes its shortcut when the stack did not move.
+  An unbounded repetition is refused when it never consumes input, unless it
+  only pops the stack (`drains_stack?`: `DROP*`), which always ends; an
+  unbounded one that moves only the stack stops when it stops shrinking.
 - A tag (`#name = term`) lands on the last node its term built, and over `*`,
   `+`, `?` or `{n,m}` on the last node of every iteration. The validator refuses a tag on an
   expression that builds no node. `run` applies the start rule's own atomicity
@@ -79,8 +89,9 @@ its tests in `tests/`, so always pass the folder.
   and the terminals of named rules show up in a message.
 - `Grammar.compile` validates before matching: reserved names, duplicates,
   a `WHITESPACE`/`COMMENT` that can never fail or that never consumes input,
-  unknown refs,
-  tags with no node to name, left recursion (through nullable prefixes),
+  unknown refs, tags with no node to name, a stack read with nothing pushed
+  anywhere, a skipped rule that uses the stack, left recursion (through
+  nullable prefixes),
   non-failing and non-progressing *unbounded* repetitions, a zero-width
   repetition asking for more than `ZERO_WIDTH_LIMIT` nodes, and unreachable
   choice arms. Keep those checks cheap and tolerant of an already-broken

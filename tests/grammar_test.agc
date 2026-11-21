@@ -106,6 +106,90 @@ def main() -> Void
       try Test.eq(rule.indents, true)
       Test.eq(rule.silent, true)
     end,
+    Test.test("the stack builtins are read") do
+      grammar = try Grammar.compile("a = { PUSH(ASCII_DIGIT+) ~ POP }")
+      try Test.eq(
+        grammar.rules[0].body,
+        Expr.Seq([Expr.Push(Expr.Repeat(Expr.Builtin("ASCII_DIGIT"), 1, UNBOUNDED)), Expr.Pop]),
+      )
+
+      literal = try Grammar.compile("b = { PUSH_LITERAL(\"x\") ~ PEEK ~ DROP }")
+      try Test.eq(literal.rules[0].body, Expr.Seq([Expr.PushLiteral("x"), Expr.Peek, Expr.Drop]))
+      all = try Grammar.compile("c = { PUSH_LITERAL(\"x\") ~ POP_ALL ~ PEEK_ALL }")
+      Test.eq(all.rules[0].body, Expr.Seq([Expr.PushLiteral("x"), Expr.PopAll, Expr.PeekAll]))
+    end,
+    Test.test("PUSH without parentheses fails") do
+      case Grammar.compile("a = { PUSH }")
+        error(e) -> Test.assert(e.message.include?("PUSH needs an expression in parentheses"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("PUSH_LITERAL needs a string") do
+      case Grammar.compile("a = { PUSH_LITERAL(x) }")
+        error(e) -> Test.assert(e.message.include?("PUSH_LITERAL needs a string"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("reading the stack without pushing anything fails") do
+      case Grammar.compile("a = { POP }")
+        error(e) -> Test.assert(e.message.include?("reads the stack but nothing pushes"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a skipped rule cannot use the stack") do
+      case Grammar.compile("WHITESPACE = _{ POP }\np = { PUSH_LITERAL(\"x\") ~ \"a\" }")
+        error(e) -> Test.assert(e.message.include?("cannot use the stack"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("PUSH does not hide left recursion") do
+      case Grammar.compile("a = { PUSH(a) }")
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a skipped rule cannot reach the stack through a helper") do
+      grammar_text = (
+        "WHITESPACE = _{ ws }\nws = _{ \" \" ~ POP }\np = { \"a\" ~ \"b\" }\nunused = _{ PUSH_LITERAL(\"x\") }"
+      )
+
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("cannot use the stack"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("left recursion behind a stack read is refused") do
+      # POP_ALL matches zero-width on an empty stack, where a parse starts.
+      grammar_text = "p = { POP_ALL ~ p }\nignore = _{ PUSH_LITERAL(\"x\") }"
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a DROP repetition is allowed") do
+      grammar = try Grammar.compile("a = { PUSH_LITERAL(\"x\") ~ DROP* }")
+      Test.eq(grammar.rules.size, 1)
+    end,
+    Test.test("a bound does not become an excuse to build nodes") do
+      grammar_text = "p = { PUSH_LITERAL(\"x\") ~ (SOI | DROP){0,50000} }"
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("more than 10000 times"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a PUSH_LITERAL repetition is still refused") do
+      case Grammar.compile("a = { PUSH_LITERAL(\"x\")* }")
+        error(e) ->
+          Test.assert(e.message.include?("never consumes input") or e.message.include?("cannot fail"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag over PUSH has nothing to tag") do
+      case Grammar.compile("p = { #a = PUSH(ANY) }")
+        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("the atomic modifiers are read") do
       atomic = try Grammar.compile("a = @{ \"x\" }")
       compound = try Grammar.compile("b = ${ \"x\" }")

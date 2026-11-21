@@ -5,7 +5,9 @@
 ## indentation scope (they combine, as in `>_{`). In a body: `"text"`,
 ## `^"text"` (insensitive), `'a'..'z'`, `[a-z]`, `[^0-9]`, `.` (any char), a
 ## rule name, a builtin (`ANY`, `SOI`, `EOI`, `NEWLINE`, `INDENT`, `SAME`, the
-## `ASCII_*` family), `~` sequence, `|` ordered choice, `*`, `+`, `?`,
+## `ASCII_*` family), the stack (`PUSH(expr)`, `PUSH_LITERAL("text")`, `POP`,
+## `POP_ALL`, `PEEK`, `PEEK_ALL`, `DROP`), `~` sequence, `|` ordered choice, `*`,
+## `+`, `?`,
 ## `{n,m}`, `!` and `&` lookahead, and `( )`. Escapes: `\"`, `\\`, `\n`,
 ## `\r`, `\t`, `\0`, `\'`, `\xNN` and `\u{2-6 hex digits}`. `//` starts a
 ## comment and `/* */` nests.
@@ -59,6 +61,13 @@ enum Expr
   Lookahead(Expr)
   Negative(Expr)
   Tagged(String, Expr)
+  Push(Expr)
+  PushLiteral(String)
+  Pop
+  PopAll
+  Peek
+  PeekAll
+  Drop
 end
 
 ## Compiles `.grammar` text, or explains the first problem in it.
@@ -216,6 +225,12 @@ end
 struct ParsedPrefixes
   ops: List[String]
   pos: Int
+end
+
+# Whether an expression pushes to the stack or reads from it.
+enum StackUse
+  Push
+  Read
 end
 
 # Reads every rule of the file, skipping blanks and comments.
@@ -523,10 +538,57 @@ end
 
 def parse_name(chars: List[String], pos: Int) -> Result[ParsedExpr]
   ident = try read_ident(chars, pos).to_result("grammar: expected an expression at character #{pos}")
-  if BUILTIN_NAMES.include?(ident.name)
-    ok(ParsedExpr(expr: Expr.Builtin(ident.name), pos: ident.pos))
-  else
-    ok(ParsedExpr(expr: Expr.RuleRef(ident.name), pos: ident.pos))
+  at = skip_blanks(chars, ident.pos)
+  case ident.name
+    "PUSH" -> parse_push(chars, at)
+    "PUSH_LITERAL" -> parse_push_literal(chars, at)
+    "POP" -> ok(ParsedExpr(expr: Expr.Pop, pos: ident.pos))
+    "POP_ALL" -> ok(ParsedExpr(expr: Expr.PopAll, pos: ident.pos))
+    "PEEK" -> ok(ParsedExpr(expr: Expr.Peek, pos: ident.pos))
+    "PEEK_ALL" -> ok(ParsedExpr(expr: Expr.PeekAll, pos: ident.pos))
+    "DROP" -> ok(ParsedExpr(expr: Expr.Drop, pos: ident.pos))
+    _ ->
+      if BUILTIN_NAMES.include?(ident.name)
+        ok(ParsedExpr(expr: Expr.Builtin(ident.name), pos: ident.pos))
+      else
+        ok(ParsedExpr(expr: Expr.RuleRef(ident.name), pos: ident.pos))
+      end
+  end
+end
+
+# `PUSH(expr)` pushes the text the expression matched.
+def parse_push(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  if char_at(chars, pos) != "("
+    return error(
+      "grammar: PUSH needs an expression in parentheses, found #{char_at(chars, pos).inspect} at character #{pos}",
+    )
+  end
+
+  inner = try parse_expr(chars, pos + 1)
+  after = try expect_char(chars, skip_blanks(chars, inner.pos), ")")
+  ok(ParsedExpr(expr: Expr.Push(inner.expr), pos: after))
+end
+
+# `PUSH_LITERAL("text")` pushes a fixed string.
+def parse_push_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  if char_at(chars, pos) != "("
+    return error(
+      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, pos).inspect} at character #{pos}",
+    )
+  end
+
+  at = skip_blanks(chars, pos + 1)
+  if char_at(chars, at) != "\""
+    return error(
+      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, at).inspect} at character #{at}",
+    )
+  end
+
+  literal = try parse_literal(chars, at)
+  after = try expect_char(chars, skip_blanks(chars, literal.pos), ")")
+  case literal.expr
+    Expr.Literal(text) -> ok(ParsedExpr(expr: Expr.PushLiteral(text), pos: after))
+    _ -> error("grammar: PUSH_LITERAL needs a string in parentheses at character #{pos}")
   end
 end
 
@@ -771,7 +833,14 @@ end
 # The first problem in the grammar, if any.
 def first_problem(grammar: Grammar) -> Optional[String]
   rules = grammar.rules
-  cheap = first_of([reserved_problem(rules), duplicate_problem(rules), unknown_ref_problem(rules), tag_problem(rules)])
+  cheap = first_of([
+    reserved_problem(rules),
+    duplicate_problem(rules),
+    unknown_ref_problem(rules),
+    tag_problem(rules),
+    stack_problem(rules),
+  ])
+
   return cheap if cheap.some?
 
   always = always_rules(rules)
@@ -818,8 +887,16 @@ end
 # fail (it matches the empty string) or that never consumes input makes skipping
 # meaningless. pest refuses both, and so do we.
 def whitespace_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
+  pushes = stack_use_rules(rules, StackUse.Push)
+  reads = stack_use_rules(rules, StackUse.Read)
   for candidate in rules
     next if candidate.name != "WHITESPACE" and candidate.name != "COMMENT"
+    # A helper rule reached from here may use the stack too, so this reads the
+    # fixpoint sets rather than the body alone.
+    if pushes.include?(candidate.name) or reads.include?(candidate.name)
+      return some("grammar: #{candidate.name} is skipped, so it cannot use the stack")
+    end
+
     if always_with?(candidate.body, always)
       return some("grammar: #{candidate.name} is skipped, so it must be able to fail")
     end
@@ -860,6 +937,7 @@ def unknown_ref(owner: String, expr: Expr, known: Set[String]) -> Optional[Strin
     Expr.Lookahead(inner) -> unknown_ref(owner, inner, known)
     Expr.Negative(inner) -> unknown_ref(owner, inner, known)
     Expr.Tagged(_, inner) -> unknown_ref(owner, inner, known)
+    Expr.Push(inner) -> unknown_ref(owner, inner, known)
     _ -> none
   end
 end
@@ -872,6 +950,63 @@ def nested_unknown(owner: String, parts: List[Expr], known: Set[String]) -> Opti
   end
 
   found
+end
+
+# A stack operation with nothing pushed would only ever fail. pest walks the call
+# graph per rule; we keep the cheap whole-grammar version and let the parse fail
+# on an empty stack at run time.
+def stack_problem(rules: List[Rule]) -> Optional[String]
+  return none if !stack_use_rules(rules, StackUse.Push).empty?
+
+  reading = stack_use_rules(rules, StackUse.Read)
+  for candidate in rules
+    if reading.include?(candidate.name)
+      return some("grammar: rule #{candidate.name} reads the stack but nothing pushes to it")
+    end
+  end
+
+  none
+end
+
+# The rules that use the stack one way or the other, following rule references
+# (a fixpoint, as `always_rules`/`still_rules` are).
+def stack_use_rules(rules: List[Rule], use: StackUse) -> Set[String]
+  known: Set[String] = Set.new([])
+  changed = true
+  while changed
+    changed = false
+    for candidate in rules
+      if !known.include?(candidate.name) and uses_stack?(candidate.body, use, known)
+        known = known.add(candidate.name)
+        changed = true
+      end
+    end
+  end
+
+  known
+end
+
+def uses_stack?(expr: Expr, use: StackUse, names: Set[String]) -> Bool
+  case expr
+    Expr.Push(inner) ->
+      return true if use == StackUse.Push
+
+      uses_stack?(inner, use, names)
+    Expr.PushLiteral(_) -> use == StackUse.Push
+    Expr.Pop -> use == StackUse.Read
+    Expr.PopAll -> use == StackUse.Read
+    Expr.Peek -> use == StackUse.Read
+    Expr.PeekAll -> use == StackUse.Read
+    Expr.Drop -> use == StackUse.Read
+    Expr.RuleRef(name) -> names.include?(name)
+    Expr.Seq(parts) -> parts.any? { |part| uses_stack?(part, use, names) }
+    Expr.Choice(options) -> options.any? { |option| uses_stack?(option, use, names) }
+    Expr.Repeat(inner, _, _) -> uses_stack?(inner, use, names)
+    Expr.Lookahead(inner) -> uses_stack?(inner, use, names)
+    Expr.Negative(inner) -> uses_stack?(inner, use, names)
+    Expr.Tagged(_, inner) -> uses_stack?(inner, use, names)
+    _ -> false
+  end
 end
 
 # A tag lands on the last node its term builds, so the term must build one.
@@ -897,6 +1032,7 @@ def tag_in(owner: String, expr: Expr, rules: List[Rule]) -> Optional[String]
     Expr.Repeat(inner, _, _) -> tag_in(owner, inner, rules)
     Expr.Lookahead(inner) -> tag_in(owner, inner, rules)
     Expr.Negative(inner) -> tag_in(owner, inner, rules)
+    Expr.Push(inner) -> tag_in(owner, inner, rules)
     _ -> none
   end
 end
@@ -921,6 +1057,7 @@ def builds_node?(expr: Expr, rules: List[Rule], seen: Set[String]) -> Bool
     Expr.Choice(options) -> options.any? { |option| builds_node?(option, rules, seen) }
     Expr.Repeat(inner, _, _) -> builds_node?(inner, rules, seen)
     Expr.Tagged(_, inner) -> builds_node?(inner, rules, seen)
+    Expr.Push(inner) -> builds_node?(inner, rules, seen)
     _ -> false
   end
 end
@@ -978,6 +1115,7 @@ def left_refs(expr: Expr, nullable: Set[String]) -> Set[String]
     Expr.Lookahead(inner) -> left_refs(inner, nullable)
     Expr.Negative(inner) -> left_refs(inner, nullable)
     Expr.Tagged(_, inner) -> left_refs(inner, nullable)
+    Expr.Push(inner) -> left_refs(inner, nullable)
     _ -> Set.new([])
   end
 end
@@ -1037,6 +1175,7 @@ def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]
     Expr.Lookahead(inner) -> repeat_in(owner, inner, always, still)
     Expr.Negative(inner) -> repeat_in(owner, inner, always, still)
     Expr.Tagged(_, inner) -> repeat_in(owner, inner, always, still)
+    Expr.Push(inner) -> repeat_in(owner, inner, always, still)
     _ -> none
   end
 end
@@ -1047,12 +1186,28 @@ end
 def repeat_problem(owner: String, inner: Expr, max: Int, always: Set[String], still: Set[String]) -> Optional[String]
   if max < 0
     return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
-    return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+    # A `DROP` loop consumes no input but shrinks the stack, so it always ends.
+    if still_with?(inner, still) and !drains_stack?(inner)
+      return some("grammar: rule #{owner} repeats an expression that never consumes input")
+    end
   elsif still_with?(inner, still) and max > ZERO_WIDTH_LIMIT
     return some("grammar: rule #{owner} repeats a zero-width expression more than #{ZERO_WIDTH_LIMIT} times")
   end
 
   repeat_in(owner, inner, always, still)
+end
+
+# Whether the expression only pops the stack, so an endless repetition of it
+# still ends: `DROP*`, `(DROP ~ DROP)*`.
+def drains_stack?(expr: Expr) -> Bool
+  case expr
+    Expr.Drop -> true
+    Expr.Seq(parts) -> parts.all? { |part| drains_stack?(part) }
+    Expr.Choice(options) -> options.all? { |option| drains_stack?(option) }
+    Expr.Repeat(inner, _, _) -> drains_stack?(inner)
+    Expr.Tagged(_, inner) -> drains_stack?(inner)
+    _ -> false
+  end
 end
 
 def nested_repeat(owner: String, parts: List[Expr], always: Set[String], still: Set[String]) -> Optional[String]
@@ -1083,6 +1238,7 @@ def choice_in(owner: String, expr: Expr, always: Set[String]) -> Optional[String
     Expr.Lookahead(inner) -> choice_in(owner, inner, always)
     Expr.Negative(inner) -> choice_in(owner, inner, always)
     Expr.Tagged(_, inner) -> choice_in(owner, inner, always)
+    Expr.Push(inner) -> choice_in(owner, inner, always)
     _ -> none
   end
 end
@@ -1137,6 +1293,16 @@ def nullable_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Lookahead(inner) -> nullable_with?(inner, names)
     Expr.Negative(_) -> true
     Expr.Tagged(_, inner) -> nullable_with?(inner, names)
+    Expr.Push(inner) -> nullable_with?(inner, names)
+    Expr.PushLiteral(_) -> true
+    Expr.Drop -> true
+    # A stack read can match without consuming input (`POP_ALL`/`PEEK_ALL` do on
+    # an empty stack, where a parse starts), so left recursion behind one is
+    # caught rather than hanging.
+    Expr.Pop -> true
+    Expr.PopAll -> true
+    Expr.Peek -> true
+    Expr.PeekAll -> true
   end
 end
 
@@ -1171,6 +1337,13 @@ def always_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Lookahead(inner) -> always_with?(inner, names)
     Expr.Negative(_) -> false
     Expr.Tagged(_, inner) -> always_with?(inner, names)
+    Expr.Push(inner) -> always_with?(inner, names)
+    Expr.PushLiteral(_) -> true
+    Expr.Pop -> false
+    Expr.PopAll -> false
+    Expr.Peek -> false
+    Expr.PeekAll -> false
+    Expr.Drop -> false
   end
 end
 
@@ -1205,5 +1378,12 @@ def still_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Lookahead(_) -> true
     Expr.Negative(_) -> true
     Expr.Tagged(_, inner) -> still_with?(inner, names)
+    Expr.Push(inner) -> still_with?(inner, names)
+    Expr.PushLiteral(_) -> true
+    Expr.Drop -> true
+    Expr.Pop -> false
+    Expr.PopAll -> false
+    Expr.Peek -> false
+    Expr.PeekAll -> false
   end
 end

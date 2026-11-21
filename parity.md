@@ -41,8 +41,9 @@ worth having, **no** = deliberately out of scope.
 | doc comments `///`, `//!` | yes | missing | later |
 | escapes `\" \\ \n \r \t` | yes | yes | — |
 | escapes `\0 \' \xNN \u{NNNN}` | yes | yes | done |
-| `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | missing | later |
-| `PEEK`, `PEEK[a..b]`, `PEEK_ALL` | yes | missing | later |
+| `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | yes | done |
+| `PEEK`, `PEEK_ALL` | yes | yes | done |
+| `PEEK[a..b]` stack slices | yes (grammar-extras) | missing | later |
 | `ANY` | yes | yes | — |
 | `SOI` | yes | yes | done |
 | `EOI` | yes | yes (alias `EOF`) | done |
@@ -93,7 +94,13 @@ author almost always wrote something else.
 | `WHITESPACE`/`COMMENT` run between tokens | yes | yes |
 | indentation-aware matching (`INDENT`, `SAME`) | no | yes (extension) |
 | atomic rules stop whitespace skipping and child nodes | yes | yes (`$`/`!` children keep theirs, as in pest) |
-| stack mutation with rollback on a failed alternative | yes | no |
+| stack mutation with rollback on a failed alternative | yes | yes (the stack rides on the matched value) |
+| `PUSH`/`PUSH_LITERAL`/`POP`/`POP_ALL`/`PEEK`/`PEEK_ALL`/`DROP` | yes | yes |
+| `PEEK[a..b]` stack slices | yes (grammar-extras) | no |
+| compile-time check that a `POP` is protected by a `PUSH` | yes (call graph) | partial (whole grammar) |
+| left recursion through a stack read | analysed | refused (reads count as nullable, so the check is conservative) |
+| `DROP*` / a repetition that only shrinks the stack | allowed | allowed (drains, then stops); any other zero-width repetition over the limit is still refused |
+| stack use inside `WHITESPACE`/`COMMENT` | shares the parse stack | refused (skipping stays side-effect free) |
 | furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |
 | call limit, error detail knob | yes | no (the VM's `--max-steps` is the only bound) |
@@ -196,9 +203,13 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 
 ### Milestone 3 — power and speed
 
-6. **Stack operations** `PUSH`/`PUSH_LITERAL`/`POP`/`POP_ALL`/`PEEK`/`PEEK_ALL`/
-   `DROP`, with rollback when an alternative fails. Threading an immutable stack
-   through the matcher fits the language, but it is the largest change here.
+6. **Stack operations** — done: `PUSH(expr)` and `PUSH_LITERAL("text")` push,
+   `POP`/`PEEK` match the top, `POP_ALL`/`PEEK_ALL` walk the stack from its top
+   down, `DROP` pops without matching. The stack lives in `Progress`, so a
+   failed alternative rolls it back for free. Deviations: `PEEK[a..b]` slices
+   (pest grammar-extras) are not implemented, and the "a `POP` must be
+   protected by a `PUSH`" check is per grammar instead of per rule reachability,
+   so an empty stack fails the parse where pest refuses the grammar.
 7. **Performance**: compile literals to character lists (no `split` per match),
    a line index for positions, and memoization. Then benchmark against
    `grammars/json.pest` on a large document.
