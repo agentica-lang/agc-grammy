@@ -227,6 +227,12 @@ def main() -> Void
       try Test.eq(ref.code, "PY-DUPLICATE-BINDING")
       ok()
     end,
+    Test.test("duplicate type alias refuses") do
+      src = "type PyAliasDup = int\ntype PyAliasDup = int\n"
+      ref = try run_no(compiled.unwrap!, src, top_ctx(src))
+      try Test.eq(ref.code, "PY-DUPLICATE-BINDING")
+      ok()
+    end,
     Test.test("assigned rebinds") do
       src = "x: int = 1\nx = x + 1\n"
       ran = try run_all(compiled.unwrap!, src, top_ctx(src))

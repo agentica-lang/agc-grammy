@@ -11,8 +11,9 @@
 ##
 ## The lowering follows `SUBSET.md` sections 1, 2 and 4: the first binding
 ## carries its annotation (`x: int = 0`), rebinding keeps the type and any
-## change is `PY-TYPE-MISMATCH`; `x += e` is sugar for `x = x OP e` (`//=`
-## and `**=` have no spelling and refuse); a bare `x: T` binds with no code;
+## change is `PY-TYPE-MISMATCH`; `x += e` is sugar for `x = x OP e` (the
+## grammar admits no `//=` or `**=` spelling, so those never reach the
+## emitter; its `aug_binop` fallback refuses them as defense-in-depth); a bare `x: T` binds with no code;
 ## `type Alias = T` emits the backend alias; an expression statement emits
 ## and discards its value; `return` carries a value only under a non-`Void`
 ## return and stands bare only under `-> None`.
@@ -281,7 +282,7 @@ def emit_augassigned_value(
       shifted = shift_out(out, ctx.next_temp)
       case aug_combine(name, want, binop, shifted.code, out.type)
         error(e) -> refuse_split(op.start, op.stop, e)
-        ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair)
+        ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair, source)
       end
   end
 end
@@ -294,6 +295,7 @@ def emit_augassigned_line(
   expr: Tree.Node,
   shifted: Shifted,
   pair: List[String],
+  source: String,
 ) -> EmitCtx.StmtRes
   got = List.first(pair.drop(1))
   if types_match?(want, got)
@@ -307,7 +309,7 @@ def emit_augassigned_line(
   else
     EmitCtx.refuse_at(
       "PY-TYPE-MISMATCH",
-      "augmented `#{Tree.text(op, ctx.source)}` on `#{name}: #{want}` gives #{got}",
+      "augmented `#{Tree.text(op, source)}` on `#{name}: #{want}` gives #{got}",
       some("convert the value explicitly or fix the annotation"),
       expr.start,
       expr.stop,
@@ -321,13 +323,19 @@ def emit_alias_named(ctx: EmitCtx.EmitCtx, node: Tree.Node, name_node: Tree.Node
     ok(ann) ->
       case map_ann_scoped(ann.text, ctx.scope)
         error(e) -> refuse_split(ann.start, ann.stop, e)
-        ok(want) -> emit_alias_line(ctx, node, name_node, want)
+        ok(want) -> emit_alias_line(ctx, node, name_node, want, source)
       end
   end
 end
 
-def emit_alias_line(ctx: EmitCtx.EmitCtx, node: Tree.Node, name_node: Tree.Node, want: String) -> EmitCtx.StmtRes
-  name = Tree.text(name_node, ctx.source)
+def emit_alias_line(
+  ctx: EmitCtx.EmitCtx,
+  node: Tree.Node,
+  name_node: Tree.Node,
+  want: String,
+  source: String,
+) -> EmitCtx.StmtRes
+  name = Tree.text(name_node, source)
   # TODO(3d): the backend only checks `type` aliases at the top level
   # (probed PARSE-TOP-LEVEL-STATEMENT on agentica 0.35.0); revisit if local
   # aliases ever check.
@@ -343,9 +351,19 @@ def emit_alias_line(ctx: EmitCtx.EmitCtx, node: Tree.Node, name_node: Tree.Node,
     # PARSE-UNEXPECTED-TOKEN on agentica 0.35.0); revisit if lowercase
     # aliases ever check.
     if capitalized?(name)
-      EmitCtx.StmtRes.Ok(
-        EmitCtx.StmtOut(code: ["type #{name} = #{want}"], scope: ctx.scope.put(name, want), next_temp: ctx.next_temp),
-      )
+      if ctx.scope.get(name, "") != ""
+        EmitCtx.refuse_at(
+          "PY-DUPLICATE-BINDING",
+          "type alias `#{name}` is already bound",
+          some("pick another name or drop the second alias"),
+          name_node.start,
+          name_node.stop,
+        )
+      else
+        EmitCtx.StmtRes.Ok(
+          EmitCtx.StmtOut(code: ["type #{name} = #{want}"], scope: ctx.scope.put(name, want), next_temp: ctx.next_temp),
+        )
+      end
     else
       EmitCtx.refuse_at(
         "PY-OUT-OF-SUBSET",
