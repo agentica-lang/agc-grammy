@@ -2,9 +2,10 @@
 ## assignment, augmented assignment, type aliases, expression statements and
 ## `return`.
 ##
-## Each emitter takes one statement parse node, the source it was sliced from
-## and the lane context, and answers an `EmitCtx.StmtRes`: emitted lines plus
-## the scope and temp supply after the statement, or a spanned refusal. Lane A
+## Each emitter takes the statement pieces the coordinator narrowed from
+## the parse tree, the source it was sliced from and the lane context, and
+## answers an `EmitCtx.StmtRes`: emitted lines plus the scope and temp
+## supply after the statement, or a spanned refusal. Lane A
 ## has no nested bodies, so emitters take no pre-emitted strings; expression
 ## values go through `EmitExpr.emit` and their `py_tN` temps shift past
 ## `ctx.next_temp`, so sequential statements never collide.
@@ -27,33 +28,57 @@
 
 import EmitCtx from "./emit_ctx"
 import EmitExpr from "./emit_expr"
+import Frontend from "./frontend"
 import Tree from "../../src/tree"
 
 ## Emits `x: T = e`: declares `x` with the mapped annotation and checks the
 ## value against it (`PY-TYPE-MISMATCH` on change). A bare `x: T` binds with
 ## no code; a second binding in the same scope is `PY-DUPLICATE-BINDING`.
-def emit_annotated(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  if node.rule != "annotated"
-    return EmitCtx.refuse("PY-OUT-OF-SUBSET", "lane A: expected an annotated binding, found #{node.rule}", none, node)
-  end
-
-  case need_name(node)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(name_node) -> emit_annotated_named(ctx, node, name_node, source)
+def emit_annotated(
+  ctx: EmitCtx.EmitCtx,
+  occ: Frontend.NameOcc,
+  ann: Frontend.Ann,
+  value: Optional[Tree.Node],
+  source: String,
+) -> EmitCtx.StmtRes
+  case map_ann_scoped(ann.text, ctx.scope)
+    error(e) -> refuse_split(ann.span.start, ann.span.stop, e)
+    ok(want) ->
+      name = occ.name
+      if ctx.scope.get(name, "") != ""
+        EmitCtx.refuse_at(
+          "PY-DUPLICATE-BINDING",
+          "duplicate binding of `#{name}` in the same scope",
+          some("rename one of the bindings; a function may shadow a module-level name"),
+          occ.span.start,
+          occ.span.stop,
+        )
+      else
+        case value
+          none ->
+            EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: [], scope: ctx.scope.put(name, want), next_temp: ctx.next_temp))
+          some(expr) -> emit_value_binding(ctx, name, want, expr, source, true)
+        end
+      end
   end
 end
 
 ## Emits `x = e`: rebinds a declared name, keeping its type. Binding an
 ## undeclared name is `PY-UNTYPED-NAME`; changing the type is
 ## `PY-TYPE-MISMATCH`.
-def emit_assigned(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  if node.rule != "assign"
-    return EmitCtx.refuse("PY-OUT-OF-SUBSET", "lane A: expected an assignment, found #{node.rule}", none, node)
-  end
-
-  case need_name(node)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(name_node) -> emit_assigned_named(ctx, node, name_node, source)
+def emit_assigned(ctx: EmitCtx.EmitCtx, occ: Frontend.NameOcc, value: Tree.Node, source: String) -> EmitCtx.StmtRes
+  name = occ.name
+  want = ctx.scope.get(name, "")
+  if want == ""
+    EmitCtx.refuse_at(
+      "PY-UNTYPED-NAME",
+      "first binding of `#{name}` needs an annotation",
+      some("write `#{name}: <type> = ...` for the first binding"),
+      occ.span.start,
+      occ.span.stop,
+    )
+  else
+    emit_value_binding(ctx, name, want, value, source, false)
   end
 end
 
@@ -61,55 +86,52 @@ end
 ## `EmitExpr.emit` with the same operator rules, then the result must keep
 ## `x`'s type (`PY-TYPE-MISMATCH` otherwise). `//=` and `**=` have no
 ## spelling and refuse with `PY-OUT-OF-SUBSET`.
-def emit_augassigned(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  if node.rule != "augmented_assign"
-    return EmitCtx.refuse(
-      "PY-OUT-OF-SUBSET",
-      "lane A: expected an augmented assignment, found #{node.rule}",
-      none,
-      node,
+def emit_augassigned(
+  ctx: EmitCtx.EmitCtx,
+  occ: Frontend.NameOcc,
+  op: String,
+  value: Tree.Node,
+  source: String,
+) -> EmitCtx.StmtRes
+  name = occ.name
+  want = ctx.scope.get(name, "")
+  if want == ""
+    EmitCtx.refuse_at(
+      "PY-UNTYPED-NAME",
+      "first binding of `#{name}` needs an annotation",
+      some("write `#{name}: <type> = ...` for the first binding"),
+      occ.span.start,
+      occ.span.stop,
     )
-  end
-
-  case need_name(node)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(name_node) -> emit_augassigned_named(ctx, node, name_node, source)
+  else
+    case aug_binop(op)
+      error(e) -> refuse_split(occ.span.start, occ.span.stop, e)
+      ok(binop) -> emit_augassigned_value(ctx, name, want, op, binop, value, source)
+    end
   end
 end
 
 ## Emits `type Alias = T`: the backend alias at the top level, refused with
 ## `PY-OUT-OF-SUBSET` inside a `def` or for a lowercase name (both probed).
 ## The alias resolves later annotations through the scope.
-def emit_alias(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  if node.rule != "type_alias"
-    return EmitCtx.refuse("PY-OUT-OF-SUBSET", "lane A: expected a type alias, found #{node.rule}", none, node)
-  end
-
-  case need_name(node)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(name_node) -> emit_alias_named(ctx, node, name_node, source)
+def emit_alias(ctx: EmitCtx.EmitCtx, occ: Frontend.NameOcc, ann: Frontend.Ann, source: String) -> EmitCtx.StmtRes
+  case map_ann_scoped(ann.text, ctx.scope)
+    error(e) -> refuse_split(ann.span.start, ann.span.stop, e)
+    ok(want) -> emit_alias_line(ctx, occ, want)
   end
 end
 
 ## Emits an expression statement (`expr_stmt`, `call_stmt`, or a bare
 ## expression node): the value emits through `EmitExpr.emit` and its code
 ## stands alone, discarded.
-def emit_expr_stmt(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case stmt_value_node(node)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(expr) ->
-      case EmitExpr.emit(expr, source, ctx.scope)
-        error(e) -> refuse_split(expr.start, expr.stop, e)
-        ok(out) ->
-          shifted = shift_out(out, ctx.next_temp)
-          EmitCtx.StmtRes.Ok(
-            EmitCtx.StmtOut(
-              code: shifted.pre + [shifted.code],
-              scope: ctx.scope,
-              next_temp: ctx.next_temp + shifted.used,
-            ),
-          )
-      end
+def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
+  case EmitExpr.emit(expr, source, ctx.scope)
+    error(e) -> refuse_split(expr.start, expr.stop, e)
+    ok(out) ->
+      shifted = shift_out(out, ctx.next_temp)
+      EmitCtx.StmtRes.Ok(
+        EmitCtx.StmtOut(code: shifted.pre + [shifted.code], scope: ctx.scope, next_temp: ctx.next_temp + shifted.used),
+      )
   end
 end
 
@@ -118,29 +140,29 @@ end
 ## `PY-TYPE-MISMATCH`. An explicit `return None` under `-> None` folds to a
 ## bare `return`, the only shape the backend checks there. A `return`
 ## outside a `def` is `PY-OUT-OF-SUBSET`.
-def emit_return(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  if node.rule != "return_stmt"
-    return EmitCtx.refuse("PY-OUT-OF-SUBSET", "lane A: expected a return, found #{node.rule}", none, node)
-  end
-
+def emit_return(
+  ctx: EmitCtx.EmitCtx,
+  value: Optional[Tree.Node],
+  span: Frontend.Span,
+  source: String,
+) -> EmitCtx.StmtRes
   if ctx.func_ret == ""
-    return EmitCtx.refuse("PY-OUT-OF-SUBSET", "return outside a `def`", some("move it into a `def`"), node)
+    return EmitCtx.refuse_at(
+      "PY-OUT-OF-SUBSET",
+      "return outside a `def`",
+      some("move it into a `def`"),
+      span.start,
+      span.stop,
+    )
   end
 
-  case Tree.first_child(node, "cond_expr")
-    none -> emit_bare_return(ctx, node)
-    some(expr) -> emit_value_return(ctx, node, expr, source)
+  case value
+    none -> emit_bare_return(ctx, span)
+    some(expr) -> emit_value_return(ctx, expr, span, source)
   end
 end
 
 private
-
-# One annotation occurrence: the raw text plus the span it covers.
-struct AnnText
-  text: String
-  start: Int
-  stop: Int
-end
 
 # One emitted value with its `py_tN` temps shifted past `base`: how many
 # temps the value used, so the caller advances the supply by the same.
@@ -157,121 +179,14 @@ struct ErrParts
   help: Optional[String]
 end
 
-# The binding target of a lane A statement: its first direct `name` child.
-def need_name(node: Tree.Node) -> Result[Tree.Node]
-  case Tree.first_child(node, "name")
-    some(found) -> ok(found)
-    none -> error("PY-OUT-OF-SUBSET: binding without a name")
-  end
-end
-
-# The annotation of a lane A statement: its first direct `annotation` child.
-def need_ann(node: Tree.Node, source: String) -> Result[AnnText]
-  case Tree.first_child(node, "annotation")
-    some(found) -> ok(AnnText(text: Tree.text(found, source), start: found.start, stop: found.stop))
-    none -> error("PY-OUT-OF-SUBSET: binding without an annotation")
-  end
-end
-
-def emit_annotated_named(
-  ctx: EmitCtx.EmitCtx,
-  node: Tree.Node,
-  name_node: Tree.Node,
-  source: String,
-) -> EmitCtx.StmtRes
-  case need_ann(node, source)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(ann) ->
-      case map_ann_scoped(ann.text, ctx.scope)
-        error(e) -> refuse_split(ann.start, ann.stop, e)
-        ok(want) ->
-          name = Tree.text(name_node, source)
-          if ctx.scope.get(name, "") != ""
-            EmitCtx.refuse(
-              "PY-DUPLICATE-BINDING",
-              "duplicate binding of `#{name}` in the same scope",
-              some("rename one of the bindings; a function may shadow a module-level name"),
-              name_node,
-            )
-          else
-            case Tree.first_child(node, "cond_expr")
-              none ->
-                EmitCtx.StmtRes.Ok(
-                  EmitCtx.StmtOut(code: [], scope: ctx.scope.put(name, want), next_temp: ctx.next_temp),
-                )
-              some(expr) -> emit_value_binding(ctx, name, want, expr, source, true)
-            end
-          end
-      end
-  end
-end
-
-def emit_assigned_named(ctx: EmitCtx.EmitCtx, node: Tree.Node, name_node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  name = Tree.text(name_node, source)
-  want = ctx.scope.get(name, "")
-  if want == ""
-    EmitCtx.refuse_at(
-      "PY-UNTYPED-NAME",
-      "first binding of `#{name}` needs an annotation",
-      some("write `#{name}: <type> = ...` for the first binding"),
-      name_node.start,
-      name_node.stop,
-    )
-  else
-    case Tree.first_child(node, "cond_expr")
-      none -> EmitCtx.refuse("PY-OUT-OF-SUBSET", "assignment without a value", none, node)
-      some(expr) -> emit_value_binding(ctx, name, want, expr, source, false)
-    end
-  end
-end
-
-def emit_augassigned_named(
-  ctx: EmitCtx.EmitCtx,
-  node: Tree.Node,
-  name_node: Tree.Node,
-  source: String,
-) -> EmitCtx.StmtRes
-  name = Tree.text(name_node, source)
-  want = ctx.scope.get(name, "")
-  if want == ""
-    EmitCtx.refuse_at(
-      "PY-UNTYPED-NAME",
-      "first binding of `#{name}` needs an annotation",
-      some("write `#{name}: <type> = ...` for the first binding"),
-      name_node.start,
-      name_node.stop,
-    )
-  else
-    case Tree.first_child(node, "aug_op")
-      none -> EmitCtx.refuse("PY-OUT-OF-SUBSET", "augmented assignment without an operator", none, node)
-      some(op) -> emit_augassigned_op(ctx, node, name, want, op, source)
-    end
-  end
-end
-
-def emit_augassigned_op(
-  ctx: EmitCtx.EmitCtx,
-  node: Tree.Node,
-  name: String,
-  want: String,
-  op: Tree.Node,
-  source: String,
-) -> EmitCtx.StmtRes
-  case aug_binop(Tree.text(op, source))
-    error(e) -> refuse_split(op.start, op.stop, e)
-    ok(binop) ->
-      case Tree.first_child(node, "cond_expr")
-        none -> EmitCtx.refuse("PY-OUT-OF-SUBSET", "augmented assignment without a value", none, node)
-        some(expr) -> emit_augassigned_value(ctx, name, want, op, binop, expr, source)
-      end
-  end
-end
+# The binding target of a lane A statement comes from the coordinator as
+# a `NameOcc`; `need_*` helpers are gone with the node-based entries.
 
 def emit_augassigned_value(
   ctx: EmitCtx.EmitCtx,
   name: String,
   want: String,
-  op: Tree.Node,
+  op: String,
   binop: String,
   expr: Tree.Node,
   source: String,
@@ -281,8 +196,8 @@ def emit_augassigned_value(
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
       case aug_combine(name, want, binop, shifted.code, out.type)
-        error(e) -> refuse_split(op.start, op.stop, e)
-        ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair, source)
+        error(e) -> refuse_split(expr.start, expr.stop, e)
+        ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair)
       end
   end
 end
@@ -291,11 +206,10 @@ def emit_augassigned_line(
   ctx: EmitCtx.EmitCtx,
   name: String,
   want: String,
-  op: Tree.Node,
+  op: String,
   expr: Tree.Node,
   shifted: Shifted,
   pair: List[String],
-  source: String,
 ) -> EmitCtx.StmtRes
   got = List.first(pair.drop(1))
   if types_match?(want, got)
@@ -309,7 +223,7 @@ def emit_augassigned_line(
   else
     EmitCtx.refuse_at(
       "PY-TYPE-MISMATCH",
-      "augmented `#{Tree.text(op, source)}` on `#{name}: #{want}` gives #{got}",
+      "augmented `#{op}` on `#{name}: #{want}` gives #{got}",
       some("convert the value explicitly or fix the annotation"),
       expr.start,
       expr.stop,
@@ -317,34 +231,18 @@ def emit_augassigned_line(
   end
 end
 
-def emit_alias_named(ctx: EmitCtx.EmitCtx, node: Tree.Node, name_node: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case need_ann(node, source)
-    error(e) -> refuse_split(node.start, node.stop, e)
-    ok(ann) ->
-      case map_ann_scoped(ann.text, ctx.scope)
-        error(e) -> refuse_split(ann.start, ann.stop, e)
-        ok(want) -> emit_alias_line(ctx, node, name_node, want, source)
-      end
-  end
-end
-
-def emit_alias_line(
-  ctx: EmitCtx.EmitCtx,
-  node: Tree.Node,
-  name_node: Tree.Node,
-  want: String,
-  source: String,
-) -> EmitCtx.StmtRes
-  name = Tree.text(name_node, source)
+def emit_alias_line(ctx: EmitCtx.EmitCtx, occ: Frontend.NameOcc, want: String) -> EmitCtx.StmtRes
+  name = occ.name
   # TODO(3d): the backend only checks `type` aliases at the top level
   # (probed PARSE-TOP-LEVEL-STATEMENT on agentica 0.35.0); revisit if local
   # aliases ever check.
   if ctx.func_ret != ""
-    EmitCtx.refuse(
+    EmitCtx.refuse_at(
       "PY-OUT-OF-SUBSET",
       "type alias `#{name}` inside a `def` has no backend form",
       some("move it to the top level"),
-      node,
+      occ.span.start,
+      occ.span.stop,
     )
   else
     # TODO(3d): the backend only checks capitalized alias names (probed
@@ -356,12 +254,16 @@ def emit_alias_line(
           "PY-DUPLICATE-BINDING",
           "type alias `#{name}` is already bound",
           some("pick another name or drop the second alias"),
-          name_node.start,
-          name_node.stop,
+          occ.span.start,
+          occ.span.stop,
         )
       else
         EmitCtx.StmtRes.Ok(
-          EmitCtx.StmtOut(code: ["type #{name} = #{want}"], scope: ctx.scope.put(name, want), next_temp: ctx.next_temp),
+          EmitCtx.StmtOut(
+            code: ["type #{name} = #{want}"],
+            scope: ctx.scope.put(name, want),
+            next_temp: ctx.next_temp,
+          ),
         )
       end
     else
@@ -369,8 +271,8 @@ def emit_alias_line(
         "PY-OUT-OF-SUBSET",
         "type alias `#{name}` needs a capitalized name for the backend",
         some("name it with a leading capital, for example `type Alias = ...`"),
-        name_node.start,
-        name_node.stop,
+        occ.span.start,
+        occ.span.stop,
       )
     end
   end
@@ -418,20 +320,21 @@ end
 
 # A bare `return` only checks under a `Void` return; anything else is
 # `PY-TYPE-MISMATCH`.
-def emit_bare_return(ctx: EmitCtx.EmitCtx, node: Tree.Node) -> EmitCtx.StmtRes
+def emit_bare_return(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
   if is_void_return?(ctx.func_ret)
     EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["return"], scope: ctx.scope, next_temp: ctx.next_temp))
   else
-    EmitCtx.refuse(
+    EmitCtx.refuse_at(
       "PY-TYPE-MISMATCH",
       "bare `return` under `-> #{ctx.func_ret}` returns nothing",
       some("return a value of the declared type"),
-      node,
+      span.start,
+      span.stop,
     )
   end
 end
 
-def emit_value_return(ctx: EmitCtx.EmitCtx, node: Tree.Node, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
+def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span, source: String) -> EmitCtx.StmtRes
   if is_none_expr(expr) and is_void_return?(ctx.func_ret)
     EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["return"], scope: ctx.scope, next_temp: ctx.next_temp))
   else
@@ -445,24 +348,18 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, node: Tree.Node, expr: Tree.Node, so
       )
     else
       case map_ann_scoped(ctx.func_ret, ctx.scope)
-        error(e) -> refuse_split(node.start, node.stop, e)
+        error(e) -> refuse_split(span.start, span.stop, e)
         ok(want) ->
           case EmitExpr.emit(expr, source, ctx.scope)
             error(e) -> refuse_split(expr.start, expr.stop, e)
-            ok(out) -> emit_return_line(ctx, node, expr, want, out)
+            ok(out) -> emit_return_line(ctx, expr, want, out)
           end
       end
     end
   end
 end
 
-def emit_return_line(
-  ctx: EmitCtx.EmitCtx,
-  node: Tree.Node,
-  expr: Tree.Node,
-  want: String,
-  out: EmitExpr.Out,
-) -> EmitCtx.StmtRes
+def emit_return_line(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: EmitExpr.Out) -> EmitCtx.StmtRes
   if types_match?(want, out.type)
     shifted = shift_out(out, ctx.next_temp)
     EmitCtx.StmtRes.Ok(
@@ -488,23 +385,6 @@ def is_void_return?(func_ret: String) -> Bool = func_ret == "Void" or func_ret =
 # The value of an expression statement: the `cond_expr` of an `expr_stmt`,
 # the `call` of a `call_stmt`, or the node itself when the coordinator
 # already narrowed it to an expression.
-def stmt_value_node(node: Tree.Node) -> Result[Tree.Node]
-  if node.rule == "expr_stmt"
-    case Tree.first_child(node, "cond_expr")
-      some(found) -> ok(found)
-      none -> error("PY-OUT-OF-SUBSET: expression statement without a value")
-    end
-  else
-    if node.rule == "call_stmt"
-      case Tree.first_child(node, "call")
-        some(found) -> ok(found)
-        none -> error("PY-OUT-OF-SUBSET: call statement without a call")
-      end
-    else
-      ok(node)
-    end
-  end
-end
 
 # Whether `node` spells a bare `None`: a single-child chain down to
 # `none_lit` (unary signs excluded, so `-None` never folds).
