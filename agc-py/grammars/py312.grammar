@@ -1,6 +1,6 @@
-// Python 3.12, typed subset, phases 2a-2b: typed `def`, annotations, data
+// Python 3.12, typed subset, phases 2a-2c: typed `def`, annotations, data
 // forms (subscripts, slices, attributes, full strings and numbers) and an
-// expression core. Later phases add control (2c) and layout (2d).
+// expression and control core. Phase 2d adds layout.
 //
 // Style follows `grammars/python.grammar` on purpose: explicit `ws` (no
 // newline) and `eol` everywhere, no implicit `WHITESPACE`, so indentation
@@ -29,18 +29,30 @@ word_end = _{ !ident_char }
 
 program = _{ skipped* ~ (top ~ skipped*)* ~ ws ~ EOF }
 
+// Only definitions and statements start a top-level form, not decorators.
 top = _{ def_stmt ~ (eol | ws ~ comment? ~ EOF) | statement ~ (eol | ws ~ comment? ~ EOF) }
 
 statement = _{
-  annotated
-  | assign
-  | return_stmt
-  | pass_stmt
-  | if_stmt
-  | while_loop
-  | call_stmt
-  | comment
+  !continue_keyword ~ (
+    annotated
+    | assign
+    | return_stmt
+    | pass_stmt
+    | if_stmt
+    | while_loop
+    | for_loop
+    | try_stmt
+    | raise_stmt
+    | assert_stmt
+    | break_stmt
+    | next_stmt
+    | call_stmt
+    | comment
+  )
 }
+
+// Reject the statement spelling, not the same text in a name position.
+continue_keyword = _{ "continue" ~ word_end ~ (eol | ws ~ comment? ~ EOF) }
 
 suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
 
@@ -75,6 +87,24 @@ elif_branch = { eol ~ SAME ~ "elif" ~ ws ~ expr ~ ws ~ ":" ~ suite }
 else_branch = { eol ~ SAME ~ "else" ~ ws ~ ":" ~ suite }
 
 while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ suite }
+
+for_loop = { "for" ~ word_end ~ ws ~ name ~ ws ~ "in" ~ word_end ~ ws ~ expr ~ ws ~ ":" ~ suite }
+
+break_stmt = { "break" ~ word_end }
+
+next_stmt = { "next" ~ word_end }
+
+// The handler must start at the indentation of its try header.
+try_stmt = >{ "try" ~ word_end ~ ws ~ ":" ~ suite ~ except_handler }
+
+except_handler = { eol ~ SAME ~ "except" ~ word_end ~ (ws ~ name ~ (ws ~ "as" ~ word_end ~ ws ~ name)?)? ~ ws ~ ":" ~ suite }
+
+// Report unsupported `from` at the clause without consuming trailing blanks.
+raise_stmt = { "raise" ~ word_end ~ ws ~ expr ~ &(ws ~ !raise_cause) }
+
+raise_cause = _{ "from" ~ word_end }
+
+assert_stmt = { "assert" ~ word_end ~ ws ~ expr ~ (ws ~ "," ~ ws ~ expr)? }
 
 comment = _{ "#" ~ [^"\n"]* }
 
