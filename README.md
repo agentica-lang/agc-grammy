@@ -166,8 +166,10 @@ string, `POP` matches the top and pops it, `PEEK` matches it without popping,
 `POP_ALL`/`PEEK_ALL` walk the whole stack from its top down, and `DROP` pops
 without matching. The stack is part of the matched value, so a failed
 alternative (or a repetition that stops, or a lookahead) leaves it untouched.
-An operation on an empty stack fails the match; the compiler refuses a grammar
-that reads the stack without ever pushing to it.
+`POP`, `PEEK` and `DROP` on an empty stack fail the match; `POP_ALL` and
+`PEEK_ALL` on an empty stack match nothing, as in pest. The compiler refuses a
+grammar that reads the stack without ever pushing to it, and a `WHITESPACE` or
+`COMMENT` that uses it — skipping stays side-effect free.
 
 ## Indentation
 

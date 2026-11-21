@@ -23,6 +23,7 @@ def run(grammar: Grammar.Grammar, rule_name: String, text: String) -> Result[Tre
   rule = try Grammar.rule(grammar, rule_name)
   ctx = Ctx(
     grammar: grammar,
+    text: text,
     chars: text.split(""),
     base: 0,
     atomicity: Grammar.Atomicity.Plain,
@@ -52,6 +53,7 @@ LABEL_LIMIT = 6
 # whitespace, and the two rules to skip (resolved once, as it is a hot path).
 struct Ctx
   grammar: Grammar.Grammar
+  text: String
   chars: List[String]
   base: Int
   atomicity: Grammar.Atomicity
@@ -73,6 +75,12 @@ end
 struct Label
   text: String
   terminal: Bool
+end
+
+# Whether matching the whole stack also empties it (`POP_ALL` does).
+enum StackMatch
+  Keep
+  Take
 end
 
 # The furthest trouble seen: where, what was expected and what was not.
@@ -105,8 +113,8 @@ def match(ctx: Ctx, stack: List[String], expr: Grammar.Expr, pos: Int) -> Outcom
     Expr.PushLiteral(text) -> matched(Progress(pos: pos, nodes: [], stack: stack.push(text)))
     Expr.Pop -> match_pop(ctx, stack, pos)
     Expr.Peek -> match_peek(ctx, stack, pos)
-    Expr.PopAll -> match_stack_all(ctx, stack, pos, true)
-    Expr.PeekAll -> match_stack_all(ctx, stack, pos, false)
+    Expr.PopAll -> match_stack_all(ctx, stack, pos, StackMatch.Take)
+    Expr.PeekAll -> match_stack_all(ctx, stack, pos, StackMatch.Keep)
     Expr.Drop -> match_drop(stack, pos)
   end
 end
@@ -235,7 +243,10 @@ def match_repeat(
         at = before
         break
       some(found) ->
-        stuck = found.pos == at
+        # Stuck means neither the input nor the stack moved: the rest of a
+        # bounded repetition is that same empty match.
+        stuck = found.pos == at and found.stack == current
+        stopped = found.pos == at
         nodes = append(nodes, tag_nodes(found.nodes, tag))
         at = found.pos
         current = found.stack
@@ -251,6 +262,7 @@ def match_repeat(
         end
 
         break if stuck
+        break if stopped and max < 0
     end
   end
 
@@ -269,63 +281,61 @@ def match_push(ctx: Ctx, stack: List[String], inner: Grammar.Expr, pos: Int) -> 
   case outcome.found
     none -> outcome
     some(found) ->
-      text = chars_text(ctx.chars, pos, found.pos)
-      matched(Progress(pos: found.pos, nodes: found.nodes, stack: found.stack.push(text)))
+      pushed = ctx.text.slice(pos, found.pos - pos)
+      matched(Progress(pos: found.pos, nodes: found.nodes, stack: found.stack.push(pushed)))
   end
 end
 
 # `POP` and `PEEK` match the text they hold, `*_ALL` walks the stack from its top
-# down, and `DROP` only pops. An operation on an empty stack fails, where pest
-# panics because its validator rules that out.
+# down, and `DROP` only pops. `POP`, `PEEK` and `DROP` fail on an empty stack
+# (pest panics there, because its validator rules that out); `POP_ALL` and
+# `PEEK_ALL` match nothing, as in pest.
 def match_pop(ctx: Ctx, stack: List[String], pos: Int) -> Outcome
-  return miss(pos, ["a value on the stack"]) if stack.empty?
+  return stack_miss(pos) if stack.empty?
 
-  match_literal(stack[stack.size - 1], ctx.chars, pos, stack.take(stack.size - 1))
+  match_literal(stack_top(stack), ctx.chars, pos, stack_rest(stack))
 end
 
 def match_peek(ctx: Ctx, stack: List[String], pos: Int) -> Outcome
-  return miss(pos, ["a value on the stack"]) if stack.empty?
+  return stack_miss(pos) if stack.empty?
 
-  match_literal(stack[stack.size - 1], ctx.chars, pos, stack)
+  match_literal(stack_top(stack), ctx.chars, pos, stack)
 end
 
-def match_stack_all(ctx: Ctx, stack: List[String], pos: Int, pop: Bool) -> Outcome
+def match_stack_all(ctx: Ctx, stack: List[String], pos: Int, how: StackMatch) -> Outcome
   at = pos
-  current = stack
   i = stack.size - 1
   while i >= 0
-    outcome = match_literal(stack[i], ctx.chars, at, current)
+    outcome = match_literal(stack[i], ctx.chars, at, stack)
     case outcome.found
       none -> return Outcome(found: none, attempt: outcome.attempt)
-      some(found) ->
-        at = found.pos
-        if pop
-          current = current.take(current.size - 1)
-        end
+      some(found) -> at = found.pos
     end
 
     i -= 1
   end
 
-  matched(Progress(pos: at, nodes: [], stack: current))
-end
-
-def match_drop(stack: List[String], pos: Int) -> Outcome
-  return miss(pos, ["a value on the stack"]) if stack.empty?
-
-  matched(Progress(pos: pos, nodes: [], stack: stack.take(stack.size - 1)))
-end
-
-# The text between two offsets, for `PUSH`.
-def chars_text(chars: List[String], start: Int, stop: Int) -> String
-  text = ""
-  at = start
-  while at < stop
-    text = "#{text}#{chars[at]}"
-    at += 1
+  case how
+    StackMatch.Keep -> matched(Progress(pos: at, nodes: [], stack: stack))
+    StackMatch.Take -> matched(Progress(pos: at, nodes: [], stack: []))
   end
+end
 
-  text
+# `DROP` only pops, so it takes no context.
+def match_drop(stack: List[String], pos: Int) -> Outcome
+  return stack_miss(pos) if stack.empty?
+
+  matched(Progress(pos: pos, nodes: [], stack: stack_rest(stack)))
+end
+
+def stack_top(stack: List[String]) -> String = stack[stack.size - 1]
+
+def stack_rest(stack: List[String]) -> List[String] = stack.take(stack.size - 1)
+
+# Not terminal: a silent rule must keep the hint, as with the indentation labels.
+def stack_miss(pos: Int) -> Outcome
+  label = Label(text: "a value on the stack", terminal: false)
+  Outcome(found: none, attempt: some(Attempt(pos: pos, expected: [label], unexpected: [])))
 end
 
 # A tag names the last node its term built, and over a repetition or an

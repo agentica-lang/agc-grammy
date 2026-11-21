@@ -97,6 +97,7 @@ author almost always wrote something else.
 | `PUSH`/`PUSH_LITERAL`/`POP`/`POP_ALL`/`PEEK`/`PEEK_ALL`/`DROP` | yes | yes |
 | `PEEK[a..b]` stack slices | yes (grammar-extras) | no |
 | compile-time check that a `POP` is protected by a `PUSH` | yes (call graph) | partial (whole grammar) |
+| stack use inside `WHITESPACE`/`COMMENT` | shares the parse stack | refused (skipping stays side-effect free) |
 | furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |
 | call limit, error detail knob | yes | no (the VM's `--max-steps` is the only bound) |

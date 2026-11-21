@@ -132,7 +132,25 @@ def main() -> Void
     end,
     Test.test("reading the stack without pushing anything fails") do
       case Grammar.compile("a = { POP }")
-        error(e) -> Test.assert(e.message.include?("the stack is read but nothing pushes"), e.message)
+        error(e) -> Test.assert(e.message.include?("reads the stack but nothing pushes"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a skipped rule cannot use the stack") do
+      case Grammar.compile("WHITESPACE = _{ POP }\np = { PUSH_LITERAL(\"x\") ~ \"a\" }")
+        error(e) -> Test.assert(e.message.include?("cannot use the stack"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("PUSH does not hide left recursion") do
+      case Grammar.compile("a = { PUSH(a) }")
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a tag over PUSH has nothing to tag") do
+      case Grammar.compile("p = { #a = PUSH(ANY) }")
+        error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

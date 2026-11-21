@@ -34,6 +34,12 @@ struct Rule
   body: Expr
 end
 
+# Whether an expression pushes to the stack or reads from it.
+enum StackUse
+  Push
+  Read
+end
+
 ## A whole grammar: its rules, in file order.
 struct Grammar
   rules: List[Rule]
@@ -550,7 +556,11 @@ end
 
 # `PUSH(expr)` pushes the text the expression matched.
 def parse_push(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  return error("grammar: PUSH needs an expression in parentheses at character #{pos}") if char_at(chars, pos) != "("
+  if char_at(chars, pos) != "("
+    return error(
+      "grammar: PUSH needs an expression in parentheses, found #{char_at(chars, pos).inspect} at character #{pos}",
+    )
+  end
 
   inner = try parse_expr(chars, pos + 1)
   after = try expect_char(chars, skip_blanks(chars, inner.pos), ")")
@@ -559,10 +569,18 @@ end
 
 # `PUSH_LITERAL("text")` pushes a fixed string.
 def parse_push_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  return error("grammar: PUSH_LITERAL needs a string in parentheses at character #{pos}") if char_at(chars, pos) != "("
+  if char_at(chars, pos) != "("
+    return error(
+      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, pos).inspect} at character #{pos}",
+    )
+  end
 
   at = skip_blanks(chars, pos + 1)
-  return error("grammar: PUSH_LITERAL needs a string in parentheses at character #{pos}") if char_at(chars, at) != "\""
+  if char_at(chars, at) != "\""
+    return error(
+      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, at).inspect} at character #{pos}",
+    )
+  end
 
   literal = try parse_literal(chars, at)
   after = try expect_char(chars, skip_blanks(chars, literal.pos), ")")
@@ -869,6 +887,10 @@ end
 def whitespace_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
   for candidate in rules
     next if candidate.name != "WHITESPACE" and candidate.name != "COMMENT"
+    if uses_stack?(candidate.body, StackUse.Push) or uses_stack?(candidate.body, StackUse.Read)
+      return some("grammar: #{candidate.name} is skipped, so it cannot use the stack")
+    end
+
     if always_with?(candidate.body, always)
       return some("grammar: #{candidate.name} is skipped, so it must be able to fail")
     end
@@ -928,36 +950,42 @@ end
 # graph per rule; we keep the cheap whole-grammar version and let the parse fail
 # on an empty stack at run time.
 def stack_problem(rules: List[Rule]) -> Optional[String]
-  reads = false
   pushes = false
   for candidate in rules
-    reads = reads or uses_stack?(candidate.body, "read")
-    pushes = pushes or uses_stack?(candidate.body, "push")
+    if uses_stack?(candidate.body, StackUse.Push)
+      pushes = true
+    end
   end
 
-  return some("grammar: the stack is read but nothing pushes to it") if reads and !pushes
+  return none if pushes
+
+  for candidate in rules
+    if uses_stack?(candidate.body, StackUse.Read)
+      return some("grammar: rule #{candidate.name} reads the stack but nothing pushes to it")
+    end
+  end
 
   none
 end
 
-def uses_stack?(expr: Expr, what: String) -> Bool
+def uses_stack?(expr: Expr, use: StackUse) -> Bool
   case expr
     Expr.Push(inner) ->
-      return true if what == "push"
+      return true if use == StackUse.Push
 
-      uses_stack?(inner, what)
-    Expr.PushLiteral(_) -> what == "push"
-    Expr.Pop -> what == "read"
-    Expr.PopAll -> what == "read"
-    Expr.Peek -> what == "read"
-    Expr.PeekAll -> what == "read"
-    Expr.Drop -> what == "read"
-    Expr.Seq(parts) -> parts.any? { |part| uses_stack?(part, what) }
-    Expr.Choice(options) -> options.any? { |option| uses_stack?(option, what) }
-    Expr.Repeat(inner, _, _) -> uses_stack?(inner, what)
-    Expr.Lookahead(inner) -> uses_stack?(inner, what)
-    Expr.Negative(inner) -> uses_stack?(inner, what)
-    Expr.Tagged(_, inner) -> uses_stack?(inner, what)
+      uses_stack?(inner, use)
+    Expr.PushLiteral(_) -> use == StackUse.Push
+    Expr.Pop -> use == StackUse.Read
+    Expr.PopAll -> use == StackUse.Read
+    Expr.Peek -> use == StackUse.Read
+    Expr.PeekAll -> use == StackUse.Read
+    Expr.Drop -> use == StackUse.Read
+    Expr.Seq(parts) -> parts.any? { |part| uses_stack?(part, use) }
+    Expr.Choice(options) -> options.any? { |option| uses_stack?(option, use) }
+    Expr.Repeat(inner, _, _) -> uses_stack?(inner, use)
+    Expr.Lookahead(inner) -> uses_stack?(inner, use)
+    Expr.Negative(inner) -> uses_stack?(inner, use)
+    Expr.Tagged(_, inner) -> uses_stack?(inner, use)
     _ -> false
   end
 end
