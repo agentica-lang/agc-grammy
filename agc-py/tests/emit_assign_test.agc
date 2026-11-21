@@ -17,6 +17,7 @@ import EmitAssign from "../src/emit_assign"
 import EmitCtx from "../src/emit_ctx"
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
+import Frontend from "../src/frontend"
 import Grammar from "../../src/grammar"
 import Tree from "../../src/tree"
 
@@ -34,18 +35,56 @@ def func_ctx(source: String, ret: String, scope: Map[String, String]) -> EmitCtx
   EmitCtx.EmitCtx(source: source, file: "assign_test", scope: scope, func_ret: ret, in_try: false, next_temp: 0)
 end
 
-# Dispatches one statement to its lane A emitter by rule.
-def dispatch(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> EmitCtx.StmtRes
+# Dispatches one statement to its lane A emitter by rule, narrowing the
+# parse node to the pieces the emitter takes.
+def dispatch(ctx: EmitCtx.EmitCtx, node: Tree.Node, source: String) -> Result[EmitCtx.StmtRes]
   case node.rule
-    "annotated" -> EmitAssign.emit_annotated(ctx, node, source)
-    "assign" -> EmitAssign.emit_assigned(ctx, node, source)
-    "augmented_assign" -> EmitAssign.emit_augassigned(ctx, node, source)
-    "type_alias" -> EmitAssign.emit_alias(ctx, node, source)
-    "return_stmt" -> EmitAssign.emit_return(ctx, node, source)
-    "expr_stmt" -> EmitAssign.emit_expr_stmt(ctx, node, source)
-    "call_stmt" -> EmitAssign.emit_expr_stmt(ctx, node, source)
-    _ -> EmitCtx.refuse("PY-OUT-OF-SUBSET", "statement `#{node.rule}` is not lane A", none, node)
+    "annotated" ->
+      occ = try occ_of(node, source, "declare")
+      ann = try ann_of(node, source)
+      ok(EmitAssign.emit_annotated(ctx, occ, ann, Tree.first_child(node, "cond_expr"), source))
+    "assign" ->
+      occ = try occ_of(node, source, "assign")
+      value = try Tree.first_child(node, "cond_expr").to_result("test: assignment without a value")
+      ok(EmitAssign.emit_assigned(ctx, occ, value, source))
+    "augmented_assign" ->
+      occ = try occ_of(node, source, "assign")
+      op_node = try Tree.first_child(node, "aug_op").to_result("test: augmented assignment without an operator")
+      value = try Tree.first_child(node, "cond_expr").to_result("test: augmented assignment without a value")
+      ok(EmitAssign.emit_augassigned(ctx, occ, Tree.text(op_node, source), value, source))
+    "type_alias" ->
+      occ = try occ_of(node, source, "declare")
+      ann = try ann_of(node, source)
+      ok(EmitAssign.emit_alias(ctx, occ, ann, source))
+    "return_stmt" ->
+      span = Frontend.Span(start: node.start, stop: node.stop)
+      ok(EmitAssign.emit_return(ctx, Tree.first_child(node, "cond_expr"), span, source))
+    "expr_stmt" ->
+      expr = try Tree.first_child(node, "cond_expr").to_result("test: expression statement without a value")
+      ok(EmitAssign.emit_expr_stmt(ctx, expr, source))
+    "call_stmt" ->
+      callee = try Tree.first_child(node, "call").to_result("test: call statement without a call")
+      ok(EmitAssign.emit_expr_stmt(ctx, callee, source))
+    _ -> ok(EmitCtx.refuse("PY-OUT-OF-SUBSET", "statement `#{node.rule}` is not lane A", none, node))
   end
+end
+
+# The binding occurrence for a lane A test statement.
+def occ_of(node: Tree.Node, source: String, kind: String) -> Result[Frontend.NameOcc]
+  name_node = try Tree.first_child(node, "name").to_result("test: binding without a name")
+  ok(
+    Frontend.NameOcc(
+      name: Tree.text(name_node, source),
+      span: Frontend.Span(start: name_node.start, stop: name_node.stop),
+      kind: kind,
+    ),
+  )
+end
+
+# The annotation occurrence for a lane A test statement.
+def ann_of(node: Tree.Node, source: String) -> Result[Frontend.Ann]
+  ann_node = try Tree.first_child(node, "annotation").to_result("test: binding without an annotation")
+  ok(Frontend.Ann(text: Tree.text(ann_node, source), span: Frontend.Span(start: ann_node.start, stop: ann_node.stop)))
 end
 
 # Emits every statement of `src` in order, threading the context. A refusal
@@ -57,7 +96,7 @@ def run_all(compiled: Grammar.Grammar, src: String, ctx: EmitCtx.EmitCtx) -> Res
   failure = ""
   for stmt in tree.children
     if failure == ""
-      case dispatch(current, stmt, src)
+      case try dispatch(current, stmt, src)
         EmitCtx.StmtRes.Ok(out) ->
           lines = lines + out.code
           current = EmitCtx.EmitCtx(
@@ -87,7 +126,7 @@ def run_no(compiled: Grammar.Grammar, src: String, ctx: EmitCtx.EmitCtx) -> Resu
   found: Optional[EmitCtx.Refusal] = none
   for stmt in tree.children
     if !found.some?
-      case dispatch(current, stmt, src)
+      case try dispatch(current, stmt, src)
         EmitCtx.StmtRes.Ok(out) ->
           current = EmitCtx.EmitCtx(
             source: src,
