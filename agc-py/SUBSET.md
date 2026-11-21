@@ -33,8 +33,8 @@ plain types only.
 - The first binding of a name carries its annotation: `x: int = 0`.
   Rebinding keeps the type (`x = x + 1`); changing it is `PY-TYPE-MISMATCH`.
 - `x += e` (and `-=`, `*=`, `/=`, `%=`) is sugar for `x = x OP e`. There is
-  no `//=` or `**=` because there is no `//` or `**` operator to desugar
-  from (see §3).
+  no `//=` or `**=` (assign-only desugaring; `//` and `**` are operators per
+  §3 but have no augmented-assign spelling).
 - No nested `def`, no `lambda`, no comprehensions, no `global`/`nonlocal`,
   no `del`. Module level plus one function level; with no function values
   in the subset there is nothing to close over.
@@ -249,6 +249,9 @@ dynamic family: `PY-DYNAMIC`), `is` outside `None`, `finally`,
 relative imports, `__init__` packages, `\N{...}` escapes, `nan`/`inf`
 spellings, float `//`/`%`/`**`, mixed `int`/`float` arithmetic without an
 explicit conversion.
+
+`match` and `case` are soft keywords: match headers are excluded, but the
+spellings remain available in name positions, including attributes and calls.
 
 ## 10. Error catalog (stable `PY*` codes)
 

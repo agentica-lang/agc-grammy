@@ -1,4 +1,4 @@
-## Typed-subset grammar fixtures for phases 2a–2c.
+## Typed-subset grammar fixtures for phase 2.
 
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
@@ -83,6 +83,11 @@ def main() -> Void
       tree = try parse_py(compiled, "y: str\n")
       try Test.eq(annotation_texts(tree, "y: str\n"), ["str"])
       Test.eq(Tree.find_all(tree, "annotated").size, 1)
+    end,
+    Test.test("a type alias parses inside a def body") do
+      program = "def f() -> None:\n    type Alias = int\n    pass\n"
+      tree = try parse_py(compiled, program)
+      Test.eq(Tree.find_all(tree, "type_alias").size, 1)
     end,
     Test.test("a ternary parses in a return") do
       tree = try parse_py(compiled, "def f(a: int) -> int:\n    return a if a else b\n")
@@ -384,6 +389,40 @@ def main() -> Void
     end,
     Test.test("continue keyword is rejected") do
       assert_parse_error_at(compiled, "for x in xs:\n    continue\n", "line 2, column 5")
+    end,
+    Test.test("joined lines leave the next branch chain at its own indentation") do
+      input = (
+        "def f() -> None:\n    print(\n1, # a continued argument can start at column one\n    )\n    if True:\n        print(\n            2,\n)\n    elif False:\n        pass\n    else:\n        pass\n    print(3)\n"
+      )
+
+      tree = try parse_py(compiled, input)
+      try Test.eq(
+        node_texts(tree, "call", input),
+        ["print(\n1, # a continued argument can start at column one\n    )", "print(\n            2,\n)", "print(3)"],
+      )
+
+      try Test.eq(Tree.find_all(tree, "elif_branch").size, 1)
+      Test.eq(Tree.find_all(tree, "else_branch").size, 1)
+    end,
+    Test.test("match and case remain soft identifiers") do
+      input = "match = 1\ncase: int = match\nx.match\nmatch(x)\n"
+      tree = try parse_py(compiled, input)
+      try Test.eq(node_texts(tree, "assign", input), ["match = 1"])
+      try Test.eq(node_texts(tree, "attr", input), ["x.match"])
+      Test.eq(node_texts(tree, "call_stmt", input), ["match(x)"])
+    end,
+    Test.test("match and case headers fail at the soft keyword") do
+      try assert_parse_error_at(compiled, "match x:\n    case 1:\n        pass\n", "line 1, column 1")
+      try assert_parse_error_at(compiled, "case ...:\n    pass\n", "line 1, column 1")
+      assert_parse_error_at(compiled, "if True:\n    match x:\n        pass\n", "line 2, column 5")
+    end,
+    Test.test("powers bind inside unary signs and associate on the right") do
+      input = "x = -2**3**-4 // 5\n"
+      tree = try parse_py(compiled, input)
+      outer = Tree.first(tree, "power").unwrap!
+      try Test.eq(Tree.text(outer, input), "**3**-4")
+      try Test.eq(node_texts(outer, "power", input), ["**-4"])
+      Test.eq(node_texts(tree, "minus", input), ["-2**3**-4", "-4"])
     end,
   ])
 end
