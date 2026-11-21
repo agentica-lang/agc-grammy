@@ -259,8 +259,8 @@ live in `tests/` and are run as `agentica test tests`.
 
 ## Not there yet
 
-- no node stack (`PUSH`/`PEEK`/`POP`)
 - a tag must name something that builds a node (pest drops such a tag silently)
+- no `PEEK[a..b]` stack slices
 - no packrat memoization; left recursion is refused by the compiler
 - nodes keep no span information other than start/stop offsets
 - the Python example has no functions, lists, dicts or `//`
