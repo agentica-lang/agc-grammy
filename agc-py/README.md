@@ -48,6 +48,29 @@ in-place mutation (`list.append`), untyped `def`. Phase 1 also settles `with`,
 not silently different behaviour. This sketch is non-binding; `agc-py/SUBSET.md`
 from phase 1 supersedes it.
 
+## Diagnostics: loud and early, like `agentica check`.
+
+Every problem in the input is a frontend error the moment it is detectable —
+parse, resolve, then emit, each stage refusing before the next runs. No
+warnings, no silent fallbacks, no best-effort codegen: a program `agc-py`
+accepts has nothing to report, exactly like the Agentica compiler. Each error
+carries a stable `PY*` code, the file/line/column, a concrete explanation, the
+source line with a mark under the span, and a `= help:` line when the fix is
+known — the same shape as `docs/grammar/07-diagnostics.md` in `../agentica`:
+
+```text
+prog.py:2:14 error[PY-TYPE-MISMATCH]
+expected int, found str
+
+2 |   age: int = "25"
+  |              ^^^^
+  = help: use str(age) or annotate age: str
+```
+
+Verbose on purpose: an untyped `def`, a dynamic idiom, an out-of-subset
+construct each get their own code at their own span, never a generic "cannot
+translate". Phase 1 defines the catalog; phase 3 implements it.
+
 ## Bytecode reference (sibling checkout, not a dependency)
 
 The bytecode itself lives in `../agentica` (the Agentica implementation, next
