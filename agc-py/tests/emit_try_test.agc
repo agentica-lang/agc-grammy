@@ -15,6 +15,7 @@
 import EmitTry from "../src/emit_try"
 import EmitCtx from "../src/emit_ctx"
 import Frontend from "../src/frontend"
+import {Stmt} from "../src/frontend"
 import Tree from "../../src/tree"
 
 # One parsed-tree stand-in: the rule, span and children the lane inspects.
@@ -38,7 +39,7 @@ def ctx_for(source: String, func_ret: String, next_temp: Int) -> EmitCtx.EmitCtx
   )
 end
 
-def pass_body() -> List[Frontend.Stmt] = [Frontend.Stmt.Other(Frontend.Span(start: 0, stop: 4))]
+def pass_body() -> List[Stmt] = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
 
 # Splits an answer into hoisted helper lines and inline dispatch lines at
 # the first top-level `end`, but only when the answer opens with a helper
@@ -201,6 +202,19 @@ def main() -> Void
       try Test.assert(done.code.include?("    _ = e"), done.code.join("\n"))
       Test.eq(Map.get(done.scope, "e", ""), "String")
     end,
+    Test.test("a string naming e still marks it read") do
+      res = EmitTry.emit_try(
+        ctx_for("pass", "Int", 60),
+        pass_body(),
+        ["puts(1)"],
+        ["puts(\"e\")"],
+        some(as_occ("e", 10, 11)),
+      )
+
+      done = try acc_ok("litread", 0, res, "Void", [])
+      try Test.assert(done.code.include?("    _ = e"), done.code.join("\n"))
+      Test.eq(Map.get(done.scope, "e", ""), "String")
+    end,
     Test.test("empty bodies outline to nil and ok") do
       res = EmitTry.emit_try(ctx_for("pass", "", 30), pass_body(), [], [], none)
       done = try acc_ok("empty", 0, res, "Void", [])
@@ -224,22 +238,22 @@ def main() -> Void
     end,
     Test.test("return with a value in a try body is refused") do
       source = "  return x"
-      body = [Frontend.Stmt.ReturnStmt(some(tnode("cond_expr", 9, 10, [])))]
+      body = [Stmt.ReturnStmt(some(tnode("cond_expr", 9, 10, [])))]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["puts(1)"], ["puts(2)"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 9, 10)
       ok()
     end,
     Test.test("a bare return reports at the body start") do
       source = "pass"
-      body = [Frontend.Stmt.Other(Frontend.Span(start: 0, stop: 4)), Frontend.Stmt.ReturnStmt(none)]
+      body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.ReturnStmt(none)]
       res = EmitTry.emit_try(ctx_for(source, "Void", 0), body, ["nil"], ["nil"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 0, 4)
       ok()
     end,
     Test.test("break inside a nested while is refused") do
       source = "while c:\n  break"
-      inner = [Frontend.Stmt.Other(Frontend.Span(start: 11, stop: 16))]
-      body = [Frontend.Stmt.WhileStmt(tnode("cond_expr", 6, 7, []), inner)]
+      inner = [Stmt.Other(Frontend.Span(start: 11, stop: 16))]
+      body = [Stmt.WhileStmt(tnode("cond_expr", 6, 7, []), inner)]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 11, 16)
       ok()
@@ -247,8 +261,8 @@ def main() -> Void
     Test.test("next inside a for is refused") do
       source = "for i in xs:\n  next"
       target = Frontend.NameOcc(name: "i", span: Frontend.Span(start: 4, stop: 5), kind: "reuse")
-      inner = [Frontend.Stmt.Other(Frontend.Span(start: 15, stop: 19))]
-      body = [Frontend.Stmt.ForLoop(target, tnode("cond_expr", 9, 11, []), inner)]
+      inner = [Stmt.Other(Frontend.Span(start: 15, stop: 19))]
+      body = [Stmt.ForLoop(target, tnode("cond_expr", 9, 11, []), inner)]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 15, 19)
       ok()
@@ -257,28 +271,71 @@ def main() -> Void
       source = "if c:\n  return x"
       arm = Frontend.CondArm(
         cond: tnode("cond_expr", 3, 4, []),
-        body: [Frontend.Stmt.ReturnStmt(some(tnode("cond_expr", 15, 16, [])))],
+        body: [Stmt.ReturnStmt(some(tnode("cond_expr", 15, 16, [])))],
       )
 
-      body = [Frontend.Stmt.IfStmt([arm], [])]
+      body = [Stmt.IfStmt([arm], [])]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 15, 16)
       ok()
     end,
-    Test.test("return inside a nested handler stays legal") do
+    Test.test("return inside a nested handler is refused") do
       source = "pass                x"
-      inner_try = [Frontend.Stmt.Other(Frontend.Span(start: 0, stop: 4))]
-      handler = [Frontend.Stmt.ReturnStmt(some(tnode("cond_expr", 20, 21, [])))]
-      body = [Frontend.Stmt.TryStmt(inner_try, handler, none)]
+      inner_try = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
+      handler = [Stmt.ReturnStmt(some(tnode("cond_expr", 20, 21, [])))]
+      body = [Stmt.TryStmt(inner_try, handler, none)]
       res = EmitTry.emit_try(ctx_for(source, "Int", 40), body, ["nil"], ["puts(\"caught\")", "return"], none)
-      done = try acc_ok("nested", 0, res, "Void", [])
-      try Test.assert(done.code.include?("case py_try_body40()"), done.code.join("\n"))
+      try assert_no(res, source, "PY-TRY-CONTROL", 20, 21)
+      ok()
+    end,
+    Test.test("return inside a nested try body is refused") do
+      source = "pass  x"
+      inner_try = [Stmt.ReturnStmt(some(tnode("cond_expr", 6, 7, [])))]
+      handler = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
+      body = [Stmt.TryStmt(inner_try, handler, none)]
+      res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
+      try assert_no(res, source, "PY-TRY-CONTROL", 6, 7)
+      ok()
+    end,
+    Test.test("break inside a nested try body is refused") do
+      source = "pass\nbreak"
+      inner_try = [Stmt.Other(Frontend.Span(start: 5, stop: 10))]
+      handler = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
+      body = [Stmt.TryStmt(inner_try, handler, none)]
+      res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
+      try assert_no(res, source, "PY-TRY-CONTROL", 5, 10)
+      ok()
+    end,
+    Test.test("a bare return nested in an if reports at the body start") do
+      source = "pass"
+      arm = Frontend.CondArm(cond: tnode("cond_expr", 5, 6, []), body: [Stmt.ReturnStmt(none)])
+
+      body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.IfStmt([arm], [])]
+      res = EmitTry.emit_try(ctx_for(source, "Void", 0), body, ["nil"], ["nil"], none)
+      try assert_no(res, source, "PY-TRY-CONTROL", 0, 4)
+      ok()
+    end,
+    Test.test("raise inside a try body stays legal") do
+      source = "pass"
+      expr = tnode("call", 0, 8, [tnode("name", 0, 1, []), tnode("text", 1, 8, [])])
+      body = [Stmt.RaiseStmt(expr)]
+      res = EmitTry.emit_try(ctx_for(source, "Int", 50), body, ["puts(1)"], ["puts(\"caught\")"], none)
+      done = try acc_ok("raisetry", 0, res, "Void", [])
+      try Test.assert(done.code.include?("case py_try_body50()"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("assert inside a try body stays legal") do
+      source = "pass"
+      body = [Stmt.AssertStmt(tnode("comparison", 0, 5, []), none)]
+      res = EmitTry.emit_try(ctx_for(source, "Int", 51), body, ["puts(1)"], ["puts(\"caught\")"], none)
+      done = try acc_ok("asserttry", 0, res, "Void", [])
+      try Test.assert(done.code.include?("case py_try_body51()"), done.code.join("\n"))
       ok()
     end,
     Test.test("raise with a message returns the error") do
       source = "E(\"boom\")"
       expr = tnode("call", 0, 8, [tnode("name", 0, 1, []), tnode("text", 1, 8, [])])
-      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"boom\"")
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"boom\"", "String")
       done = try acc_ok("raise", 0, res, "Result[Int]", [])
       try Test.eq(done.code, ["return error(\"boom\")"])
       try Test.eq(done.next_temp, 0)
@@ -287,20 +344,20 @@ def main() -> Void
     Test.test("raise at the top level warns and exits") do
       source = "E(\"boom\")"
       expr = tnode("call", 0, 8, [tnode("name", 0, 1, []), tnode("text", 1, 8, [])])
-      res = EmitTry.emit_raise(ctx_for(source, "", 0), expr, "\"boom\"")
+      res = EmitTry.emit_raise(ctx_for(source, "", 0), expr, "\"boom\"", "String")
       done = try acc_ok("raisetop", 0, res, "Void", [])
       Test.eq(done.code, ["IO.warn(\"boom\")", "System.exit(1)"])
     end,
     Test.test("a bare raise name is refused") do
       source = "E"
-      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), tnode("name", 0, 1, []), "\"E\"")
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), tnode("name", 0, 1, []), "\"E\"", "String")
       try assert_no(res, source, "PY-OUT-OF-SUBSET", 0, 1)
       ok()
     end,
     Test.test("raise with no message call is refused") do
       source = "E()"
       expr = tnode("call", 0, 3, [tnode("name", 0, 1, [])])
-      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"\"")
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"\"", "String")
       try assert_no(res, source, "PY-OUT-OF-SUBSET", 0, 3)
       ok()
     end,
@@ -308,8 +365,29 @@ def main() -> Void
       source = "E(\"a\", \"b\")"
       expr = tnode("call", 0, 10, [tnode("name", 0, 1, []), tnode("text", 1, 4, []), tnode("text", 6, 9, [])])
 
-      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"a\"")
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"a\"", "String")
       try assert_no(res, source, "PY-OUT-OF-SUBSET", 0, 10)
+      ok()
+    end,
+    Test.test("raise with a non-str message is refused") do
+      source = "E(x)"
+      expr = tnode("call", 0, 4, [tnode("name", 0, 1, []), tnode("name", 2, 3, [])])
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "x", "Int")
+      try assert_no(res, source, "PY-TYPE-MISMATCH", 2, 3)
+      ok()
+    end,
+    Test.test("raise with a keyword message is refused") do
+      source = "E(msg=\"x\")"
+      kw = tnode("kwarg", 2, 9, [])
+      expr = tnode("call", 0, 10, [tnode("name", 0, 1, []), kw])
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), expr, "\"x\"", "String")
+      try assert_no(res, source, "PY-OUT-OF-SUBSET", 0, 10)
+      ok()
+    end,
+    Test.test("raise of a bare message is refused") do
+      source = "\"boom\""
+      res = EmitTry.emit_raise(ctx_for(source, "Int", 0), tnode("text", 0, 6, []), "\"boom\"", "String")
+      try assert_no(res, source, "PY-OUT-OF-SUBSET", 0, 6)
       ok()
     end,
     Test.test("assert emits warn and exit on failure") do

@@ -41,8 +41,10 @@ import Tree from "../../src/tree"
 ## `try_code`/`handler_code` are the pre-emitted body lines; `caught` is the
 ## `except ... as` name when present (the class is already dropped by the
 ## frontend). Any `return`, `break` or `next` in the `try` body — including
-## inside nested `if`/`while`/`for` or a nested `try` body, but not inside a
-## nested handler — is `PY-TRY-CONTROL` at the offending span.
+## inside nested `if`/`while`/`for`, a nested `try` body, or a nested
+## `except` handler (handlers stay inline in the outer helper, so they
+## cannot decide the caller's control flow either) — is `PY-TRY-CONTROL`
+## at the offending span.
 def emit_try(
   ctx: EmitCtx.EmitCtx,
   try_body: List[Frontend.Stmt],
@@ -66,12 +68,25 @@ end
 
 ## Lowers `raise` with the message expression `expr` to
 ## `return error(<msg_code>)` (message only: the class is never modeled).
-## `msg_code` is the pre-emitted message argument. A bare name, a call with
+## `msg_code` is the pre-emitted message argument and `msg_type` its
+## Agentica type, which must be `String` (`PY-TYPE-MISMATCH` at the message
+## span otherwise, like `emit_assert`). A bare name, a call with
 ## anything but exactly one positional argument, or any other shape is
 ## `PY-OUT-OF-SUBSET` at the expression span.
-def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node, msg_code: String) -> EmitCtx.StmtRes
+def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node, msg_code: String, msg_type: String) -> EmitCtx.StmtRes
   target = raise_target(expr)
   if target.rule == "call" and single_message_arg?(target)
+    msg = List.first(target.children.drop(1))
+    if msg_type != "String"
+      return EmitCtx.refuse_at(
+        "PY-TYPE-MISMATCH",
+        "raise message must be str, found #{msg_type}",
+        some("pass a string message"),
+        msg.start,
+        msg.stop,
+      )
+    end
+
     if ctx.func_ret == ""
       return EmitCtx.StmtRes.Ok(
         EmitCtx.StmtOut(code: ["IO.warn(#{msg_code})", "System.exit(1)"], scope: ctx.scope, next_temp: ctx.next_temp),
@@ -199,11 +214,45 @@ def read_mark(handler_code: List[String], name: String) -> List[String]
   ["_ = #{name}"]
 end
 
-# Whether any handler line names `name` as a whole word.
+# Whether any handler line names `name` as a whole word. String literals
+# are stripped first, so `puts("e")` never counts as a read of `e`.
 def uses_name?(lines: List[String], name: String) -> Bool
   return false if name == ""
 
-  words_in(lines.join("\n")).include?(name)
+  words_in(strip_strings(lines.join("\n"))).include?(name)
+end
+
+# Blanks the contents of string literals (both quote styles,
+# backslash-aware) so word scans never read inside them; each literal
+# becomes spaces, keeping word boundaries outside intact.
+def strip_strings(text: String) -> String
+  out = ""
+  quote = 0
+  escaped = false
+  for ch in text.split("")
+    code = ch.code
+    if quote == 0
+      if code == 34 or code == 39
+        quote = code
+        out = "#{out} "
+      else
+        out = "#{out}#{ch}"
+      end
+    elsif escaped
+      escaped = false
+      out = "#{out} "
+    elsif code == 92
+      escaped = true
+      out = "#{out} "
+    elsif code == quote
+      quote = 0
+      out = "#{out} "
+    else
+      out = "#{out} "
+    end
+  end
+
+  out
 end
 
 # Splits text into whole identifier words (the runner-facing twin lives in
@@ -235,7 +284,9 @@ def word_char?(ch: String) -> Bool
 end
 
 # The first `return`/`break`/`next` in `stmts`, in source order, or none.
-# `fallback` is where a spanless `return` reports (the first span of `stmts`).
+# `fallback` is where a spanless `return` reports: the first span of the
+# outer `try` body, seeded once by `emit_try` and threaded unchanged
+# through every nested body below.
 def find_control(stmts: List[Frontend.Stmt], fallback: Frontend.Span, source: String) -> Optional[Frontend.Span]
   for stmt in stmts
     hit = control_in(stmt, fallback, source)
@@ -250,7 +301,9 @@ end
 
 # Checks one statement: `return` always, `break`/`next` by source slice
 # (`Other` also covers `pass`, which stays legal), nested bodies
-# recursively — except a nested handler, which runs outside its `try`.
+# recursively with the same outer `fallback`. A nested `except` handler
+# counts too: it stays inline in the outer helper, so it cannot decide
+# the caller's control flow either.
 def control_in(stmt: Frontend.Stmt, fallback: Frontend.Span, source: String) -> Optional[Frontend.Span]
   case stmt
     Frontend.Stmt.ReturnStmt(value) ->
@@ -267,10 +320,10 @@ def control_in(stmt: Frontend.Stmt, fallback: Frontend.Span, source: String) -> 
         none
       end
 
-    Frontend.Stmt.ForLoop(_, _, body) -> find_control(body, control_fallback(body), source)
-    Frontend.Stmt.WhileStmt(_, body) -> find_control(body, control_fallback(body), source)
-    Frontend.Stmt.IfStmt(arms, else_body) -> control_in_arms(arms, else_body, source)
-    Frontend.Stmt.TryStmt(inner_try, _, _) -> find_control(inner_try, control_fallback(inner_try), source)
+    Frontend.Stmt.ForLoop(_, _, body) -> find_control(body, fallback, source)
+    Frontend.Stmt.WhileStmt(_, body) -> find_control(body, fallback, source)
+    Frontend.Stmt.IfStmt(arms, else_body) -> control_in_arms(arms, else_body, fallback, source)
+    Frontend.Stmt.TryStmt(inner_try, handler, _) -> find_control(inner_try + handler, fallback, source)
     _ -> none
   end
 end
@@ -326,17 +379,18 @@ end
 def control_in_arms(
   arms: List[Frontend.CondArm],
   else_body: List[Frontend.Stmt],
+  fallback: Frontend.Span,
   source: String,
 ) -> Optional[Frontend.Span]
   for arm in arms
-    hit = find_control(arm.body, control_fallback(arm.body), source)
+    hit = find_control(arm.body, fallback, source)
     case hit
       some(_) -> return hit
       none -> hit = hit
     end
   end
 
-  find_control(else_body, control_fallback(else_body), source)
+  find_control(else_body, fallback, source)
 end
 
 # The refusal message for a `raise` shape that carries no message.
@@ -370,8 +424,7 @@ def chain_rule?(rule: String) -> Bool
     rule == "minus" or
     rule == "plus" or
     rule == "power" or
-    rule == "group" or
-    rule == "arg"
+    rule == "group"
   )
 end
 
