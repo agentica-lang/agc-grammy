@@ -567,7 +567,9 @@ def main() -> Void
       inner = Tree.to_json(pair, "{\"a\": 1}")
       try JSON.parse(inner)
       try Test.eq(pair.stop - pair.start, 6)
-      Test.assert(inner.include?("\"rule\": \"pair\""), inner)
+      try Test.eq(pair.start, 1)
+      try Test.eq(pair.stop, 7)
+      Test.assert(inner.include?("\"pos\": [\n      1,\n      7\n    ]"), inner)
     end,
     Test.test("PUSH stores the text and POP matches it") do
       tree = try parse("p = { PUSH(word) ~ \" \" ~ POP }\nword = { ASCII_ALPHA+ }", "p", "abc abc")

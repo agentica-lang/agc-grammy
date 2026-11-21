@@ -122,6 +122,33 @@ end
 ## offsets; they agree on ASCII input.
 def to_json(node: Node, input: String) -> String = json_node(node, input, 0)
 
+## A string as a JSON string literal, with the control characters escaped.
+def json_string(value: String) -> String = "\"#{json_escape(value)}\""
+
+## Where `offset` falls in `input`.
+def position(input: String, offset: Int) -> Position
+  chars = input.split("")
+  limit = offset.clamp(0, chars.size)
+  line = 1
+  column = 1
+  line_start = 0
+  for i in 0...limit
+    if chars[i] == "\n"
+      line += 1
+      column = 1
+      line_start = i + 1
+    else
+      column += 1
+    end
+  end
+
+  Position(line: line, column: column, line_text: clip(line_from(chars, line_start)))
+end
+
+private
+
+LINE_LIMIT = 60
+
 # One array element per line, as `serde_json::to_string_pretty` prints them.
 def json_pos(start: Int, stop: Int, pad: String) -> String
   content = "#{pad}  "
@@ -164,9 +191,6 @@ def json_pairs(children: List[Node], input: String, depth: Int) -> String
   lines.push("#{pad}}").join("\n")
 end
 
-## A string as a JSON string literal, with the control characters escaped.
-def json_string(value: String) -> String = "\"#{json_escape(value)}\""
-
 def json_escape(value: String) -> String = value.split("").map { |ch| json_char(ch) }.join("")
 
 def json_char(ch: String) -> String
@@ -187,30 +211,6 @@ def json_control(ch: String) -> String
   return "\\f" if code == 12
   "\\u#{format("%04x", code)}"
 end
-
-## Where `offset` falls in `input`.
-def position(input: String, offset: Int) -> Position
-  chars = input.split("")
-  limit = offset.clamp(0, chars.size)
-  line = 1
-  column = 1
-  line_start = 0
-  for i in 0...limit
-    if chars[i] == "\n"
-      line += 1
-      column = 1
-      line_start = i + 1
-    else
-      column += 1
-    end
-  end
-
-  Position(line: line, column: column, line_text: clip(line_from(chars, line_start)))
-end
-
-private
-
-LINE_LIMIT = 60
 
 def clip(text: String) -> String
   return text if text.length <= LINE_LIMIT
