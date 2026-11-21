@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run; a push to master gets a
+# group of its own, so it is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Agentica release
+        uses: agentica-lang/setup-agentica@v1
+        with:
+          version: 0.35.0
+          sha256: 379b0494b84c89b121d089fab9b21879e939a4dd7e89661f6be34e70f13f6322 # linux-x86_64
+
+      - name: Check
+        run: |
+          agentica --version
+          make check
+
+      - name: Format
+        run: make fmt-check
+
+      - name: Lint
+        run: make lint
+
+      # `agentica test` only scans `test/` and `specs/` on its own, so the
+      # Makefile target passes `tests` explicitly.
+      - name: Test
+        run: make test
+
+      # The reference interpreter: the grammar in `grammars/python.grammar` plus
+      # `examples/python/interp.agc` over `sample.py`.
+      - name: Example
+        run: make example

@@ -265,6 +265,10 @@ make ci          # check + fmt-check + lint + test
 `agentica test` with no path only looks in `test/` and `specs/`, so the tests
 live in `tests/` and are run as `agentica test tests`.
 
+CI runs the same targets: `.github/workflows/ci.yml` installs Agentica 0.35.0 and
+runs `make check`, `fmt-check`, `lint`, `test` and `example` on every pull request
+and every push to `master`.
+
 ## Not there yet
 
 - a tag must name something that builds a node (pest drops such a tag silently)
