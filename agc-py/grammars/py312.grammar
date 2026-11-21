@@ -129,6 +129,8 @@ call = { name ~ "(" ~ ws ~ (args ~ ws ~ (",")? ~ ws)? ~ ")" }
 
 // Keyword args come last: once a `kwarg` matches, only `kwarg` may follow,
 // so `f(x=1, y)` fails while `f(x == 1)` still parses as an expression.
+// The tree shape is asymmetric: all-keyword calls yield bare `kwarg` nodes,
+// mixed calls yield `arg`-wrapped `kwarg` nodes — phase 4 lowering handles both.
 args = _{ kwarg ~ (ws ~ "," ~ ws ~ kwarg)* | expr ~ (ws ~ "," ~ ws ~ arg)* }
 
 arg = { kwarg | expr }
