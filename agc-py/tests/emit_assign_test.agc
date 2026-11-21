@@ -363,15 +363,15 @@ def main() -> Void
     Test.test("augmented forms emit") do
       first = "x: int = 1\nx += 2\n"
       ran = try run_all(compiled.unwrap!, first, top_ctx(first))
-      try Test.eq(ran.lines, ["x: Int = 1", "x = x + 2"])
+      try Test.eq(ran.lines, ["x: Int = 1", "x = x + (2)"])
       try add_func(compiled.unwrap!, "aug_add", first, top_ctx(first), "None", ["x"])
       second = "f: float = 1.5\nf /= 2.0\n"
       ran2 = try run_all(compiled.unwrap!, second, top_ctx(second))
-      try Test.eq(ran2.lines, ["f: Float = 1.5", "f = f / 2.0"])
+      try Test.eq(ran2.lines, ["f: Float = 1.5", "f = f / (2.0)"])
       try add_func(compiled.unwrap!, "aug_div", second, top_ctx(second), "None", ["f"])
       third = "s: str = \"a\"\ns += \"b\"\n"
       ran3 = try run_all(compiled.unwrap!, third, top_ctx(third))
-      try Test.eq(ran3.lines, ["s: String = \"a\"", "s = s + \"b\""])
+      try Test.eq(ran3.lines, ["s: String = \"a\"", "s = s + (\"b\")"])
       try add_func(compiled.unwrap!, "aug_str", third, top_ctx(third), "None", ["s"])
       ok()
     end,
@@ -498,7 +498,7 @@ def main() -> Void
       try add_func(compiled.unwrap!, "aug_str_group", str_src, top_ctx(str_src), "None", ["s"])
       grouped = "x: int = 10\nx -= (2 + 3)\n"
       ran7 = try run_all(compiled.unwrap!, grouped, top_ctx(grouped))
-      try Test.eq(ran7.lines, ["x: Int = 10", "x = x - (2 + 3)"])
+      try Test.eq(ran7.lines, ["x: Int = 10", "x = x - ((2 + 3))"])
       ok()
     end,
     Test.test("quoted temps survive the supply") do

@@ -186,13 +186,6 @@ end
 
 private
 
-# One string-aware scan answer: `wrapped` — the whole string is one outer
-# `(...)` pair — and `infix` — a depth-0 operator outside strings.
-struct GroupScan
-  wrapped: Bool
-  infix: Bool
-end
-
 # How a value of type `got` lands in the declared type `want`: `bare`
 # emits as written (equal types, `none` under `Optional`, or `Unknown`),
 # `wrap` needs `some(...)` for a known value under `Optional[T]` (probed
@@ -212,13 +205,6 @@ struct Shifted
   code: String
   pre: List[String]
   used: Int
-end
-
-# One parsed emitter error: the `PY-*` code plus its message and help.
-struct ErrParts
-  code: String
-  message: String
-  help: Optional[String]
 end
 
 # One read hole: the `#{...}` code plus the offset past its closer.
@@ -622,119 +608,8 @@ def aug_mod(xname: String, xtype: String, rcode: String, rtype: String) -> Resul
   error("PY-OPERATOR: `%=` has no form for #{xtype} and #{rtype}")
 end
 
-# Parenthesizes a compound augmented-assignment right-hand side so the
-# sugar keeps its grouping: `x -= 2 + 3` is `x = x - (2 + 3)`, not
-# `x - 2 + 3`. Atomic operands (names, numbers, temps, calls, indexing,
-# helpers, lone `"..."` strings, an already-wrapped group) pass through
-# untouched, so plain `x += 2` still reads `x = x + 2`. The scan skips
-# string contents, so a literal `"a + b"` stays bare while `"b" + "c"`
-# still groups.
-def group_operand(code: String) -> String
-  scan = group_scan(code)
-  return "(#{code})" if scan.infix and !scan.wrapped
-
-  code
-end
-
-# One grouping question per scan: `wrapped` — the whole string is one
-# outer `(...)` pair, so an explicit source group never doubles — and
-# `infix` — a depth-0 operator outside strings (`2 + 3`, comparisons,
-# `and`/`or`; calls, indexing, `.to_f`, helpers and temps have none at
-# depth 0). A later top-level pair never flips `wrapped` back on: the
-# first close that empties the depth decides.
-def group_scan(code: String) -> GroupScan
-  chars = code.split("")
-  scan = GroupScan(wrapped: false, infix: false)
-  return scan if chars.empty?
-
-  depth = 0
-  in_string = false
-  i = 0
-  while i < chars.size
-    ch = chars[i]
-    if in_string
-      if ch == "\\" and i + 1 < chars.size
-        i += 2
-      else
-        if ch == "\""
-          in_string = false
-        end
-
-        i += 1
-      end
-    else
-      if ch == "\""
-        in_string = true
-        i += 1
-      else
-        if ch == "(" or ch == "[" or ch == "{"
-          depth += 1
-          i += 1
-        else
-          if ch == ")" or ch == "]" or ch == "}"
-            depth -= 1
-            # Only a whole-string pair wraps: the first close that
-            # empties the depth decides, and only when `code` opens with
-            # that `(`; a later top-level pair never flips it back on.
-            if depth == 0 and chars[0] == "(" and !scan.wrapped
-              scan = scan.with(wrapped: i == chars.size - 1)
-            end
-
-            i += 1
-          else
-            if depth == 0 and op_at?(chars, i)
-              scan = scan.with(infix: true)
-            end
-
-            i += 1
-          end
-        end
-      end
-    end
-  end
-
-  scan
-end
-
-# Whether an operator starts at `chars[i]` (depth 0, outside strings):
-# `==` `!=` `<=` `>=` `<` `>`, spaced `+ - * / %`, or spaced `and`/`or`.
-# `EmitExpr` always spaces its infix operators, so unspaced `<`/`>` only
-# ever come from comparisons.
-def op_at?(chars: List[String], i: Int) -> Bool
-  ch = chars[i]
-  return i + 1 < chars.size and chars[i + 1] == "=" if ch == "=" or ch == "!"
-
-  return true if ch == "<" or ch == ">"
-
-  return spaced_infix?(chars, i) or spaced_word?(chars, i, "and") or spaced_word?(chars, i, "or") if ch == " "
-
-  false
-end
-
-def spaced_infix?(chars: List[String], i: Int) -> Bool
-  return false if i + 2 >= chars.size
-
-  return false if chars[i + 2] != " "
-
-  op = chars[i + 1]
-  op == "+" or op == "-" or op == "*" or op == "/" or op == "%"
-end
-
-def spaced_word?(chars: List[String], i: Int, word: String) -> Bool
-  letters = word.split("")
-  return false if i + letters.size + 1 >= chars.size
-
-  return false if chars[i + letters.size + 1] != " "
-
-  k = 0
-  while k < letters.size
-    return false if chars[i + 1 + k] != letters[k]
-
-    k += 1
-  end
-
-  true
-end
+# The RHS is a single operand even when it contains operators.
+def group_operand(code: String) -> String = "(#{code})"
 
 # Whether the declared type accepts the value type: exact names, `Unknown`
 # either side (phase 4 owns its meaning), `none` only under `Optional`, and
@@ -1190,36 +1065,5 @@ def take_interp(chars: List[String], from: Int) -> InterpTake
   InterpTake(code: inner, next: j)
 end
 
-# Splits an `EmitExpr` message-only error (`CODE: message = help: hint`)
-# into a refusal; anything without a `PY-*` code refuses as
-# `PY-OUT-OF-SUBSET`.
-def split_error(msg: String) -> ErrParts
-  colon = msg.index_of(":")
-  case colon
-    some(at) ->
-      code = msg.slice(0, at).strip
-      rest = msg.slice(at + 1, msg.length - at - 1).strip
-      if code.start_with?("PY-")
-        marker = rest.index_of("= help:")
-        case marker
-          some(found) ->
-            ErrParts(
-              code: code,
-              message: rest.slice(0, found).strip,
-              help: some(rest.slice(found + 7, rest.length - found - 7).strip),
-            )
-          none -> ErrParts(code: code, message: rest, help: none)
-        end
-      else
-        ErrParts(code: "PY-OUT-OF-SUBSET", message: msg, help: none)
-      end
-
-    none -> ErrParts(code: "PY-OUT-OF-SUBSET", message: msg, help: none)
-  end
-end
-
 # Refuses with a parsed emitter error at an explicit span.
-def refuse_split(start: Int, stop: Int, err: Error) -> EmitCtx.StmtRes
-  parts = split_error(err.message)
-  EmitCtx.refuse_at(parts.code, parts.message, parts.help, start, stop)
-end
+def refuse_split(start: Int, stop: Int, err: Error) -> EmitCtx.StmtRes = EmitCtx.refusal_from_error(start, stop, err)
