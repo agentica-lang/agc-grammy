@@ -142,11 +142,35 @@ plain types only.
   `TYPE_CHECKING`-gated imports are excluded.
 - Unknown modules/names are `PY-IMPORT-UNKNOWN` / `PY-NAME-UNKNOWN` at the
   importing span.
-- Stdlib surface (closed, each mapped in phase 3): `math.sqrt` (→
-  `Math.sqrt`), `math.floor`/`math.ceil` (→ the `Float` methods
-  `x.floor()`/`x.ceil()`), `sys.argv` (→ `System.args()`), and string
-  methods `strip`, `split`, `join`, `replace`, `upcase`, `downcase`,
-  `start_with?`, `end_with?`, `include?` (all probed in the backend docs).
+- Stdlib surface (closed, each mapped in phase 3). Covered with what the
+  backend and its std give today, nothing else:
+  - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),
+    `range` (-> `Range`, 3-arg form desugars), `str`/`int`/`float`/`bool`
+    conversions, `sorted` (-> `List.sort`), `sum`/`min`/`max` (->
+    `List.sum`/`min`/`max`), `abs` (-> `.abs`), `round` (-> `.round`),
+    `chr`/`ord` (-> `String.from_code`/`.code`), `enumerate` (desugars to an
+    index counter), `reversed` (-> `List.reverse`), `all`/`any` (->
+    `List.all?`/`any?`), `map`/`filter` over named functions (->
+    `List.map`/`select`).
+  - `math`: `sqrt` (-> `Math.sqrt`), `floor`/`ceil` (-> the `Float` methods
+    `x.floor()`/`x.ceil()`), `pi`/`e`/`tau`/`inf` (constants).
+  - `sys`: `argv` (-> `System.args()`), `exit` (-> `System.exit`), stdio via
+    `IO` (`stdin` -> `IO.gets`, `stderr` via `IO.warn`).
+  - `os`: `environ` (-> `System.env`), `getcwd`, file read/write (-> the
+    `File` builtins); the rest is `PY-IMPORT-UNKNOWN`.
+  - `json` (-> `JSON.parse`/`JSON.encode`), `re` (-> `std/regex`, RE2 subset),
+    `toml` (-> `std/toml`), `datetime` (-> `std/utc`), `urllib.parse` (->
+    `std/uri`), `http.client` (-> `std/http`), `html` escaping (-> `std/html`),
+    `mimetypes` (-> `std/mime`), `cookies` (-> `std/cookie`), `argparse` (->
+    `std/option_parser`), `logging` (-> `std/logger`), `time` (-> `Time`),
+    `random` (-> `Random`; secrets need `OpenSSL.Random`, excluded v0),
+    `hashlib` (-> `OpenSSL.Digest`, partial), `pathlib` (-> `File`
+    operations, partial), `string` methods: `strip`, `split`, `join`,
+    `replace`, `upcase`, `downcase`, `start_with?`, `end_with?`, `include?`.
+  - Excluded v0 (each a `PY-IMPORT-UNKNOWN`): `socket`, `threading`,
+    `multiprocessing`, `asyncio`, `subprocess`, `sqlite3`, `csv`,
+    `decimal`, `statistics` (beyond `List` helpers), `itertools`,
+    `functools`, `collections`, `dataclasses`, `unittest`, `pdb`.
   Anything else from the stdlib is `PY-IMPORT-UNKNOWN`.
 
 ## 6. Truthiness
