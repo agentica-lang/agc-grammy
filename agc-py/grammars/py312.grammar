@@ -1,0 +1,148 @@
+// Python 3.12, typed subset, phase 2a: typed `def`, annotations, and an
+// expression core. Later phases add data (2b), control (2c) and layout (2d).
+//
+// Style follows `grammars/python.grammar` on purpose: explicit `ws` (no
+// newline) and `eol` everywhere, no implicit `WHITESPACE`, so indentation
+// behaves exactly like the proven grammar. Structural rules build nodes;
+// spacing helpers (`ws`, `nl`, `eol`, `word_end`, `ident_*`) are silent.
+
+// Spaces and tabs, never a newline.
+ws = _{ (" " | "\t")* }
+
+nl = _{ "\r\n" | "\n" | "\r" }
+
+// To the end of the line: optional blanks, an optional comment, the break.
+eol = _{ ws ~ ("#" ~ [^"\n"]*)? ~ nl }
+
+// What a line starts with when it holds no statement.
+skipped = _{ (" " | "\t")* ~ ("#" ~ [^"\n"]*)? ~ nl }
+
+ident_start = _{ [a-zA-Z_] }
+
+ident_char = _{ [a-zA-Z0-9_] }
+
+ident = _{ ident_start ~ ident_char* }
+
+// After a keyword, so `defined` is not `def` + `ined`.
+word_end = _{ !ident_char }
+
+program = _{ skipped* ~ (top ~ skipped*)* ~ ws ~ EOF }
+
+top = _{ def_stmt ~ (eol | ws ~ comment? ~ EOF) | statement ~ (eol | ws ~ comment? ~ EOF) }
+
+statement = _{
+  annotated
+  | assign
+  | return_stmt
+  | pass_stmt
+  | if_stmt
+  | while_loop
+  | call_stmt
+  | comment
+}
+
+suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
+
+// `def name(params) -> type:` — annotations are mandatory, so an untyped
+// `def` fails here with the deepest span. `*args` has no rule and fails too.
+def_stmt = {
+  "def" ~ word_end ~ ws ~ name ~ "(" ~ ws ~ params? ~ ws ~ ")" ~
+  ws ~ "->" ~ ws ~ annotation ~ ws ~ ":" ~ suite
+}
+
+params = { param ~ (ws ~ "," ~ ws ~ param)* ~ (ws ~ ",")? }
+
+param = { name ~ ws ~ ":" ~ ws ~ annotation ~ (ws ~ "=" ~ ws ~ expr)? }
+
+return_stmt = { "return" ~ word_end ~ (ws ~ expr)? }
+
+pass_stmt = { "pass" ~ word_end }
+
+annotated = { name ~ ws ~ ":" ~ ws ~ annotation ~ (ws ~ "=" ~ ws ~ expr)? }
+
+assign = { name ~ ws ~ "=" ~ ws ~ expr }
+
+call_stmt = { call }
+
+// `>` scopes the whole branch chain: `suite` alone would drop its base when
+// it returns, so `elif`/`else` in a `def` body would compare against the
+// wrong level. The base is the `if` line; expressions never consult it.
+if_stmt = >{ "if" ~ ws ~ expr ~ ws ~ ":" ~ suite ~ elif_branch* ~ else_branch? }
+
+elif_branch = { eol ~ SAME ~ "elif" ~ ws ~ expr ~ ws ~ ":" ~ suite }
+
+else_branch = { eol ~ SAME ~ "else" ~ ws ~ ":" ~ suite }
+
+while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ suite }
+
+comment = _{ "#" ~ [^"\n"]* }
+
+// Annotations: unions of arms; a string arm is a forward reference.
+annotation = { union }
+
+union = { union_arm ~ (ws ~ "|" ~ ws ~ union_arm)* }
+
+union_arm = { subscript | fwd | dotted }
+
+subscript = { dotted ~ "[" ~ ws ~ type_args ~ ws ~ "]" }
+
+type_args = { annotation ~ (ws ~ "," ~ ws ~ annotation)* }
+
+dotted = { ident ~ ("." ~ ident)* }
+
+// Escape decoding arrives with phase 2b strings; for now the raw text.
+fwd = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
+
+expr = _{ cond_expr }
+
+cond_expr = { or_expr ~ (ws ~ "if" ~ word_end ~ ws ~ or_expr ~ ws ~ "else" ~ word_end ~ ws ~ cond_expr)? }
+
+or_expr = { and_expr ~ (ws ~ "or" ~ word_end ~ ws ~ and_expr)* }
+
+and_expr = { not_expr ~ (ws ~ "and" ~ word_end ~ ws ~ not_expr)* }
+
+not_expr = _{ boolean_not | comparison }
+
+boolean_not = { "not" ~ word_end ~ ws ~ not_expr }
+
+comparison = { sum ~ (ws ~ cmp_op ~ ws ~ sum)* }
+
+cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+
+sum = { term ~ (ws ~ add_op ~ ws ~ term)* }
+
+add_op = { "+" | "-" }
+
+term = { unary ~ (ws ~ mul_op ~ ws ~ unary)* }
+
+mul_op = { "*" | "/" | "%" }
+
+unary = _{ minus | atom }
+
+minus = { "-" ~ ws ~ unary }
+
+atom = _{ number | text | boolean | none_lit | call | name | group }
+
+group = { "(" ~ ws ~ expr ~ ws ~ ")" }
+
+call = { name ~ "(" ~ ws ~ (args ~ ws ~ (",")? ~ ws)? ~ ")" }
+
+// Keyword args come last: once a `kwarg` matches, only `kwarg` may follow,
+// so `f(x=1, y)` fails while `f(x == 1)` still parses as an expression.
+// The tree shape is asymmetric: all-keyword calls yield bare `kwarg` nodes,
+// mixed calls yield `arg`-wrapped `kwarg` nodes — phase 4 lowering handles both.
+args = _{ kwarg ~ (ws ~ "," ~ ws ~ kwarg)* | expr ~ (ws ~ "," ~ ws ~ arg)* }
+
+arg = { kwarg | expr }
+
+kwarg = { name ~ ws ~ "=" ~ ws ~ expr }
+
+number = { ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+text = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
+
+boolean = { ("True" | "False") ~ word_end }
+
+none_lit = { "None" ~ word_end }
+
+name = { ident_start ~ ident_char* }
