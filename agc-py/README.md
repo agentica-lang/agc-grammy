@@ -22,10 +22,13 @@ agc-py/src/py2agc.agc  the translator (today: the pipeline skeleton)
 agc-py/tests/          Agentica unit tests (run from the repo root)
 ```
 
-grammy stays the only parser: `agc-py` imports it by relative path, exactly as
-`tests/` and `examples/python/` do. A workspace split (`grammy/` + `agc-py/`
-members, phase 0 of the roadmap) waits for the first version tag; until then
-one manifest covers both folders.
+grammy stays the only parser: `agc-py` will import it by relative path,
+exactly as `tests/` and `examples/python/` do. No workspace split yet by
+release discipline (not a tool requirement: a `ref` pin or `path` dep would
+also work): we defer it until we cut the first `grammy-*` prefixed tag. That
+split means moving `src/`, `tests/`, `grammars/`, `examples/` under `grammy/`
+with its own manifest, a workspace-root manifest carrying the repository URL,
+and rewriting relative imports to `pkg/grammy/...`; see roadmap phase 0.
 
 ## Subset sketch (phase 1 writes the binding version)
 
@@ -35,19 +38,22 @@ Only typed code compiles; the table is the whole contract:
 |---|---|
 | `def f(x: int) -> int` | `def f(x: Int) -> Int` |
 | `x: int = 0` | `x: Int = 0` |
-| `str`, `float`, `bool`, `None` | `String`, `Float`, `Bool`, `nil` |
-| `list[int]`, `dict[str, int]`, `X \| None` | `List[Int]`, `Map[String, Int]`, `Optional[X]` |
+| `str`, `float`, `bool`, `None` | `String`, `Float`, `Bool`, `none` |
+| `list[int]`, `dict[str, int]`, `X \| None` | `List[Int]`, `Map[String, Int]`, `Optional[X]` (`none` is the empty case) |
 | `print`, `len`, `range` | `puts`, `List.size`, `Range` |
 
 Out on purpose: classes, decorators, `yield`, `async`, `eval`/`getattr`,
-in-place mutation (`list.append`), untyped `def`. Each exclusion is a frontend
-error with a span, not silently different behaviour.
+in-place mutation (`list.append`), untyped `def`. Phase 1 also settles `with`,
+`match`/`case` and f-strings. Each exclusion is a frontend error with a span,
+not silently different behaviour. This sketch is non-binding; `agc-py/SUBSET.md`
+from phase 1 supersedes it.
 
 ## Bytecode reference (sibling checkout, not a dependency)
 
 The bytecode itself lives in `../agentica` (the Agentica implementation, next
-to this repo): IR and lowering rules in `docs/vm/03-ir-and-bytecode.md`, the
-writer in `compiler/bytecode/`, per-form rules in `compiler/lower/`. What the
+to this repo), distilled here from commit `e31975ee9`: IR and lowering rules in
+`docs/vm/03-ir-and-bytecode.md`, the writer in `compiler/bytecode/`, per-form
+rules in `compiler/lower/`. What the
 emitter must respect, distilled:
 
 - Slots are per-function registers (`params, captures, locals, temporaries`);
@@ -56,10 +62,14 @@ emitter must respect, distilled:
 - Every statement and expression is a `step` with its span; loops charge per
   iteration, so generated code pays `--max-steps` like hand-written code.
 - A call in direct `return` position is a `tail-call`; anything else is a
-  `call`. Builtins lower to `call-builtin`.
-- Assignment to an existing local goes through a temporary plus a `move`.
-- Literals over 255 elements are chunked; deep nesting has a
-  `BYTECODE-LIMIT`. The subset keeps literals small or chunks them itself.
+  `call`. Builtin calls (including higher-order `List` functions) are always
+  `call-builtin`, never tail calls — so is `return 1 + f(n)` or
+  `return try f(...)`.
+- Assignment to an existing local lowers into a temporary, then usually a
+  `move` (elided when the producing instruction can write the local directly).
+- Literals over 255 elements are chunked by `agentica compile`, and deep
+  nesting has a `BYTECODE-LIMIT`. The subset keeps literals small; larger ones
+  stay correct because the backend chunks them.
 
 `agc-py` never targets this layer directly: it emits `.agc` and lets
 `agentica compile` lower it. The notes stay so codegen choices (flat
