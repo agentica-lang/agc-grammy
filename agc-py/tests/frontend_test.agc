@@ -52,7 +52,7 @@ def main() -> Void
       diags = try analyze(compiled, source)
       try Test.eq(diags.size, 1)
       diag = List.first(diags)
-      try Test.eq(diag.code, "PY-TYPE-MISMATCH")
+      try Test.eq(diag.code, "PY-DUPLICATE-BINDING")
       try Test.eq(span_text(source, diag), "a")
       pos = Tree.position(source, diag.start)
       try Test.eq(pos.line, 1)
@@ -60,7 +60,7 @@ def main() -> Void
     end,
     Test.test("a duplicate module binding is rejected at the second name") do
       source = "x: int = 1\nx: int = 2\n"
-      try Test.eq(try check_codes(compiled, source), ["PY-TYPE-MISMATCH"])
+      try Test.eq(try check_codes(compiled, source), ["PY-DUPLICATE-BINDING"])
       diags = try analyze(compiled, source)
       diag = List.first(diags)
       try Test.eq(span_text(source, diag), "x")
@@ -91,6 +91,112 @@ def main() -> Void
       pos = Tree.position(source, diag.start)
       try Test.eq(pos.line, 1)
       Test.eq(pos.column, 1)
+    end,
+    Test.test("a keyword as a def name is reserved") do
+      source = "def if() -> None:\n    pass\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-RESERVED-NAME"])
+      Test.eq(span_text(source, List.first(diags)), "if")
+    end,
+    Test.test("a keyword as a parameter is reserved") do
+      source = "def f(if: int) -> int:\n    return 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-RESERVED-NAME"])
+      Test.eq(span_text(source, List.first(diags)), "if")
+    end,
+    Test.test("a keyword as an import is reserved") do
+      source = "import if\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-RESERVED-NAME"])
+      Test.eq(span_text(source, List.first(diags)), "if")
+    end,
+    Test.test("mutual recursion resolves") do
+      Test.ok?(check(compiled, "def f() -> None:\n    g()\n\ndef g() -> None:\n    f()\n"))
+    end,
+    Test.test("a top-level call before its def is unknown") do
+      source = "print(f())\ndef f() -> int:\n    return 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-NAME-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "f")
+    end,
+    Test.test("a body use of a later-bound module variable is unknown") do
+      source = "def f() -> None:\n    print(y)\n\ny: int = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-NAME-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "y")
+    end,
+    Test.test("an unknown bare annotation is rejected") do
+      source = "x: Bad = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANNOTATION-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "Bad")
+    end,
+    Test.test("an unknown dotted annotation head is rejected") do
+      source = "x: nosuch.X = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANNOTATION-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "nosuch")
+    end,
+    Test.test("a bare Any annotation is rejected") do
+      source = "x: Any = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANY"])
+      Test.eq(span_text(source, List.first(diags)), "Any")
+    end,
+    Test.test("a typing.Any annotation is rejected") do
+      source = "x: typing.Any = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANY"])
+      Test.eq(span_text(source, List.first(diags)), "typing.Any")
+    end,
+    Test.test("check_source renders every failure") do
+      case check(compiled, "x = 1\ny = 2\n")
+        error(e) ->
+          try Test.assert(e.message.include?("prog.py:1:1"), e.message)
+          try Test.assert(e.message.include?("prog.py:2:1"), e.message)
+          Test.assert(e.message.include?("error[PY-UNTYPED-NAME]"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an untyped def masks a generic parse error elsewhere") do
+      case check(compiled, "x = = 1\ndef f(x):\n    return x\n")
+        error(e) -> Test.assert(e.message.include?("error[PY-UNTYPED-DEF]"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a bare raise name stays skipped") do Test.ok?(check(compiled, "def f() -> None:\n    raise E\n")) end,
+    Test.test("a raise factory call resolves its head") do
+      source = "def f() -> None:\n    raise make_error(\"x\")\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-NAME-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "make_error")
+    end,
+    Test.test("an except-as name stays bound after its handler") do
+      Test.ok?(
+        check(
+          compiled,
+          "def f() -> None:\n    try:\n        x: int = 1\n    except ValueError as e:\n        print(e)\n    print(e)\n",
+        ),
+      )
+    end,
+    Test.test("a for target may rebind an existing name") do
+      Test.ok?(check(compiled, "x: int = 0\nfor x in range(3):\n    print(x)\n"))
+    end,
+    Test.test("a multi-line untyped def stays a generic engine error") do
+      case check(compiled, "def f(\n    x\n):\n    return x\n")
+        error(e) -> Test.assert(!e.message.include?("PY-UNTYPED-DEF"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an untyped defaulted parameter points at just the name") do
+      source = "def f(x=0) -> int:\n    return x\n"
+      found = Frontend.untyped_def(source)
+      case found
+        some(diag) ->
+          try Test.eq(diag.code, "PY-UNTYPED-DEF")
+          Test.eq(span_text(source, diag), "x")
+        none -> Test.assert(false, "expected a diagnostic")
+      end
     end,
     Test.test("an untyped def refuses before resolve") do
       case check(compiled, "def f(x):\n    return y\n")

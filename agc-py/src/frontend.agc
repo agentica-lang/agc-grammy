@@ -4,21 +4,42 @@
 ## parses with the owned `py312` grammar; `build` shapes the tree into a
 ## `Program` (every node keeps its span from the parse tree); `resolve`
 ## checks scopes and answers every problem as a `Diagnostic`. `check_source`
-## runs all three and renders the first failure; `untyped_def` spots an
+## runs all three and renders every failure; `untyped_def` spots an
 ## untyped `def` header when parsing already failed, so that shape refuses
 ## with `PY-UNTYPED-DEF` instead of the raw engine error (the grammar itself
-## demands full annotations, so untyped headers never reach `build`).
+## demands full annotations, so untyped headers never reach `build`). When a
+## generic parse error sits elsewhere in the file, that mapping still wins:
+## any untyped `def` anywhere masks the engine error and only `PY-UNTYPED-DEF`
+## is reported.
 ##
 ## Scopes are module level plus one function level (`SUBSET.md` section 2):
 ## shadowing an outer name with a fresh binding inside a function is allowed,
-## while a second binding in the same scope is `PY-TYPE-MISMATCH` (the catalog
-## has no duplicate-specific code, so the binding-rule code applies). A plain
+## while a second binding in the same scope is `PY-DUPLICATE-BINDING`. A plain
 ## `x = ...` to a name the current scope never declared is `PY-UNTYPED-NAME`;
 ## `for` targets and `except ... as` names bind silently (the grammar gives
 ## them no annotation slot, and the worked example loops with a bare target).
-## `raise` and `except` classes are never resolved (section 4: the class is
-## not modeled). Imports bind their alias or head name so attribute roots
-## like `os` in `os.getcwd()` resolve.
+## A `for` target that rebinds an existing name is allowed: it reuses the slot
+## instead of redeclaring it. An `except ... as e` name stays bound for the
+## rest of the flat function scope after its handler (a divergence from
+## CPython, which deletes it). `raise` heads that look class-like (a leading
+## uppercase letter, so `ValueError` or a bare `E`) are never resolved
+## (section 4: the class is not modeled); any other `raise` head resolves
+## like a normal load, so a factory call such as `raise make_error("x")`
+## must resolve `make_error`. Imports bind their alias or head name so
+## attribute roots like `os` in `os.getcwd()` resolve.
+##
+## Forward references are a deliberate middle ground. Every `def` name is
+## pre-bound up front so mutual recursion keeps working, but each function
+## body is checked against the module scope as it stands at that `def`:
+## all `def` names plus only the top-level bindings seen so far. A body use
+## of a later-bound module variable is `PY-NAME-UNKNOWN`. Top-level
+## statements are checked strictly in order, so a call before its `def` is
+## `PY-NAME-UNKNOWN` too.
+##
+## Annotations are checked against the known-type set (`int`, `str`, `float`,
+## `bool`, `None`, `list`, `dict`, `Optional`): an unknown bare or dotted-head
+## name is `PY-ANNOTATION-UNKNOWN`, while a bare `Any` (or `object`) and a
+## `typing.Any` head are `PY-ANY`.
 ##
 ## `render` prints one diagnostic in the Agentica shape (`file:line:col`
 ## `error[PY-*]` + explanation + marked source line + `= help:` when known).
@@ -44,10 +65,12 @@ struct NameOcc
   kind: String
 end
 
-## One statement shape, with nested bodies kept as statement lists.
+## One statement shape, with nested bodies kept as statement lists. An
+## `Annotated` or `AliasDef` carries its annotation as an `Ann` (text plus
+## the span it was sliced from) so `resolve` can check the names inside it.
 enum Stmt
-  Annotated(NameOcc, String)
-  AliasDef(NameOcc)
+  Annotated(NameOcc, Ann)
+  AliasDef(NameOcc, Ann)
   Assigned(NameOcc)
   AugAssigned(NameOcc)
   ForLoop(NameOcc, List[Stmt])
@@ -57,15 +80,25 @@ enum Stmt
   Other(Span)
 end
 
+## One annotation occurrence: the raw text plus the span it covers, so
+## `resolve` can point each unknown or excluded name at its own span.
+struct Ann
+  text: String
+  span: Span
+end
+
 ## One typed `def`: the header facts plus the body as statements and as the
 ## flat name occurrences `resolve` checks (parameters excluded: they are
-## bound before the body walks).
+## bound before the body walks). Parameter and return annotations travel as
+## `Ann` values so `resolve` can check the names inside them.
 struct FuncDef
   name: String
   name_span: Span
   span: Span
   params: List[NameOcc]
+  param_anns: List[Ann]
   return_type: String
+  return_span: Span
   body: List[Stmt]
   body_names: List[NameOcc]
 end
@@ -95,8 +128,8 @@ struct Diagnostic
 end
 
 ## Runs every stage on `source` (`file` names it in diagnostics): parse, then
-## build, then resolve. The first failure is an `error` carrying the rendered
-## diagnostic (or the engine message when the text is not Python at all).
+## build, then resolve. Every failure is an `error` carrying the rendered
+## diagnostics (or the engine message when the text is not Python at all).
 def check_source(grammar: Grammar.Grammar, file: String, source: String) -> Result[Void]
   tree = try parse_with_untyped(grammar, source, file)
   program = try build(tree, source)
@@ -136,26 +169,95 @@ def build_top_stmt(node: Tree.Node, source: String) -> Result[TopItem]
   end
 end
 
-## Checks every scope in `program`: `def` names first (so later and earlier
-## tops both see them), then the top-level items in order, then each function
-## body against its parameters plus the full module scope. Answers every
-## problem in source order; an empty list means the program resolved cleanly.
+## Checks every scope in `program`: `def` names are pre-bound up front (so
+## mutual recursion resolves), top-level items are then checked strictly in
+## order with each `def` name joining the module scope at its own position
+## (a call before its `def` is `PY-NAME-UNKNOWN`), and each function body is
+## checked against its parameters plus the module scope as it stands at that
+## `def` (all `def` names plus only the top-level bindings seen so far, so a
+## body use of a later-bound module variable is `PY-NAME-UNKNOWN`). Answers
+## every problem in source order; an empty list means the program resolved
+## cleanly.
 def resolve(program: Program) -> List[Diagnostic]
-  module_state = ScopeState(scope: Set.new([]), diags: [])
+  all_defs: Set[String] = Set.new([])
   for func_def in program.funcs
-    module_state = bind_def_name(module_state, func_def)
+    all_defs = all_defs.add(func_def.name)
   end
 
+  def_idx = 0
+  module_state = ScopeState(scope: Set.new([]), diags: [])
   for item in program.top
+    pos = top_start(item)
+    if pos.some?
+      at = pos.unwrap!
+      while def_idx < program.funcs.size
+        candidate = List.first(program.funcs.drop(def_idx))
+        break if candidate.span.start >= at
+
+        module_state = bind_def_name(module_state, candidate)
+        def_idx += 1
+      end
+    end
+
     module_state = check_top_item(module_state, item)
+  end
+
+  while def_idx < program.funcs.size
+    module_state = bind_def_name(module_state, List.first(program.funcs.drop(def_idx)))
+    def_idx += 1
   end
 
   diags = module_state.diags
   for func_def in program.funcs
-    diags = check_func_body(diags, module_state.scope, func_def)
+    diags = check_func_body(diags, snapshot_scope(program, all_defs, func_def.span.start), func_def)
   end
 
   diags
+end
+
+# The earliest name position in a top-level item, or none when the item
+# mentions no names (then ordering does not matter for it).
+def top_start(item: TopItem) -> Optional[Int]
+  names = top_names(item)
+  return none if names.empty?
+
+  earliest = List.first(names).span.start
+  for occ in names.drop(1)
+    if occ.span.start < earliest
+      earliest = occ.span.start
+    end
+  end
+
+  some(earliest)
+end
+
+def top_names(item: TopItem) -> List[NameOcc]
+  case item
+    TopItem.StmtItem(_, names) -> names
+    TopItem.ImportItem(names) -> names
+  end
+end
+
+# The module scope visible at a `def` at `at`: every `def` name plus the
+# top-level bindings (`declare`, `assign` and silent `reuse` targets) whose
+# earliest name sits before the `def`.
+def snapshot_scope(program: Program, all_defs: Set[String], at: Int) -> Set[String]
+  scope = all_defs
+  for item in program.top
+    pos = top_start(item)
+    if pos.some?
+      start = pos.unwrap!
+      if start < at
+        for occ in top_names(item)
+          if occ.kind == "declare" or occ.kind == "assign" or occ.kind == "reuse"
+            scope = scope.add(occ.name)
+          end
+        end
+      end
+    end
+  end
+
+  scope
 end
 
 ## Renders one diagnostic in the Agentica shape: `file:line:col error[PY-*]`,
@@ -191,8 +293,9 @@ end
 
 ## Spots an untyped `def` header in `source`, so a failed parse can still
 ## refuse with `PY-UNTYPED-DEF` at the header. Only single-line headers are
-## judged (a header with unbalanced parentheses continues on the next line);
-## anything else stays a parse error.
+## judged (a header with unbalanced parentheses continues on the next line,
+## so a multi-line untyped header stays a generic engine error); anything
+## else stays a parse error.
 def untyped_def(source: String) -> Optional[Diagnostic]
   lines = source.split("\n")
   offset = 0
@@ -275,6 +378,10 @@ KNOWN_NAMES = Set.new([
   "sum",
 ])
 
+# Annotation names the subset accepts (`SUBSET.md` section 1): anything else
+# is `PY-ANNOTATION-UNKNOWN`, while `Any` (or `object`) is `PY-ANY`.
+KNOWN_TYPES = Set.new(["bool", "dict", "float", "int", "list", "None", "Optional", "str"])
+
 # A scope under construction: the names bound so far and the problems found.
 struct ScopeState
   scope: Set[String]
@@ -296,6 +403,8 @@ end
 def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
   name_node = try Tree.first_child(node, "name").to_result("agc-py: def without a name")
   params = try build_params(node, source)
+  param_anns = try build_param_anns(node, source)
+  return_ann = try ann_of(node, "annotation", source)
 
   ok(
     FuncDef(
@@ -303,7 +412,9 @@ def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
       name_span: span_of(name_node),
       span: span_of(node),
       params: params,
-      return_type: try child_text(node, "annotation", source),
+      param_anns: param_anns,
+      return_type: return_ann.text,
+      return_span: return_ann.span,
       body: try build_body(node.children, source),
       body_names: collect_def_body(node, source),
     ),
@@ -330,14 +441,29 @@ def build_param(node: Tree.Node, source: String) -> Result[NameOcc]
   ok(occ_of(name_node, source, "declare"))
 end
 
+def build_param_anns(node: Tree.Node, source: String) -> Result[List[Ann]]
+  found = Tree.first_child(node, "params")
+  case found
+    some(listing) ->
+      anns: List[Ann] = []
+      for param in Tree.children_of(listing, "param")
+        anns = anns.push(try ann_of(param, "annotation", source))
+      end
+
+      ok(anns)
+    none -> ok([])
+  end
+end
+
 # Shapes one tree node into a statement. Expression debris (names, calls and
 # operators inside conditions or iterations) is not a statement and maps to
 # none; only `build` treats that as an error, bodies skip it.
 def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
   case node.rule
     "annotated" ->
-      ok(some(Stmt.Annotated(try binding_occ(node, source, "declare"), try child_text(node, "annotation", source))))
-    "type_alias" -> ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"))))
+      ok(some(Stmt.Annotated(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
+    "type_alias" ->
+      ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
     "assign" -> ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"))))
     "augmented_assign" -> ok(some(Stmt.AugAssigned(try binding_occ(node, source, "assign"))))
     "for_loop" -> ok(some(Stmt.ForLoop(try binding_occ(node, source, "reuse"), try build_body(node.children, source))))
@@ -419,6 +545,11 @@ end
 def child_text(node: Tree.Node, rule: String, source: String) -> Result[String]
   child = try Tree.first_child(node, rule).to_result("agc-py: #{node.rule} without #{rule}")
   ok(Tree.text(child, source))
+end
+
+def ann_of(node: Tree.Node, rule: String, source: String) -> Result[Ann]
+  child = try Tree.first_child(node, rule).to_result("agc-py: #{node.rule} without #{rule}")
+  ok(Ann(text: Tree.text(child, source), span: span_of(child)))
 end
 
 def occ_of(node: Tree.Node, source: String, kind: String) -> NameOcc
@@ -570,14 +701,23 @@ def import_head_occ(node: Tree.Node, source: String) -> NameOcc
   end
 end
 
-# `raise E("msg")` lowers to the message alone: the class head is skipped
-# rather than resolved, while the arguments still collect as loads. The head
-# hides behind the single-child expression chain (`cond_expr`, `or_expr`,
-# `comparison` and friends), so it is found by descent and filtered out.
+# `raise E("msg")` lowers to the message alone: a class-like head (a leading
+# uppercase letter, so `ValueError` or a bare `E`) is skipped rather than
+# resolved, while the arguments still collect as loads. Any other head — a
+# factory call such as `raise make_error("x")` — resolves like a normal load.
+# The head hides behind the single-child expression chain (`cond_expr`,
+# `or_expr`, `comparison` and friends), so it is found by descent and only
+# filtered out when it looks class-like.
 def collect_raise(node: Tree.Node, source: String) -> List[NameOcc]
   all = collect_all(node.children, source)
   case raise_head(node)
-    some(head) -> all.select { |occ| occ.span.start != head.start or occ.span.stop != head.stop }
+    some(head) ->
+      if class_like?(Tree.text(head, source))
+        all.select { |occ| occ.span.start != head.start or occ.span.stop != head.stop }
+      else
+        all
+      end
+
     none -> all
   end
 end
@@ -632,7 +772,8 @@ end
 
 def check_top_item(state: ScopeState, item: TopItem) -> ScopeState
   case item
-    TopItem.StmtItem(_, names) -> check_top_names(state, names)
+    TopItem.StmtItem(stmt, names) ->
+      check_top_names(ScopeState(scope: state.scope, diags: state.diags + stmt_ann_diags(stmt)), names)
     TopItem.ImportItem(names) -> declare_all(state, names)
   end
 end
@@ -656,7 +797,16 @@ def declare_all(state: ScopeState, names: List[NameOcc]) -> ScopeState
 end
 
 def check_func_body(diags: List[Diagnostic], module: Set[String], func_def: FuncDef) -> List[Diagnostic]
-  state = ScopeState(scope: Set.new([]), diags: diags)
+  state = ScopeState(
+    scope: Set.new([]),
+    diags: (
+      diags +
+      anns_diags(func_def.param_anns) +
+      ann_diags(func_def.return_type, func_def.return_span) +
+      stmts_ann_diags(func_def.body)
+    ),
+  )
+
   for param in func_def.params
     state = declare_name(state, param)
   end
@@ -681,7 +831,15 @@ def check_body_occ(state: ScopeState, module: Set[String], occ: NameOcc) -> Scop
   end
 end
 
+# Every binding path runs through here, so keywords in `def` names,
+# parameter names and import bindings are rejected alongside ordinary
+# declares (`check_body_occ` also rejects reserved words in the other
+# positions before dispatching here for `declare`).
 def declare_name(state: ScopeState, occ: NameOcc) -> ScopeState
+  if RESERVED_WORDS.include?(occ.name)
+    return ScopeState(scope: state.scope.add(occ.name), diags: state.diags.push(reserved_diag(occ)))
+  end
+
   return ScopeState(scope: state.scope, diags: state.diags.push(duplicate_diag(occ))) if state.scope.include?(occ.name)
 
   ScopeState(scope: state.scope.add(occ.name), diags: state.diags)
@@ -711,11 +869,11 @@ def reserved_diag(occ: NameOcc) -> Diagnostic
   )
 end
 
-# A second binding in one scope re-declares the name; the catalog has no
-# duplicate-specific code, so the binding-rule code applies.
+# A second binding of one name in one scope re-declares it; shadowing an
+# outer scope stays allowed because each function body starts fresh.
 def duplicate_diag(occ: NameOcc) -> Diagnostic
   Diagnostic(
-    code: "PY-TYPE-MISMATCH",
+    code: "PY-DUPLICATE-BINDING",
     message: "duplicate binding of `#{occ.name}` in the same scope",
     help: some("rename one of the bindings; a function may shadow a module-level name"),
     start: occ.span.start,
@@ -741,6 +899,206 @@ def untyped_name_diag(occ: NameOcc) -> Diagnostic
     start: occ.span.start,
     stop: occ.span.stop,
   )
+end
+
+def ann_unknown_diag(name: String, start: Int, stop: Int) -> Diagnostic
+  Diagnostic(
+    code: "PY-ANNOTATION-UNKNOWN",
+    message: "unknown annotation `#{name}`",
+    help: some("use one of int, str, float, bool, None, list, dict, Optional"),
+    start: start,
+    stop: stop,
+  )
+end
+
+def any_diag(name: String, start: Int, stop: Int) -> Diagnostic
+  Diagnostic(
+    code: "PY-ANY",
+    message: "annotation `#{name}` is excluded; annotate with a concrete type",
+    help: some("write a concrete type such as int, str, or list[int]"),
+    start: start,
+    stop: stop,
+  )
+end
+
+# Class-like means a leading uppercase letter: exception names such as
+# `ValueError` (or a bare `E`) are skipped as `raise` heads, while factory
+# names such as `make_error` resolve like normal loads.
+def class_like?(name: String) -> Bool
+  return false if name == ""
+
+  code = name.slice(0, 1).code
+  code >= 65 and code <= 90
+end
+
+def ident_start?(ch: String) -> Bool
+  code = ch.code
+  (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+end
+
+def ident_char?(ch: String) -> Bool = ident_start?(ch) or (ch.code >= 48 and ch.code <= 57)
+
+def blank_char?(ch: String) -> Bool = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+# Whether the identifier starting at `at` follows a dot (skipping blanks),
+# making it an attribute segment rather than a head to check.
+def dotted_attr?(chars: List[String], at: Int) -> Bool
+  j = at - 1
+  while j >= 0
+    if blank_char?(chars[j])
+      j -= 1
+    else
+      return chars[j] == "."
+    end
+  end
+
+  false
+end
+
+def anns_diags(anns: List[Ann]) -> List[Diagnostic]
+  out: List[Diagnostic] = []
+  for ann in anns
+    out = out + ann_diags(ann.text, ann.span)
+  end
+
+  out
+end
+
+def stmt_ann_diags(stmt: Stmt) -> List[Diagnostic]
+  case stmt
+    Stmt.Annotated(_, ann) -> ann_diags(ann.text, ann.span)
+    Stmt.AliasDef(_, ann) -> ann_diags(ann.text, ann.span)
+    Stmt.ForLoop(_, body) -> stmts_ann_diags(body)
+    Stmt.IfStmt(then_body, elifs, else_body) -> if_ann_diags(then_body, elifs, else_body)
+    Stmt.WhileStmt(body) -> stmts_ann_diags(body)
+    Stmt.TryStmt(try_body, handler_body, _) -> stmts_ann_diags(try_body) + stmts_ann_diags(handler_body)
+    _ -> []
+  end
+end
+
+def if_ann_diags(then_body: List[Stmt], elifs: List[List[Stmt]], else_body: List[Stmt]) -> List[Diagnostic]
+  out = stmts_ann_diags(then_body)
+  for arm in elifs
+    out = out + stmts_ann_diags(arm)
+  end
+
+  out + stmts_ann_diags(else_body)
+end
+
+def stmts_ann_diags(stmts: List[Stmt]) -> List[Diagnostic]
+  out: List[Diagnostic] = []
+  for stmt in stmts
+    out = out + stmt_ann_diags(stmt)
+  end
+
+  out
+end
+
+# Checks every head identifier in an annotation against the known-type set.
+# Only dotted heads are checked (`nosuch.X` points at `nosuch`); a `typing`
+# head followed by `Any` (or `object`) is `PY-ANY`, like a bare `Any`.
+def ann_diags(text: String, span: Span) -> List[Diagnostic]
+  chars = text.split("")
+  diags: List[Diagnostic] = []
+  i = 0
+  while i < chars.size
+    if ident_start?(chars[i])
+      start_i = i
+      pieces: List[String] = []
+      while i < chars.size and ident_char?(chars[i])
+        pieces = pieces.push(chars[i])
+        i += 1
+      end
+
+      word = pieces.join("")
+
+      if !dotted_attr?(chars, start_i)
+        if word == "Any" or word == "object"
+          diags = diags.push(any_diag(word, span.start + start_i, span.start + i))
+        else
+          if word == "typing"
+            diags = diags + typing_head_diags(chars, span, start_i, i)
+            i = typing_head_end(chars, i)
+          else
+            if !KNOWN_TYPES.include?(word)
+              diags = diags.push(ann_unknown_diag(word, span.start + start_i, span.start + i))
+            end
+          end
+        end
+      end
+    else
+      i += 1
+    end
+  end
+
+  diags
+end
+
+# The diagnostic for a `typing` head: `typing.Any` (or `typing.object`) is
+# `PY-ANY` over the whole dotted spelling, anything else is an unknown
+# `typing` head.
+def typing_head_diags(chars: List[String], span: Span, start_i: Int, end_i: Int) -> List[Diagnostic]
+  found = typing_second(chars, end_i)
+  case found
+    some(second) ->
+      if second == "Any" or second == "object"
+        [any_diag("typing." + second, span.start + start_i, span.start + typing_head_end(chars, end_i))]
+      else
+        [ann_unknown_diag("typing", span.start + start_i, span.start + end_i)]
+      end
+
+    none -> [ann_unknown_diag("typing", span.start + start_i, span.start + end_i)]
+  end
+end
+
+# The end offset (into the annotation text) of a `typing` head: past the
+# second segment when one follows a dot, otherwise the head end itself.
+def typing_head_end(chars: List[String], end_i: Int) -> Int
+  j = end_i
+  while j < chars.size and blank_char?(chars[j])
+    j += 1
+  end
+
+  return end_i if j >= chars.size or chars[j] != "."
+
+  k = j + 1
+  while k < chars.size and blank_char?(chars[k])
+    k += 1
+  end
+
+  return end_i if k >= chars.size or !ident_start?(chars[k])
+
+  m = k
+  while m < chars.size and ident_char?(chars[m])
+    m += 1
+  end
+
+  m
+end
+
+def typing_second(chars: List[String], end_i: Int) -> Optional[String]
+  j = end_i
+  while j < chars.size and blank_char?(chars[j])
+    j += 1
+  end
+
+  return none if j >= chars.size or chars[j] != "."
+
+  k = j + 1
+  while k < chars.size and blank_char?(chars[k])
+    k += 1
+  end
+
+  return none if k >= chars.size or !ident_start?(chars[k])
+
+  parts: List[String] = []
+  m = k
+  while m < chars.size and ident_char?(chars[m])
+    parts = parts.push(chars[m])
+    m += 1
+  end
+
+  some(parts.join(""))
 end
 
 def scan_def_line(line: String, offset: Int) -> Optional[Diagnostic]
@@ -835,7 +1193,8 @@ def check_param_list(params: Optional[String], header: String, start: Int, name:
       for part in text.split(",")
         trimmed = part.strip
         if trimmed != "" and !trimmed.include?(":")
-          found = param_diag(header, start, name, trimmed, search_from)
+          bare = List.first(trimmed.split("=")).strip
+          found = param_diag(header, start, name, bare, search_from)
           return found if found.some?
         end
 
