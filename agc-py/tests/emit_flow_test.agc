@@ -219,6 +219,18 @@ def main() -> Void
         "  for ch in \"ab\".split(\"\")\n" +
         "    puts(ch)\n" +
         "  end\n" +
+        "  for m in [1, 2]\n" +
+        "    if m == 1\n" +
+        "      break\n" +
+        "    end\n" +
+        "    total = total + m\n" +
+        "  end\n" +
+        "  for q in 0...3\n" +
+        "    if q == 0\n" +
+        "      next\n" +
+        "    end\n" +
+        "    total = total + q\n" +
+        "  end\n" +
         "  k: Int = 0\n" +
         "  while k < 5\n" +
         "    k = k + 1\n" +
@@ -346,7 +358,7 @@ def main() -> Void
       cond = try while_cond_of(compiled.unwrap!, source)
       res = EmitFlow.emit_while(flow_ctx(source, {"n": "Int"}), cond, ["n = n - 1"])
       done = try assert_ok(res)
-      try assert_lines(done.code, ["while n > 0", "  n = n - 1", "end"])
+      try assert_lines(done.code, ["while true", "  if !(n > 0)", "    break", "  end", "  n = n - 1", "end"])
       try Test.eq(done.next_temp, 0)
       try accumulate("while", 0, ["n: Int = 2"], done.code)
       ok()
@@ -356,7 +368,7 @@ def main() -> Void
       cond = try while_cond_of(compiled.unwrap!, source)
       res = EmitFlow.emit_while(flow_ctx(source, {"n": "Int"}), cond, [])
       done = try assert_ok(res)
-      try assert_lines(done.code, ["while n > 0", "  nil", "end"])
+      try assert_lines(done.code, ["while true", "  if !(n > 0)", "    break", "  end", "  nil", "end"])
       try accumulate("whilenil", 0, ["n: Int = 2"], done.code)
       ok()
     end,
@@ -365,6 +377,20 @@ def main() -> Void
       cond = try while_cond_of(compiled.unwrap!, source)
       res = EmitFlow.emit_while(flow_ctx(source, {"s": "String"}), cond, ["puts(s)"])
       try assert_refusal(res, "PY-COND-NOT-BOOL")
+      ok()
+    end,
+    Test.test("while re-evaluates chained guards each iteration") do
+      source = "while a < b < c:\n  pass\n"
+      cond = try while_cond_of(compiled.unwrap!, source)
+      res = EmitFlow.emit_while(flow_ctx(source, {"a": "Int", "b": "Int", "c": "Int"}), cond, ["b = b + 1"])
+      done = try assert_ok(res)
+      try assert_lines(
+        done.code,
+        ["while true", "  py_t0 = b", "  if !(a < py_t0 and py_t0 < c)", "    break", "  end", "  b = b + 1", "end"],
+      )
+
+      try Test.eq(done.next_temp, 1)
+      try accumulate("whilechain", 0, ["a: Int = 1", "b: Int = 2", "c: Int = 3"], done.code)
       ok()
     end,
     Test.test("for over a list binds the element type") do
@@ -441,6 +467,22 @@ def main() -> Void
       try accumulate("chained", 0, ["a: Int = 1", "b: Int = 2", "c: Int = 3"], done.code)
       ok()
     end,
+    Test.test("string literals never shift temps") do
+      source = "if a < b < c and x == \"py_t5\":\n  pass\n"
+      arms = try if_arms_of(compiled.unwrap!, source)
+      arm = List.first(arms)
+      ctx = flow_ctx(source, {"a": "Int", "b": "Int", "c": "Int", "x": "String"}).with(next_temp: 2)
+      res = EmitFlow.emit_if(ctx, [EmitFlow.IfArm(cond: arm.cond, then_code: ["puts(\"lit\")"])], [])
+      done = try assert_ok(res)
+      try assert_lines(
+        done.code,
+        ["py_t2 = b", "if a < py_t2 and py_t2 < c and x == \"py_t5\"", "  puts(\"lit\")", "end"],
+      )
+
+      try Test.eq(done.next_temp, 3)
+      try accumulate("littemp", 0, ["a: Int = 1", "b: Int = 2", "c: Int = 3", "x: String = \"py_t5\""], done.code)
+      ok()
+    end,
     Test.test("nested bodies compose through canned lines") do
       while_source = "while y < 2:\n  pass\n"
       while_cond = try while_cond_of(compiled.unwrap!, while_source)
@@ -454,7 +496,11 @@ def main() -> Void
         EmitFlow.emit_if(outer_ctx, [EmitFlow.IfArm(cond: if_arm.cond, then_code: inner.code)], []),
       )
 
-      try assert_lines(outer.code, ["if x > 0", "  while y < 2", "    puts(y)", "  end", "end"])
+      try assert_lines(
+        outer.code,
+        ["if x > 0", "  while true", "    if !(y < 2)", "      break", "    end", "    puts(y)", "  end", "end"],
+      )
+
       try accumulate("nested", 0, ["x: Int = 1", "y: Int = 1"], outer.code)
       ok()
     end,

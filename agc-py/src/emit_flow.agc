@@ -95,16 +95,22 @@ def emit_if(ctx: EmitCtx.EmitCtx, arms: List[IfArm], else_code: List[String]) ->
   EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: current.next_temp))
 end
 
-## Emits `while <cond>` over the pre-emitted `body_code` lines. The
-## condition preamble (when the guard needs temps) runs before the loop, an
-## empty body emits `nil`.
+## Emits `while <cond>` over the pre-emitted `body_code` lines, desugared
+## so the guard preamble re-evaluates every iteration: `while true` plus
+## the preamble plus `if !(guard): break` plus the body, uniformly even
+## when the preamble is empty (a user `break` and the guard `break` both
+## exit correctly; `next` re-runs the preamble plus the guard). An empty
+## body emits `nil`.
 def emit_while(ctx: EmitCtx.EmitCtx, cond: Tree.Node, body_code: List[String]) -> EmitCtx.StmtRes
   made = emit_cond(ctx, cond, "while")
   case made
     error(e) -> refusal_from_emit(e.message, cond)
     ok(done) ->
-      lines = EmitCtx.indented(done.pre, 0)
-      lines = lines.push("while #{done.code}")
+      lines = ["while true"]
+      lines = lines + EmitCtx.indented(done.pre, 1)
+      lines = lines.push("  if !(#{done.code})")
+      lines = lines.push("    break")
+      lines = lines.push("  end")
       lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
       lines = lines.push("end")
       EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: done.next_temp))
@@ -295,29 +301,52 @@ def advance_temp(base: Int, texts: List[String]) -> Int
 end
 
 # The highest `py_tN` index in `texts`, or -1 when there is none.
+# String-aware: occurrences inside `"..."` literals never count (quoted
+# interpolations flow through preamble code, so a literal `"py_t0"` must
+# not bump the supply). `EmitExpr` threads its temps through `Cx` instead
+# of scanning text, so no parallel fix is needed there.
 def max_temp_index(texts: List[String]) -> Int
   found = -1
   for text in texts
     chars = text.split("")
     i = 0
+    in_string = false
     while i < chars.size
-      if temp_at?(chars, i)
-        num = 0
-        j = i + 4
-        while j < chars.size
-          break if !digit?(chars[j])
+      ch = chars[i]
+      if in_string
+        if ch == "\\" and i + 1 < chars.size
+          i += 2
+        else
+          if ch == "\""
+            in_string = false
+          end
 
-          num = num * 10 + (chars[j].code - 48)
-          j += 1
+          i += 1
         end
-
-        if num > found
-          found = num
-        end
-
-        i = j
       else
-        i += 1
+        if ch == "\""
+          in_string = true
+          i += 1
+        else
+          if temp_at?(chars, i)
+            num = 0
+            j = i + 4
+            while j < chars.size
+              break if !digit?(chars[j])
+
+              num = num * 10 + (chars[j].code - 48)
+              j += 1
+            end
+
+            if num > found
+              found = num
+            end
+
+            i = j
+          else
+            i += 1
+          end
+        end
       end
     end
   end
@@ -326,30 +355,53 @@ def max_temp_index(texts: List[String]) -> Int
 end
 
 # Renames every `py_tN` temp in `text` to `py_t{base+N}`. The identity when
-# the supply is fresh, so exact-shape tests read plainly.
+# the supply is fresh, so exact-shape tests read plainly. String-aware
+# like `max_temp_index`: `"..."` literals pass through untouched.
 def shift_code(text: String, base: Int) -> String
   return text if base == 0
 
   out = ""
   chars = text.split("")
   i = 0
+  in_string = false
   while i < chars.size
-    if temp_at?(chars, i)
-      num = 0
-      j = i + 4
-      while j < chars.size
-        break if !digit?(chars[j])
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        out = "#{out}#{ch}#{chars[i + 1]}"
+        i += 2
+      else
+        if ch == "\""
+          in_string = false
+        end
 
-        num = num * 10 + (chars[j].code - 48)
-        j += 1
+        out = "#{out}#{ch}"
+        i += 1
       end
-
-      fresh = base + num
-      out = "#{out}py_t#{fresh}"
-      i = j
     else
-      out = "#{out}#{chars[i]}"
-      i += 1
+      if ch == "\""
+        in_string = true
+        out = "#{out}#{ch}"
+        i += 1
+      else
+        if temp_at?(chars, i)
+          num = 0
+          j = i + 4
+          while j < chars.size
+            break if !digit?(chars[j])
+
+            num = num * 10 + (chars[j].code - 48)
+            j += 1
+          end
+
+          fresh = base + num
+          out = "#{out}py_t#{fresh}"
+          i = j
+        else
+          out = "#{out}#{chars[i]}"
+          i += 1
+        end
+      end
     end
   end
 
