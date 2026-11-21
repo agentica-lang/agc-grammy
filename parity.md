@@ -19,11 +19,11 @@ worth having, **no** = deliberately out of scope.
 |---|---|---|---|
 | `name = { body }` rules | yes | yes | — |
 | silent rule `_` | yes | yes | — |
-| atomic `@` | yes | missing | later |
-| compound atomic `$` | yes | missing | later |
-| non-atomic `!` | yes | missing | later |
-| implicit `WHITESPACE` / `COMMENT` skipping | yes | missing | later (with atomicity) |
-| node tags `#tag = expr` | yes (extra) | missing | later |
+| atomic `@` | yes | yes | done |
+| compound atomic `$` | yes | yes | done |
+| non-atomic `!` | yes | yes | done |
+| implicit `WHITESPACE` / `COMMENT` skipping | yes | yes | done |
+| node tags `#tag = expr` | yes (extra) | yes | done, tags with no node are refused |
 | string literal `"text"` | yes | yes | — |
 | insensitive literal `^"text"` | yes | yes | done |
 | range `'a'..'z'` | yes | yes (parsed as a one-span class) | done |
@@ -73,8 +73,8 @@ as aliases so existing grammars keep working.
 | expression that cannot fail inside a repetition (`("")*`) | yes | yes | done |
 | non-progressing expression inside a repetition (`&""*`) | yes | yes | done |
 | unreachable choice arm (a non-failing arm before others) | yes | yes | done |
-| `WHITESPACE`/`COMMENT` must fail and progress | yes | n/a | later (with implicit skipping) |
-| tags on silent rules | yes | n/a | later |
+| `WHITESPACE`/`COMMENT` must not fail and must progress | yes | yes | done |
+| tags on silent rules | yes | yes (also on literals and builtins) | done |
 | stack-only loops | yes | n/a | later |
 | Rust keyword rule names | deprecated | n/a | no |
 
@@ -90,9 +90,9 @@ author almost always wrote something else.
 | greedy repetition, no give-back (`"a"* ~ "a"` fails) | yes | yes |
 | named rules build nodes, silent rules do not | yes | yes |
 | the start rule must consume the whole input (`EOI`) | yes | yes |
-| `WHITESPACE`/`COMMENT` run between tokens | yes | no |
+| `WHITESPACE`/`COMMENT` run between tokens | yes | yes |
 | indentation-aware matching (`INDENT`, `SAME`) | no | yes (extension) |
-| atomic rules stop whitespace skipping and child nodes | yes | no |
+| atomic rules stop whitespace skipping and child nodes | yes | yes (`$`/`!` children keep theirs, as in pest) |
 | stack mutation with rollback on a failed alternative | yes | no |
 | furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |
@@ -115,7 +115,7 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 | flattened traversal | `Pairs::flatten` | `Tree.find_all` | — |
 | all tokens of a rule | `Pair::tokens`, `Pairs::tokens` | `Tree.find_all` / `children_of` | — |
 | JSON dump of the tree | `Pairs::to_json` | CLI renders text | later |
-| node tags | `Pair::as_node_tag`, `find_tagged` | missing | later |
+| node tags | `Pair::as_node_tag`, `find_tagged` | `Node.tag`, `Tree.tagged`/`first_tagged` | done |
 | parse entry point | `Pest::parse(Rule, input)` | `Engine.run(grammar, rule, input)` | — |
 | grammar compiled ahead of time | `#[derive(Parser)]` | `Grammar.load` at run time | no (see §6) |
 | typed stack | `pest::Stack` | missing | later |
@@ -163,17 +163,36 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 3. **Syntax fill-ins** — done: repetition bounds `{n,m}`, `^"literal"`,
    escapes `\0 \' \xNN \u{...}`, `//` and nested `/* */` comments,
    `'a'..'z'` ranges as one-span classes, required `~`, and the full pest
-   builtin set. The `@`/`$`/`!` modifiers parse and report "not supported yet";
-   atomicity with implicit `WHITESPACE`/`COMMENT` is the next milestone.
+   builtin set.
 
 ### Milestone 2 — real grammars
 
-4. **Atomicity and implicit whitespace.** `@`, `$`, `!` plus `WHITESPACE` and
-   `COMMENT` skipping, including the rule that atomic rules stop skipping. This
-   is what makes pest grammars short; without it, ported grammars need `ws`
-   everywhere. Needs a matching context (atomic flag, skip flag) and two new
-   validator rules.
-5. **Node tags** `#tag = expr` plus tag queries on the tree.
+4. **Atomicity and implicit whitespace** — done: `@` (atomic), `$`
+   (compound-atomic) and `!` (non-atomic) set `Ctx.atomicity`, which cascades
+   into called rules; a plain rule inherits it, `!` restores it. `WHITESPACE`
+   and `COMMENT` are skipped between sequence parts and repetition iterations
+   and once after the start rule, as `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`;
+   atomic rules skip nothing and `@` drops the nodes of the rules it calls that
+   do not declare their own atomicity (`$` and `!` keep theirs, as pest does).
+   The validator refuses a skipped rule that can never fail or that never
+   consumes input, as pest's `validate_whitespace_comment` does.
+   Deviation: a skip rule is matched atomically, so it never builds nodes even
+   when it is not declared silent; pest inserts those nodes into the tree.
+   Also: `INDENT`/`SAME` are ours and accept a position inside the leading
+   spaces of a line, so implicit skipping cannot hide the indentation they
+   measure (pest has no equivalent).
+5. **Node tags** — done: `#name = term` parses to `Expr.Tagged`, `Node.tag`
+   carries it, `Tree.tagged`/`first_tagged` query it. A tag names the last node
+   its term built, and over `*` or `?` the last node of every iteration, which
+   is what pest's `tag_node` does after each iteration. Deviations: `+` and
+   `{n,m}` tag every iteration too, where pest falls through to the default arm
+   and tags only the final node of the whole repetition (a pest inconsistency we
+   do not copy); and a tag on an expression that builds no node is a compile
+   error, where pest writes the tag onto the last pair already queued (a
+   preceding sibling) or no-ops inside a lookahead. The validator follows a
+   silent rule into its body, so tagging a silent wrapper is allowed. A tag
+   inside an atomic rule names nothing in grammy, since `@` builds no inner
+   nodes.
 
 ### Milestone 3 — power and speed
 
@@ -194,8 +213,8 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
    `* + ?`, `{n,m}`, `& !`, `( )` and `//`/`/* */` comments. The extensions are
    `[a-z]`/`[^...]` classes and `.` for `ANY`; pest has no `[` in a body, so
    they never conflict. `#` comments are gone (they collided with the future
-   node tags `#tag = expr`) and `~` is required. Only the `_ @ $ !` modifiers
-   are still missing, and they report "not supported yet".
+   node tags `#tag = expr`) and `~` is required. The `_ @ $ !` modifiers all
+   work, at most one of `_ @ $ !` per rule.
 2. **Builtin names: pest names, old ones as aliases (done).** `EOI` and `EOF`,
    `ASCII_ALPHANUMERIC` and `ASCII_ALNUM`, `ASCII_HEX_DIGIT` and `ASCII_HEX`
    all work; the grammar validator reserves every one of them.

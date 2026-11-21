@@ -203,6 +203,284 @@ def main() -> Void
       try Test.eq(Tree.last_child(tree).unwrap!.start, 2)
       Test.eq(Tree.find_all(tree, "none").size, 0)
     end,
+    Test.test("WHITESPACE is skipped between parts") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { \"a\" ~ \"b\" }", "p", "a   b")
+      try Test.eq(tree.stop, 5)
+      Test.eq(Tree.text(tree, "a   b"), "a   b")
+    end,
+    Test.test("WHITESPACE is skipped between iterations") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { item* }\nitem = { ASCII_ALPHA }", "p", "a b c")
+      try Test.eq(Tree.find_all(tree, "item").size, 3)
+      Test.eq(tree.stop, 5)
+    end,
+    Test.test("WHITESPACE is skipped after the start rule") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { \"a\" }", "p", "a  ")
+      Test.eq(tree.stop, 3)
+    end,
+    Test.test("COMMENT is skipped with WHITESPACE") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\nCOMMENT = _{ \"/*\" ~ (!\"*/\" ~ ANY)* ~ \"*/\" }\np = { \"a\" ~ \"b\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "a /* x */ b")
+      Test.eq(tree.stop, 11)
+    end,
+    Test.test("an atomic rule skips nothing and builds one token") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = { token }\ntoken = @{ ASCII_ALPHA ~ ASCII_ALPHA }", "p", "ab")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(tree.children[0].children.size, 0)
+    end,
+    Test.test("an atomic rule keeps the text inside it") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { \"a\" ~ token ~ \"z\" }\ntoken = @{ \"b\" ~ \"c\" }"
+      tree = try parse(grammar_text, "p", "a bc z")
+      Test.eq(Tree.text(tree.children[0], "a bc z"), "bc")
+    end,
+    Test.test("a compound-atomic rule keeps its children") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = { values }\nvalues = ${ value ~ \",\" ~ value }\nvalue = { ASCII_DIGIT+ }"
+      )
+
+      tree = try parse(grammar_text, "p", "1,2")
+      try Test.eq(tree.children[0].rule, "values")
+      Test.eq(Tree.find_all(tree, "value").size, 2)
+    end,
+    Test.test("a compound-atomic rule skips nothing") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { values }\nvalues = ${ \"a\" ~ \"b\" }"
+      Test.error?(parse(grammar_text, "p", "a b"))
+    end,
+    Test.test("a non-atomic rule restores skipping inside an atomic one") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = { body }\nbody = @{ inner ~ \"!\" }\ninner = !{ \"a\" ~ \"b\" }"
+      tree = try parse(grammar_text, "p", "a b!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.find_all(tree, "inner").size, 1)
+    end,
+    Test.test("a non-atomic rule restores nodes inside an atomic one") do
+      tree = try parse("p = { body }\nbody = @{ inner }\ninner = !{ ASCII_ALPHA+ }\n", "p", "abc")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.children_of(tree.children[0], "inner").size, 1)
+    end,
+    Test.test("an atomic start rule skips nothing inside it") do
+      try Test.error?(parse("WHITESPACE = _{ \" \" }\np = @{ \"a\" ~ \"b\" }", "p", "a b"))
+      tree = try parse("WHITESPACE = _{ \" \" }\np = @{ \"a\" ~ \"b\" }", "p", "ab")
+      try Test.eq(tree.stop, 2)
+      Test.eq(tree.children.size, 0)
+    end,
+    Test.test("an atomic start rule drops the nodes inside it") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = @{ inner }\ninner = { ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "abc")
+      try Test.eq(tree.children.size, 0)
+      Test.eq(Tree.text(tree, "abc"), "abc")
+    end,
+    Test.test("a compound start rule keeps its children and skips nothing") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = ${ inner ~ \"!\" }\ninner = { ASCII_ALPHA+ }"
+      try Test.error?(parse(grammar_text, "p", "a b!"))
+      tree = try parse(grammar_text, "p", "ab!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(tree.stop, 3)
+    end,
+    Test.test("a non-atomic start rule skips whitespace") do
+      tree = try parse("WHITESPACE = _{ \" \" }\np = !{ \"a\" ~ \"b\" }", "p", "a b")
+      try Test.eq(tree.stop, 3)
+      Test.eq(tree.children.size, 0)
+    end,
+    Test.test("leading whitespace is not skipped") do
+      Test.error?(parse("WHITESPACE = _{ \" \" }\np = { \"a\" }", "p", " a"))
+    end,
+    Test.test("COMMENT works without WHITESPACE") do
+      grammar_text = "COMMENT = _{ \"/*\" ~ (!\"*/\" ~ ANY)* ~ \"*/\" }\np = { \"a\" ~ \"b\" }"
+      tree = try parse(grammar_text, "p", "a/*x*/b")
+      Test.eq(tree.stop, 7)
+    end,
+    Test.test("a compound rule inside an atomic one keeps its nodes") do
+      grammar_text = "p = { outer }\nouter = @{ inner ~ \"!\" }\ninner = ${ ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "ab!")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.children_of(tree.children[0], "inner").size, 1)
+    end,
+    Test.test("a tag inside an atomic rule tags nothing") do
+      grammar_text = "p = { outer }\nouter = @{ #v = inner }\ninner = { ASCII_ALPHA+ }"
+      tree = try parse(grammar_text, "p", "ab")
+      try Test.eq(tree.children.size, 1)
+      Test.eq(Tree.tagged(tree, "v").size, 0)
+    end,
+    Test.test("a tag over a multi-node iteration tags its last node") do
+      grammar_text = "p = { #kv = (key ~ \":\" ~ value)* }\nkey = { ASCII_ALPHA }\nvalue = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "a:1b:2")
+      tagged = Tree.tagged(tree, "kv")
+      try Test.eq(tagged.size, 2)
+      try Test.eq(tagged[0].rule, "value")
+      Test.eq(Tree.text(tagged[1], "a:1b:2"), "2")
+    end,
+    Test.test("a tag names the node its term built") do
+      grammar_text = "p = { #left = digit ~ \",\" ~ #right = digit }\ndigit = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "1,2")
+      left = Tree.first_tagged(tree, "left").unwrap!
+      right = Tree.first_tagged(tree, "right").unwrap!
+      try Test.eq(Tree.text(left, "1,2"), "1")
+      try Test.eq(Tree.text(right, "1,2"), "2")
+      Test.eq(Tree.tagged(tree, "left").size, 1)
+    end,
+    Test.test("a tag over a repetition names every node") do
+      grammar_text = "p = { #d = digit* }\ndigit = { ASCII_DIGIT }"
+      tree = try parse(grammar_text, "p", "123")
+      Test.eq(Tree.tagged(tree, "d").size, 3)
+    end,
+    Test.test("a tag over an optional names the node when it is there") do
+      grammar_text = "p = { #e = value? }\nvalue = { ASCII_DIGIT }"
+      try Test.eq(Tree.tagged(try parse(grammar_text, "p", "7"), "e").size, 1)
+      Test.eq(Tree.tagged(try parse(grammar_text, "p", ""), "e").size, 0)
+    end,
+    Test.test("a tag over + and {n,m} names every iteration") do
+      grammar_text = "p = { #d = digit+ }\ndigit = { ASCII_DIGIT }"
+      try Test.eq(Tree.tagged(try parse(grammar_text, "p", "123"), "d").size, 3)
+      bounded = "q = { #d = digit{2,3} }\ndigit = { ASCII_DIGIT }"
+      Test.eq(Tree.tagged(try parse(bounded, "q", "12"), "d").size, 2)
+    end,
+    Test.test("a tag keeps the deepest attempt") do
+      grammar_text = "p = { #a = (b ~ c | b) ~ \"!\" }\nb = { \"b\" }\nc = { \"c\" }"
+      case parse(grammar_text, "p", "b?")
+        error(e) -> Test.assert(e.message.include?("\"c\""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an indentation scope works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go \n   ab ")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 7)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go \n   ab "), "ab")
+    end,
+    Test.test("a lookahead for INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ &INDENT ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      Test.eq(Tree.text(tree.children[0], "go\n  ab"), "ab")
+    end,
+    Test.test("a silent alias for INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ block }\nblock = _{ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      Test.eq(Tree.text(tree.children[0], "go\n  ab"), "ab")
+    end,
+    Test.test("a repeated INDENT works with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n  cd")
+      Test.eq(Tree.find_all(tree, "item").size, 2)
+    end,
+    Test.test("a WHITESPACE with newlines still feeds INDENT") do
+      grammar_text = "WHITESPACE = _{ \" \" | \"\\n\" }\np = >_{ \"go\" ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }"
+
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 5)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\n  ab"), "ab")
+    end,
+    Test.test("a whitespace-only line does not close the block") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n    \n  cd")
+      Test.eq(Tree.find_all(tree, "item").size, 2)
+    end,
+    Test.test("SAME works with implicit whitespace and skips blank lines") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ nl ~ SAME ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      try Test.ok?(parse(grammar_text, "p", "go\n  ab\n   \nend"))
+      Test.error?(parse(grammar_text, "p", "go\n  ab\n  end"))
+    end,
+    Test.test("INDENT still fails mid-line with implicit whitespace") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ \"x\" ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }"
+      Test.error?(parse(grammar_text, "p", "go x  ab"))
+    end,
+    Test.test("a dedent closes the block with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* ~ nl ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\nend")
+      Test.eq(Tree.find_all(tree, "item").size, 1)
+    end,
+    Test.test("a carriage return ends a line for INDENT") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\r\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\r  ab")
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\r  ab"), "ab")
+    end,
+    Test.test("a skip that stops inside the indentation still measures it") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" ~ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n   ab")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 6)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\n   ab"), "ab")
+    end,
+    Test.test("CRLF ends an indented line") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\r\\n\" | \"\\n\" | \"\\r\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\r\n  ab")
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\r\n  ab"), "ab")
+    end,
+    Test.test("SAME compares against an indented block base") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ inner }\ninner = >_{ item ~ nl ~ SAME ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n  end")
+      try Test.eq(Tree.find_all(tree, "item").size, 1)
+      Test.error?(parse(grammar_text, "p", "go\n  ab\n end"))
+    end,
+    Test.test("an atomic indentation scope keeps the block base") do
+      grammar_text = "p = >@{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      tree = try parse(grammar_text, "p", "go\n  ab")
+      try Test.eq(tree.children.size, 0)
+      Test.eq(tree.stop, 7)
+    end,
+    Test.test("an untagged node has no tag") do
+      tree = try parse("p = { ASCII_DIGIT }", "p", "1")
+      try Test.eq(tree.tag, none)
+      Test.eq(Tree.first_tagged(tree, "left"), none)
+    end,
+    Test.test("a pest JSON grammar parses unchanged") do
+      grammar_text = "json = { SOI ~ value ~ EOI }\n"
+      grammar_text += "object = { \"{\" ~ pair ~ (\",\" ~ pair)* ~ \"}\" | \"{\" ~ \"}\" }\n"
+      grammar_text += "pair = { string ~ \":\" ~ value }\n"
+      grammar_text += "array = { \"[\" ~ value ~ (\",\" ~ value)* ~ \"]\" | \"[\" ~ \"]\" }\n"
+      grammar_text += "value = { string | number | object | array | bool | null }\n"
+      grammar_text += "string = @{ \"\\\"\" ~ inner ~ \"\\\"\" }\n"
+      grammar_text += "inner = @{ (!(\"\\\"\" | \"\\\\\" | '\\u{0000}'..'\\u{001F}') ~ ANY)* ~ (escape ~ inner)? }\n"
+      grammar_text += (
+        "escape = @{ \"\\\\\" ~ (\"\\\"\" | \"\\\\\" | \"/\" | \"b\" | \"f\" | \"n\" | \"r\" | \"t\" | unicode) }\n"
+      )
+
+      grammar_text += "unicode = @{ \"u\" ~ ASCII_HEX_DIGIT{4} }\n"
+      grammar_text += "number = @{ \"-\"? ~ int ~ (\".\" ~ ASCII_DIGIT+ ~ exp? | exp)? }\n"
+      grammar_text += "int = @{ \"0\" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }\n"
+      grammar_text += "exp = @{ (\"E\" | \"e\") ~ (\"+\" | \"-\")? ~ ASCII_DIGIT+ }\n"
+      grammar_text += "bool = { \"true\" | \"false\" }\n"
+      grammar_text += "null = { \"null\" }\n"
+      grammar_text += "WHITESPACE = _{ \" \" | \"\\t\" | \"\\r\" | \"\\n\" }"
+      input = "{\"a\": [1, -2.5e3, true, null], \"b\": {\"c\": \"x\\n\"}}"
+      tree = try parse(grammar_text, "json", input)
+      try Test.eq(Tree.find_all(tree, "pair").size, 3)
+      try Test.eq(Tree.find_all(tree, "string").size, 4)
+      Test.eq(Tree.find_all(tree, "inner").size, 0)
+    end,
     Test.test("position counts lines and columns") do
       where = Tree.position("ab\ncd\n", 4)
       try Test.eq(where.line, 2)

@@ -29,10 +29,10 @@ its tests in `tests/`, so always pass the folder.
   `.grammar` text: pest syntax (`"lit"`, `^"lit"`, `'a'..'z'`, `~` required,
   `{n,m}`, `//` and nested `/* */` comments) plus `[a-z]` classes and `.` as
   extensions; it also validates the grammar.
-- `src/engine.agc`: the PEG matcher. It threads a `Ctx(grammar, chars, base)`
-  and returns an `Outcome` (found or the furthest `Attempt`); only `run` is
-  public.
-- `src/tree.agc`: `Node(rule, start, stop, children)`, `Position` and the
+- `src/engine.agc`: the PEG matcher. It threads a
+  `Ctx(grammar, chars, base, atomicity, whitespace, comment)` and returns an
+  `Outcome` (found or the furthest `Attempt`); only `run` is public.
+- `src/tree.agc`: `Node(rule, start, stop, children, tag)`, `Position` and the
   queries user code calls.
 - `src/grammy.agc`: re-exports; add every new public name here or importers
   cannot reach it.
@@ -51,6 +51,24 @@ its tests in `tests/`, so always pass the folder.
   non-blank line's indentation and compare it with that base. Blank lines are
   skipped; tabs count as one character.
 - Silent rules (`= _{ ... }`) build no node; the start rule still gets one.
+- `WHITESPACE`/`COMMENT`, when defined, are skipped between the parts of a
+  sequence and between iterations of a repetition (`skip`), and once after the
+  start rule. `Ctx` carries the two rules resolved once by `run`, so the hot
+  path does no lookup. They are matched atomically with skipping disabled, so
+  they never build nodes nor re-enter `skip`.
+- Atomicity flows down: `@` (`Atomic`) drops the nodes of the rules it calls
+  that do not declare their own atomicity and skips nothing, `$` (`Compound`)
+  keeps the nodes, `!` (`NonAtomic`) restores normal behaviour, and a plain rule
+  inherits from its caller (`effective_atomicity`). A rule still builds its own
+  node unless its caller was atomic (`creates_node?`).
+- `INDENT`/`SAME` accept a position already inside the leading spaces of a line
+  (`match_indent`), so a skip that crossed the line break does not hide the
+  indentation they measure. A line holding only spaces is blank there too, and
+  `line_start` treats `\r` as a break.
+- A tag (`#name = term`) lands on the last node its term built, and over `*`,
+  `+`, `?` or `{n,m}` on the last node of every iteration. The validator refuses a tag on an
+  expression that builds no node. `run` applies the start rule's own atomicity
+  through `body_ctx`, so an `@`/`$` start rule behaves like any other.
 - The engine has no memoization and no left-recursion guard: a left-recursive
   grammar never terminates.
 - Errors are `Result` values with lowercase messages that include the bad
@@ -60,10 +78,13 @@ its tests in `tests/`, so always pass the folder.
   Silent rules drop terminal labels (`without_terminals`), so only rule names
   and the terminals of named rules show up in a message.
 - `Grammar.compile` validates before matching: reserved names, duplicates,
-  unknown refs, left recursion (through nullable prefixes), non-failing and
-  non-progressing *unbounded* repetitions, a zero-width repetition asking for
-  more than `ZERO_WIDTH_LIMIT` nodes, and unreachable choice arms. Keep those checks
-  cheap and tolerant of an already-broken grammar.
+  a `WHITESPACE`/`COMMENT` that can never fail or that never consumes input,
+  unknown refs,
+  tags with no node to name, left recursion (through nullable prefixes),
+  non-failing and non-progressing *unbounded* repetitions, a zero-width
+  repetition asking for more than `ZERO_WIDTH_LIMIT` nodes, and unreachable
+  choice arms. Keep those checks cheap and tolerant of an already-broken
+  grammar.
 - Public code gets `##`; private code (after `private`) gets `#` only.
 - `agentica.toml` sets `blank_line_after_end = true`; `make fmt` fixes spacing.
 

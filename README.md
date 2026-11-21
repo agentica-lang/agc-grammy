@@ -101,6 +101,7 @@ no node. Rules are separated by blanks; `//` starts a line comment and
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
+| `#name = a` | names the last node `a` builds, or every iteration's last for `a*`, `a?`, `a+`, `a{n,m}` |
 | `( ... )` | grouping |
 
 Single-character builtins, all matching one character: `ASCII_DIGIT`,
@@ -109,12 +110,40 @@ Single-character builtins, all matching one character: `ASCII_DIGIT`,
 `ASCII_ALPHANUMERIC` (alias `ASCII_ALNUM`), `ASCII`, `ANY`. `NEWLINE` matches
 `\n`, `\r\n` or `\r`; `SOI` and `EOI` match the ends of the input.
 
-Between `=` and `{` a rule takes modifiers: `_` builds no node, and `>` opens an
-indentation scope (`>_{` is both).
+Between `=` and `{` a rule takes modifiers: `_` builds no node, `>` opens an
+indentation scope, and `@`, `$`, `!` set the atomicity. They combine (`>_{` is
+both) and each may appear at most once.
 
-There is no implicit whitespace skipping: write `ws` into the grammar, or use a
-silent rule. A repetition without a bound stops on the first iteration that
-makes no progress. Left recursion is not supported (it will not terminate).
+## Whitespace and atomicity
+
+Define `WHITESPACE` and/or `COMMENT` and they are matched implicitly between the
+parts of a sequence, between the iterations of a repetition, and after the start
+rule — exactly `WHITESPACE* ~ (COMMENT ~ WHITESPACE*)*`. They are ordinary rules,
+so they are declared like any other (write them silent, `= _{ ... }`: a skip rule
+is matched atomically and never builds nodes). As in pest, the compiler refuses
+one that can never fail (so skipping would never move) or that never consumes
+input:
+
+```
+WHITESPACE = _{ " " | "	" | NEWLINE }
+COMMENT = _{ "//" ~ (!NEWLINE ~ ANY)* }
+```
+
+Atomicity says what happens inside a rule:
+
+| Modifier | Whitespace inside | Nodes inside |
+|---|---|---|
+| none | skipped | built |
+| `@` atomic | not skipped | dropped: the rule is one token |
+| `$` compound-atomic | not skipped | built |
+| `!` non-atomic | skipped | built, even inside an atomic rule |
+
+A plain rule inherits the atomicity of its caller, which is how `@` swallows
+everything it calls that does not declare its own atomicity. `!` restores normal
+behaviour inside it.
+
+A repetition without a bound stops on the first iteration that makes no
+progress. Left recursion is not supported (it will not terminate).
 
 ## Indentation
 
@@ -134,6 +163,11 @@ deeper, and the enclosing scope continues from that line. Tabs count as one
 character each, and blank lines are skipped by `INDENT`/`SAME`, so they never
 close a block.
 
+`INDENT` and `SAME` also accept a position that is already inside the leading
+spaces of a line, so implicit whitespace (even one that matches newlines) does
+not hide the indentation they measure: the skip may reach the content of the
+next line and `INDENT` still sees the indentation it left behind.
+
 ## API
 
 ```text
@@ -147,11 +181,13 @@ Grammy.children_of(node, name) -> List[Node]        # direct children
 Grammy.first_child(node, name) / Grammy.last_child(node) -> Optional[Node]
 Grammy.first(node, name) -> Optional[Node]          # depth first
 Grammy.find_all(node, name) -> List[Node]           # depth first
+Grammy.tagged(node, tag) -> List[Node]              # depth first, by tag
+Grammy.first_tagged(node, tag) -> Optional[Node]
 Grammy.position(input, offset) -> Position          # line, column, line_text
 ```
 
-`Grammar`, `Rule`, `Expr`, `ClassItem`, `UNBOUNDED`, `Node` and `Position` are
-re-exported types.
+`Grammar`, `Rule`, `Expr`, `ClassItem`, `Atomicity`, `UNBOUNDED`, `Node` and
+`Position` are re-exported types.
 
 ## The Python subset
 
@@ -197,8 +233,8 @@ live in `tests/` and are run as `agentica test tests`.
 
 ## Not there yet
 
-- no implicit whitespace and no atomicity (`@`, `$`, `!`)
-- no node tags (`#tag = expr`), no node stack (`PUSH`/`PEEK`/`POP`)
-- no packrat memoization and no left recursion
+- no node stack (`PUSH`/`PEEK`/`POP`)
+- a tag must name something that builds a node (pest drops such a tag silently)
+- no packrat memoization; left recursion is refused by the compiler
 - nodes keep no span information other than start/stop offsets
 - the Python example has no functions, lists, dicts or `//`

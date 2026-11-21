@@ -1,7 +1,8 @@
 ## Reading `.grammar` files (a pest-like PEG syntax) into rules.
 ##
-## A rule is `name = { body }`, with optional modifiers: `_` builds no node and
-## `>` opens an indentation scope (`>_{` is both). In a body: `"text"`,
+## A rule is `name = { body }`, with optional modifiers: `_` builds no node,
+## `@` is atomic, `$` is compound-atomic, `!` is non-atomic, and `>` opens an
+## indentation scope (they combine, as in `>_{`). In a body: `"text"`,
 ## `^"text"` (insensitive), `'a'..'z'`, `[a-z]`, `[^0-9]`, `.` (any char), a
 ## rule name, a builtin (`ANY`, `SOI`, `EOI`, `NEWLINE`, `INDENT`, `SAME`, the
 ## `ASCII_*` family), `~` sequence, `|` ordered choice, `*`, `+`, `?`,
@@ -12,11 +13,23 @@
 ## The max of a `Repeat` that never stops, as in `*` and `+`.
 UNBOUNDED = -1
 
-## One rule: its name, whether it builds no node, whether it opens an
-## indentation scope, and its body.
+## How a rule treats the implicit whitespace around it (see `engine.agc`).
+## `Plain` inherits the enclosing rule, so normal rules nest; `Atomic` (`@`)
+## stops skipping and builds one token; `Compound` (`$`) stops skipping but
+## keeps the inner nodes; `NonAtomic` (`!`) restores skipping and nodes.
+enum Atomicity
+  Plain
+  Atomic
+  Compound
+  NonAtomic
+end
+
+## One rule: its name, whether it builds no node, its atomicity, whether it
+## opens an indentation scope, and its body.
 struct Rule
   name: String
   silent: Bool
+  atomicity: Atomicity
   indents: Bool
   body: Expr
 end
@@ -45,6 +58,7 @@ enum Expr
   Repeat(Expr, Int, Int)
   Lookahead(Expr)
   Negative(Expr)
+  Tagged(String, Expr)
 end
 
 ## Compiles `.grammar` text, or explains the first problem in it.
@@ -128,8 +142,6 @@ RESERVED = Set.new([
   "PEEK",
   "PEEK_ALL",
   "DROP",
-  "WHITESPACE",
-  "COMMENT",
   "NEWLINE",
   "INDENT",
   "SAME",
@@ -180,7 +192,13 @@ end
 
 struct ParsedFlags
   silent: Bool
+  atomicity: Atomicity
   indents: Bool
+  pos: Int
+end
+
+struct ParsedTag
+  name: Optional[String]
   pos: Int
 end
 
@@ -224,29 +242,57 @@ def parse_rule(chars: List[String], pos: Int) -> Result[ParsedRule]
   body_start = try expect_char(chars, flags.pos, "{")
   body = try parse_expr(chars, body_start)
   after_body = try expect_char(chars, skip_blanks(chars, body.pos), "}")
-  rule = Rule(name: ident.name, silent: flags.silent, indents: flags.indents, body: body.expr)
+  rule = Rule(
+    name: ident.name,
+    silent: flags.silent,
+    atomicity: flags.atomicity,
+    indents: flags.indents,
+    body: body.expr,
+  )
+
   ok(ParsedRule(rule: rule, pos: after_body))
 end
 
-# `_` builds no node, `>` opens an indentation scope (INDENT/SAME use it).
+# `_` builds no node, `>` opens an indentation scope (INDENT/SAME use it),
+# `@ $ !` set the atomicity. Each may appear once.
 def read_modifiers(chars: List[String], pos: Int) -> Result[ParsedFlags]
   silent = false
   indents = false
+  atomicity = Atomicity.Plain
   at = pos
   while true
     case char_at(chars, at)
       "_" ->
+        return error("grammar: two _ modifiers on one rule at character #{at}") if silent
+
         silent = true
         at = skip_blanks(chars, at + 1)
       ">" ->
+        return error("grammar: two > modifiers on one rule at character #{at}") if indents
+
         indents = true
         at = skip_blanks(chars, at + 1)
-      "@", "$", "!" -> return error("grammar: the #{char_at(chars, at)} modifier is not supported yet")
+      "@", "$", "!" ->
+        if atomicity != Atomicity.Plain
+          return error("grammar: two #{char_at(chars, at)} modifiers on one rule at character #{at}")
+        end
+
+        atomicity = modifier_atomicity(char_at(chars, at))
+        at = skip_blanks(chars, at + 1)
       _ -> break
     end
   end
 
-  ok(ParsedFlags(silent: silent, indents: indents, pos: at))
+  ok(ParsedFlags(silent: silent, atomicity: atomicity, indents: indents, pos: at))
+end
+
+def modifier_atomicity(letter: String) -> Atomicity
+  case letter
+    "@" -> Atomicity.Atomic
+    "$" -> Atomicity.Compound
+    "!" -> Atomicity.NonAtomic
+    _ -> Atomicity.Plain
+  end
 end
 
 def parse_expr(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -290,10 +336,27 @@ def seq_end?(chars: List[String], pos: Int) -> Bool
 end
 
 def parse_term(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  prefixes = read_prefixes(chars, pos)
+  tag = try read_tag(chars, pos)
+  prefixes = read_prefixes(chars, tag.pos)
   base = try parse_primary(chars, prefixes.pos)
   applied = try apply_postfix(chars, base)
-  ok(ParsedExpr(expr: wrap_prefixes(prefixes.ops, applied.expr), pos: applied.pos))
+  expr = wrap_prefixes(prefixes.ops, applied.expr)
+  case tag.name
+    none -> ok(ParsedExpr(expr: expr, pos: applied.pos))
+    some(name) -> ok(ParsedExpr(expr: Expr.Tagged(name, expr), pos: applied.pos))
+  end
+end
+
+# `#name = term` tags the node the term builds.
+def read_tag(chars: List[String], pos: Int) -> Result[ParsedTag]
+  at = skip_blanks(chars, pos)
+  return ok(ParsedTag(name: none, pos: pos)) if char_at(chars, at) != "#"
+  ident = try read_ident(chars, skip_blanks(chars, at + 1)).to_result(
+    "grammar: expected a tag name after #, found #{char_at(chars, skip_blanks(chars, at + 1)).inspect} at character #{at}",
+  )
+
+  equals = try expect_char(chars, skip_blanks(chars, ident.pos), "=")
+  ok(ParsedTag(name: some(ident.name), pos: skip_blanks(chars, equals)))
 end
 
 # Reads the `!` and `&` before a term, as pest does: they bind looser than `*`.
@@ -708,13 +771,16 @@ end
 # The first problem in the grammar, if any.
 def first_problem(grammar: Grammar) -> Optional[String]
   rules = grammar.rules
+  cheap = first_of([reserved_problem(rules), duplicate_problem(rules), unknown_ref_problem(rules), tag_problem(rules)])
+  return cheap if cheap.some?
+
+  always = always_rules(rules)
+  still = still_rules(rules)
   first_of([
-    reserved_problem(rules),
-    duplicate_problem(rules),
-    unknown_ref_problem(rules),
+    whitespace_problem(rules, always, still),
     recursion_problem(rules),
-    repetition_problem(rules),
-    choice_problem(rules),
+    repetition_problem(rules, always, still),
+    choice_problem(rules, always),
   ])
 end
 
@@ -748,6 +814,24 @@ def duplicate_problem(rules: List[Rule]) -> Optional[String]
   none
 end
 
+# `WHITESPACE` and `COMMENT` are repeated while they match, so a body that cannot
+# fail (it matches the empty string) or that never consumes input makes skipping
+# meaningless. pest refuses both, and so do we.
+def whitespace_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
+  for candidate in rules
+    next if candidate.name != "WHITESPACE" and candidate.name != "COMMENT"
+    if always_with?(candidate.body, always)
+      return some("grammar: #{candidate.name} is skipped, so it must be able to fail")
+    end
+
+    if still_with?(candidate.body, still)
+      return some("grammar: #{candidate.name} is skipped, so it must consume input")
+    end
+  end
+
+  none
+end
+
 def unknown_ref_problem(rules: List[Rule]) -> Optional[String]
   known = name_set(rules)
   for candidate in rules
@@ -775,6 +859,7 @@ def unknown_ref(owner: String, expr: Expr, known: Set[String]) -> Optional[Strin
     Expr.Repeat(inner, _, _) -> unknown_ref(owner, inner, known)
     Expr.Lookahead(inner) -> unknown_ref(owner, inner, known)
     Expr.Negative(inner) -> unknown_ref(owner, inner, known)
+    Expr.Tagged(_, inner) -> unknown_ref(owner, inner, known)
     _ -> none
   end
 end
@@ -784,6 +869,77 @@ def nested_unknown(owner: String, parts: List[Expr], known: Set[String]) -> Opti
   for part in parts
     break if found.some?
     found = unknown_ref(owner, part, known)
+  end
+
+  found
+end
+
+# A tag lands on the last node its term builds, so the term must build one.
+def tag_problem(rules: List[Rule]) -> Optional[String]
+  for candidate in rules
+    problem = tag_in(candidate.name, candidate.body, rules)
+    return problem if problem.some?
+  end
+
+  none
+end
+
+def tag_in(owner: String, expr: Expr, rules: List[Rule]) -> Optional[String]
+  case expr
+    Expr.Tagged(name, inner) ->
+      if !builds_node?(inner, rules, Set.new([]))
+        return some("grammar: the tag ##{name} in rule #{owner} has no node to tag")
+      end
+
+      tag_in(owner, inner, rules)
+    Expr.Seq(parts) -> nested_tag(owner, parts, rules)
+    Expr.Choice(options) -> nested_tag(owner, options, rules)
+    Expr.Repeat(inner, _, _) -> tag_in(owner, inner, rules)
+    Expr.Lookahead(inner) -> tag_in(owner, inner, rules)
+    Expr.Negative(inner) -> tag_in(owner, inner, rules)
+    _ -> none
+  end
+end
+
+def nested_tag(owner: String, parts: List[Expr], rules: List[Rule]) -> Optional[String]
+  found: Optional[String] = none
+  for part in parts
+    break if found.some?
+    found = tag_in(owner, part, rules)
+  end
+
+  found
+end
+
+# Whether the expression can build a node at all. A silent rule builds none of
+# its own, but passes its children up, so it is followed into its body; `seen`
+# stops a silent rule that reaches itself.
+def builds_node?(expr: Expr, rules: List[Rule], seen: Set[String]) -> Bool
+  case expr
+    Expr.RuleRef(name) -> ref_builds_node?(name, rules, seen)
+    Expr.Seq(parts) -> parts.any? { |part| builds_node?(part, rules, seen) }
+    Expr.Choice(options) -> options.any? { |option| builds_node?(option, rules, seen) }
+    Expr.Repeat(inner, _, _) -> builds_node?(inner, rules, seen)
+    Expr.Tagged(_, inner) -> builds_node?(inner, rules, seen)
+    _ -> false
+  end
+end
+
+def ref_builds_node?(name: String, rules: List[Rule], seen: Set[String]) -> Bool
+  return false if seen.include?(name)
+  case body_of(rules, name)
+    none -> false
+    some(candidate) -> !candidate.silent or builds_node?(candidate.body, rules, seen.add(name))
+  end
+end
+
+def body_of(rules: List[Rule], name: String) -> Optional[Rule]
+  found: Optional[Rule] = none
+  for candidate in rules
+    if candidate.name == name
+      found = some(candidate)
+      break
+    end
   end
 
   found
@@ -821,6 +977,7 @@ def left_refs(expr: Expr, nullable: Set[String]) -> Set[String]
     Expr.Repeat(inner, _, _) -> left_refs(inner, nullable)
     Expr.Lookahead(inner) -> left_refs(inner, nullable)
     Expr.Negative(inner) -> left_refs(inner, nullable)
+    Expr.Tagged(_, inner) -> left_refs(inner, nullable)
     _ -> Set.new([])
   end
 end
@@ -863,9 +1020,7 @@ def left_reachable(start: String, edges: Map[String, Set[String]]) -> Set[String
 end
 
 # Reports a repetition of an expression that cannot end.
-def repetition_problem(rules: List[Rule]) -> Optional[String]
-  always = always_rules(rules)
-  still = still_rules(rules)
+def repetition_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
   for candidate in rules
     problem = repeat_in(candidate.name, candidate.body, always, still)
     return problem if problem.some?
@@ -881,6 +1036,7 @@ def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]
     Expr.Choice(options) -> nested_repeat(owner, options, always, still)
     Expr.Lookahead(inner) -> repeat_in(owner, inner, always, still)
     Expr.Negative(inner) -> repeat_in(owner, inner, always, still)
+    Expr.Tagged(_, inner) -> repeat_in(owner, inner, always, still)
     _ -> none
   end
 end
@@ -910,8 +1066,7 @@ def nested_repeat(owner: String, parts: List[Expr], always: Set[String], still: 
 end
 
 # Reports a choice arm that cannot fail, which hides the arms after it.
-def choice_problem(rules: List[Rule]) -> Optional[String]
-  always = always_rules(rules)
+def choice_problem(rules: List[Rule], always: Set[String]) -> Optional[String]
   for candidate in rules
     problem = choice_in(candidate.name, candidate.body, always)
     return problem if problem.some?
@@ -927,6 +1082,7 @@ def choice_in(owner: String, expr: Expr, always: Set[String]) -> Optional[String
     Expr.Repeat(inner, _, _) -> choice_in(owner, inner, always)
     Expr.Lookahead(inner) -> choice_in(owner, inner, always)
     Expr.Negative(inner) -> choice_in(owner, inner, always)
+    Expr.Tagged(_, inner) -> choice_in(owner, inner, always)
     _ -> none
   end
 end
@@ -980,6 +1136,7 @@ def nullable_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Repeat(inner, min, _) -> min == 0 or nullable_with?(inner, names)
     Expr.Lookahead(inner) -> nullable_with?(inner, names)
     Expr.Negative(_) -> true
+    Expr.Tagged(_, inner) -> nullable_with?(inner, names)
   end
 end
 
@@ -1013,6 +1170,7 @@ def always_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Repeat(inner, min, _) -> min == 0 or always_with?(inner, names)
     Expr.Lookahead(inner) -> always_with?(inner, names)
     Expr.Negative(_) -> false
+    Expr.Tagged(_, inner) -> always_with?(inner, names)
   end
 end
 
@@ -1046,5 +1204,6 @@ def still_with?(expr: Expr, names: Set[String]) -> Bool
     Expr.Repeat(inner, _, _) -> still_with?(inner, names)
     Expr.Lookahead(_) -> true
     Expr.Negative(_) -> true
+    Expr.Tagged(_, inner) -> still_with?(inner, names)
   end
 end
