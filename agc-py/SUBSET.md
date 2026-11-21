@@ -278,6 +278,7 @@ inside an annotation is `PY-ANNOTATION-UNKNOWN`, not `PY-NAME-UNKNOWN`.
 | `PY-IMPORT-UNKNOWN` | unknown module or stdlib member | the import |
 | `PY-NAME-UNKNOWN` | unknown name | the name |
 | `PY-RESERVED-NAME` | keyword used as a name | the name |
+| `PY-DUPLICATE-BINDING` | second binding of one name in one scope | the name |
 | `PY-OUT-OF-SUBSET` | anything else from §9 (the list is complete), naming it | the construct |
 | `PY-OPERATOR` | operand combination the backend has no operator for | the operator |
 | `PY-TRY-CONTROL` | `return`/`break`/`next` inside a `try` body | the statement |
