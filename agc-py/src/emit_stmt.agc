@@ -21,7 +21,7 @@
 ## nested `try` helpers which hoist past every enclosing branch. `If`
 ## arms stay independent (each starts from the incoming scope; bindings
 ## inside a branch do not escape, matching the lane's outgoing scope), `for`
-## seeds its target before the body and keeps it after, `try` seeds
+## seeds a new target only for its body, `try` seeds
 ## `except ... as e` as `String` before the handler and keeps it after, and
 ## `while` keeps the incoming scope. Bindings inside `while`/`if`/`for`
 ## bodies and reassignments inside an outlined `try` body do not escape to
@@ -179,9 +179,8 @@ def emit_while_block(ctx: EmitCtx.EmitCtx, cond: Tree.Node, body: List[Frontend.
   end
 end
 
-# Seeds the loop target from the iterable element type before the body,
-# then the lane binds it again for the outgoing scope. A non-iterable
-# refuses like the lane; body bindings do not escape.
+# Seeds a new loop target from the iterable element type for the body.
+# A prebound target keeps its declared type; body bindings do not escape.
 def emit_for_block(
   ctx: EmitCtx.EmitCtx,
   target: Frontend.NameOcc,
@@ -192,7 +191,8 @@ def emit_for_block(
   case elem
     error(e) -> block_no(ctx, iterable, e)
     ok(item) ->
-      body_frag = emit_block(ctx.with(scope: ctx.scope.put(target.name, item)), body)
+      target_type = ctx.scope.get(target.name, item)
+      body_frag = emit_block(ctx.with(scope: ctx.scope.put(target.name, target_type)), body)
       case body_frag
         BlockRes.No(_) -> body_frag
         BlockRes.Ok(out) ->

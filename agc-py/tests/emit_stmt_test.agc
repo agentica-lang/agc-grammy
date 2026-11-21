@@ -194,14 +194,14 @@ def main() -> Void
       try Test.eq(done.next_temp, 2)
       ok()
     end,
-    Test.test("for binds its element type") do
+    Test.test("for binds a new target only inside the body") do
       source = "for x in xs:\n  print(x)\n"
       stmts = try stmts_of(compiled.unwrap!, source)
       ctx = stmt_ctx(source, {"xs": "List[Int]"}, "", 0)
       done = try acc_ok("for", 0, EmitStmt.emit_block(ctx, stmts), ["xs: List[Int] = [1, 2]"], [])
       want_for = ["for x in xs", "  puts(" + quoted(interp("x")) + ")", "end"]
       try Test.eq(done.code, want_for)
-      try Test.eq(done.scope.get("x", ""), "Int")
+      try Test.eq(done.scope.get("x", ""), "")
       try Test.eq(done.scope.get("xs", ""), "List[Int]")
       ok()
     end,
