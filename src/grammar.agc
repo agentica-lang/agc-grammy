@@ -1,10 +1,12 @@
 ## Reading `.grammar` files (a pest-like PEG syntax) into rules.
 ##
-## A rule is `name = { body }`, or `name = _{ body }` to build no node. In a
-## body: `"text"`, `[a-z]`, `[^0-9]`, `.` (any char), a rule name, a builtin
-## (`ANY`, `EOF`, `ASCII_DIGIT`, `ASCII_ALPHA`, `ASCII_ALNUM`, `ASCII_HEX`,
-## `NEWLINE`), `~` sequence, `|` ordered choice, `*`, `+`, `?`, `!` and `&`
-## lookahead, and `( )`. `#` starts a comment.
+## A rule is `name = { body }`, with optional modifiers: `_` builds no node and
+## `>` opens an indentation scope (`>_{` is both). In a body: `"text"`,
+## `^"text"` (insensitive), `'a'..'z'`, `[a-z]`, `[^0-9]`, `.` (any char), a
+## rule name, a builtin (`ANY`, `SOI`, `EOI`, `NEWLINE`, `INDENT`, `SAME`, the
+## `ASCII_*` family), `~` sequence, `|` ordered choice, `*`, `+`, `?`,
+## `{n,m}`, `!` and `&` lookahead, and `( )`. Escapes: `\" \\ \n \r \t \
+## \0 \' \xNN \u{NNNN}`. `//` starts a comment and `/* */` nests.
 
 ## The max of a `Repeat` that never stops, as in `*` and `+`.
 UNBOUNDED = -1
@@ -381,6 +383,10 @@ def parse_range(chars: List[String], pos: Int) -> Result[ParsedExpr]
   end
 
   high = try parse_char_literal(chars, skip_blanks(chars, after_low + 2))
+  if low.value.compare(high.value) > 0
+    return error("grammar: the range #{low.value.inspect}..#{high.value.inspect} is descending at character #{pos}")
+  end
+
   items = [ClassItem.Span(low.value, high.value)]
   ok(ParsedExpr(expr: Expr.CharClass(false, items), pos: high.pos))
 end
@@ -396,11 +402,11 @@ end
 
 def read_bounds(chars: List[String], pos: Int) -> Result[ParsedBounds]
   first = read_number(chars, skip_blanks(chars, pos + 1))
-  at = first.pos
+  at = skip_blanks(chars, first.pos)
   if char_at(chars, at) == "}"
     return error("grammar: a repetition bound needs a number at character #{pos}") if first.text.empty?
 
-    exact = try first.text.to_i
+    exact = try bound_count(first.text, 0, pos)
     return ok(ParsedBounds(min: exact, max: exact, pos: at + 1))
   end
 
@@ -412,8 +418,8 @@ def read_bounds(chars: List[String], pos: Int) -> Result[ParsedBounds]
     return error("grammar: a repetition bound needs a number at character #{pos}")
   end
 
-  low = try bound_count(first.text, 0)
-  high = try bound_count(second.text, UNBOUNDED)
+  low = try bound_count(first.text, 0, pos)
+  high = try bound_count(second.text, UNBOUNDED, pos)
   return error("grammar: the repetition minimum #{low} is above the maximum #{high}") if high >= 0 and low > high
 
   ok(ParsedBounds(min: low, max: high, pos: close))
@@ -432,10 +438,13 @@ end
 
 def is_digit?(c: String) -> Bool = c.length == 1 and "0123456789".include?(c)
 
-def bound_count(text: String, missing: Int) -> Result[Int]
+def bound_count(text: String, missing: Int, pos: Int) -> Result[Int]
   return ok(missing) if text.empty?
 
-  text.to_i
+  case text.to_i
+    ok(count) -> ok(count)
+    error(_) -> error("grammar: the repetition bound #{text} is too large at character #{pos}")
+  end
 end
 
 def parse_class_expr(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -456,7 +465,8 @@ def parse_string(chars: List[String], pos: Int) -> Result[ParsedText]
   at = pos + 1
   text = ""
   while char_at(chars, at) != "\"" and char_at(chars, at) != ""
-    case read_escape(chars, at)
+    escaped = try read_escape(chars, at)
+    case escaped
       some(esc) ->
         text = "#{text}#{esc.value}"
         at = esc.pos
@@ -502,49 +512,57 @@ def read_class_char(chars: List[String], pos: Int) -> Result[ParsedChar]
   return error("grammar: unterminated character class at character #{pos}") if c == ""
   return ok(ParsedChar(value: c, pos: pos + 1)) if c != "\\"
 
-  esc = try read_escape(chars, pos).to_result("grammar: dangling \\ at character #{pos}")
-  ok(ParsedChar(value: esc.value, pos: esc.pos))
+  escaped = try read_escape(chars, pos)
+  case escaped
+    some(esc) -> ok(ParsedChar(value: esc.value, pos: esc.pos))
+    none -> error("grammar: dangling \\ at character #{pos}")
+  end
 end
 
-def read_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
-  return none if char_at(chars, pos) != "\\"
+# Reads an escape at `pos`; `ok(none)` means "not an escape, copy the character".
+def read_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
+  return ok(none) if char_at(chars, pos) != "\\"
 
   code = char_at(chars, pos + 1)
-  return none if code == ""
-  return some(ParsedChar(value: String.from_code(0), pos: pos + 2)) if code == "0"
+  return error("grammar: dangling \\ at character #{pos}") if code == ""
+  return ok(some(ParsedChar(value: String.from_code(0), pos: pos + 2))) if code == "0"
   return read_code_escape(chars, pos) if code == "x" or code == "u"
 
-  some(ParsedChar(value: Map.get(ESCAPES, code, code), pos: pos + 2))
+  ok(some(ParsedChar(value: Map.get(ESCAPES, code, code), pos: pos + 2)))
 end
 
-def read_code_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
+def read_code_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
   return read_hex_escape(chars, pos) if char_at(chars, pos + 1) == "x"
 
   read_brace_escape(chars, pos)
 end
 
-def read_hex_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
+def read_hex_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
   high = hex_value(char_at(chars, pos + 2))
   low = hex_value(char_at(chars, pos + 3))
-  return none if high.none? or low.none?
+  return error("grammar: \\x needs two hex digits at character #{pos}") if high.none? or low.none?
 
   # Both sides are hex digits, so the conversions cannot fail.
   code = high.unwrap! * 16 + low.unwrap!
-  some(ParsedChar(value: String.from_code(code), pos: pos + 4))
+  ok(some(ParsedChar(value: String.from_code(code), pos: pos + 4)))
 end
 
-def read_brace_escape(chars: List[String], pos: Int) -> Optional[ParsedChar]
-  return none if char_at(chars, pos + 2) != "{"
+def read_brace_escape(chars: List[String], pos: Int) -> Result[Optional[ParsedChar]]
+  return error("grammar: \\u needs {NNNNNN} at character #{pos}") if char_at(chars, pos + 2) != "{"
 
   digits = read_hex_run(chars, pos + 3, 6)
-  return none if digits.text.size < 2
-  return none if char_at(chars, digits.pos) != "}"
+  return error("grammar: \\u needs two to six hex digits at character #{pos}") if digits.text.size < 2
+  if char_at(chars, digits.pos) != "}"
+    return error("grammar: expected } after a \\u escape at character #{digits.pos}")
+  end
 
   # Every character is a hex digit, so the conversion cannot fail.
   code = hex_number(digits.text)
-  return none if code > 1114111 or (code >= 55296 and code <= 57343) or code < 0
+  if code > 1114111 or (code >= 55296 and code <= 57343)
+    return error("grammar: unicode escape #{digits.text} is not a character code at character #{pos}")
+  end
 
-  some(ParsedChar(value: String.from_code(code), pos: digits.pos + 1))
+  ok(some(ParsedChar(value: String.from_code(code), pos: digits.pos + 1)))
 end
 
 def read_hex_run(chars: List[String], pos: Int, max: Int) -> Scanned
@@ -840,7 +858,7 @@ end
 
 def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]) -> Optional[String]
   case expr
-    Expr.Repeat(inner, _, _) -> repeat_problem(owner, inner, always, still)
+    Expr.Repeat(inner, _, max) -> repeat_problem(owner, inner, max, always, still)
     Expr.Seq(parts) -> nested_repeat(owner, parts, always, still)
     Expr.Choice(options) -> nested_repeat(owner, options, always, still)
     Expr.Lookahead(inner) -> repeat_in(owner, inner, always, still)
@@ -849,9 +867,12 @@ def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]
   end
 end
 
-def repeat_problem(owner: String, inner: Expr, always: Set[String], still: Set[String]) -> Optional[String]
-  return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
-  return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+# Only an unbounded repetition can run forever; a bounded one terminates.
+def repeat_problem(owner: String, inner: Expr, max: Int, always: Set[String], still: Set[String]) -> Optional[String]
+  if max < 0
+    return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
+    return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+  end
 
   repeat_in(owner, inner, always, still)
 end

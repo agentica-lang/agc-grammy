@@ -190,15 +190,23 @@ def match_negative(ctx: Ctx, inner: Grammar.Expr, pos: Int) -> Outcome
   end
 end
 
-# An insensitive literal compares case by case (ASCII downcasing, as pest).
+# An insensitive literal compares case by case with an ASCII fold, as pest:
+# U+212A KELVIN SIGN is not an ASCII `K`, so `^"k"` does not match it.
 def match_insensitive(text: String, chars: List[String], pos: Int) -> Outcome
   parts = text.split("")
   for i in 0...parts.size
     at = pos + i
-    return miss(at, ["^#{text.inspect}"]) if at >= chars.size or chars[at].downcase != parts[i].downcase
+    return miss(at, ["^#{text.inspect}"]) if at >= chars.size or ascii_down(chars[at]) != ascii_down(parts[i])
   end
 
   matched(Progress(pos: pos + parts.size, nodes: []))
+end
+
+def ascii_down(c: String) -> String
+  code = c.code
+  return String.from_code(code + 32) if code >= 65 and code <= 90
+
+  c
 end
 
 def match_literal(text: String, chars: List[String], pos: Int) -> Outcome

@@ -124,6 +124,51 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("a malformed \\x escape fails") do
+      case Grammar.compile("a = { \"\\xZZ\" }")
+        error(e) -> Test.assert(e.message.include?("two hex digits"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a malformed \\u escape fails") do
+      short = Grammar.compile("a = { \"\\u{9}\" }")
+      surrogate = Grammar.compile("a = { \"\\u{D800}\" }")
+      try Test.assert(short.message.include?("two to six hex digits"), short.message)
+      Test.assert(surrogate.message.include?("is not a character code"), surrogate.message)
+    end,
+    Test.test("a descending range fails") do
+      case Grammar.compile("a = { 'z'..'a' }")
+        error(e) -> Test.assert(e.message.include?("descending"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an unterminated block comment fails") do
+      case Grammar.compile("a = { /* x }")
+        error(e) -> Test.assert(e.message.include?("expected an expression"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("an exact zero bound") do
+      grammar = try Grammar.compile("a = { \"x\"{0} }")
+      Test.eq(grammar.rules[0].body, Expr.Repeat(Expr.Literal("x"), 0, 0))
+    end,
+    Test.test("blanks inside a bound") do
+      grammar = try Grammar.compile("a = { \"x\"{ 2 , 3 } }")
+      Test.eq(grammar.rules[0].body, Expr.Repeat(Expr.Literal("x"), 2, 3))
+    end,
+    Test.test("a bound too large for Int fails") do
+      case Grammar.compile("a = { \"x\"{99999999999999999999} }")
+        error(e) -> Test.assert(e.message.include?("too large"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a bounded repetition of a non-consuming expression compiles") do
+      Test.ok?(Grammar.compile("a = { (&\"x\"){2} }"))
+    end,
+    Test.test("a comment inside a body is skipped") do
+      grammar = try Grammar.compile("a = { \"x\" ~ /* c */ \"y\" ~ // tail\n \"z\" }")
+      Test.eq(grammar.rules[0].body, Expr.Seq([Expr.Literal("x"), Expr.Literal("y"), Expr.Literal("z")]))
+    end,
     Test.test("a rule declared twice fails") do
       case Grammar.compile("a = { \"x\" }\na = { \"y\" }")
         error(e) -> Test.assert(e.message.include?("declared twice"), e.message)

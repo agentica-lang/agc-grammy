@@ -165,6 +165,21 @@ def main() -> Void
       try Test.eq(tree.stop, 3)
       Test.error?(parse("p = { 'a'..'z'+ }", "p", "ab1"))
     end,
+    Test.test("a bounded repetition at match time") do
+      try Test.ok?(parse("p = { \"a\"{,2} ~ EOI }", "p", "a"))
+      try Test.ok?(parse("p = { \"a\"{,2} ~ EOI }", "p", "aa"))
+      try Test.error?(parse("p = { \"a\"{,2} ~ EOI }", "p", "aaa"))
+      Test.ok?(parse("p = { \"a\"{0} ~ \"b\" }", "p", "b"))
+    end,
+    Test.test("escapes inside a character class") do
+      tree = try parse("p = { [\\x41-\\x43]+ }", "p", "ABC")
+      Test.eq(Tree.text(tree, "ABC"), "ABC")
+    end,
+    Test.test("a comment inside a body is skipped") do Test.ok?(parse("p = { \"a\" ~ /* c */ \"b\" }", "p", "ab")) end,
+    Test.test("an insensitive literal folds ASCII only") do
+      try Test.ok?(parse("p = { ^\"k\" }", "p", "K"))
+      Test.error?(parse("p = { ^\"k\" }", "p", String.from_code(8490)))
+    end,
     Test.test("tree queries") do
       grammar_text = "p = { item* }\nitem = { ASCII_DIGIT }"
       tree = try parse(grammar_text, "p", "123")

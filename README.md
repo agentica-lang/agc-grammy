@@ -35,7 +35,7 @@ tests/                   Agentica unit tests
 Write a grammar:
 
 ```
-# grammars/csv.grammar
+// grammars/csv.grammar
 row = { cell ~ ("," ~ cell)* }
 cell = { [^,\n]* }
 file = _{ row ~ "\n"* ~ (row ~ "\n"*)* }
@@ -199,7 +199,6 @@ live in `tests/` and are run as `agentica test tests`.
 
 - no implicit whitespace and no atomicity (`@`, `$`, `!`)
 - no node tags (`#tag = expr`), no node stack (`PUSH`/`PEEK`/`POP`)
-- no atomicity (`@`, `$`, `!`) and no node tags (`#tag = expr`)
 - no packrat memoization and no left recursion
 - nodes keep no span information other than start/stop offsets
 - the Python example has no functions, lists, dicts or `//`

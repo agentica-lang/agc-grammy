@@ -44,14 +44,14 @@ worth having, **no** = deliberately out of scope.
 | `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | missing | later |
 | `PEEK`, `PEEK[a..b]`, `PEEK_ALL` | yes | missing | later |
 | `ANY` | yes | yes | — |
-| `SOI` | yes | missing | now |
-| `EOI` | yes | as `EOF` | now (rename, keep `EOF`) |
-| `NEWLINE` (`\n`, `\r\n`, `\r`) | yes | `\n`, `\r` | now (add `\r\n`) |
+| `SOI` | yes | yes | done |
+| `EOI` | yes | yes (alias `EOF`) | done |
+| `NEWLINE` (`\n`, `\r\n`, `\r`) | yes | yes | done |
 | `ASCII_DIGIT` | yes | yes | — |
-| `ASCII_NONZERO_DIGIT`, `ASCII_BIN_DIGIT`, `ASCII_OCT_DIGIT` | yes | missing | now |
-| `ASCII_ALPHA_LOWER`, `ASCII_ALPHA_UPPER`, `ASCII` | yes | missing | now |
-| `ASCII_ALPHANUMERIC` | yes | as `ASCII_ALNUM` | now (rename, keep alias) |
-| `ASCII_HEX_DIGIT` | yes | as `ASCII_HEX` | now (rename, keep alias) |
+| `ASCII_NONZERO_DIGIT`, `ASCII_BIN_DIGIT`, `ASCII_OCT_DIGIT` | yes | yes | done |
+| `ASCII_ALPHA_LOWER`, `ASCII_ALPHA_UPPER`, `ASCII` | yes | yes | done |
+| `ASCII_ALPHANUMERIC` | yes | yes (alias `ASCII_ALNUM`) | done |
+| `ASCII_HEX_DIGIT` | yes | yes (alias `ASCII_HEX`) | done |
 | Unicode properties `\p{L}`, `\p{Emoji}` | yes (tables) | missing | no (tables; revisit on demand) |
 | grammar file extension | `.pest` | `.grammar` | accept both |
 
@@ -142,7 +142,7 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 
 ## 7. What to do, in order
 
-### Milestone 1 — trustworthy (cheap, high value) — DONE (1 and 2)
+### Milestone 1 — trustworthy (cheap, high value) — DONE (1, 2 and 3)
 
 1. **Furthest-failure errors** — done: matching threads an `Outcome` with the
    deepest `Attempt` (labels for rule names, literals and classes; silent rules
