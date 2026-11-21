@@ -36,17 +36,17 @@ as is until a phase asks for it.
 
 Goal: the one-page contract everything else implements. No code.
 
-- PR 1a: `agc-py/SUBSET.md` — closed include list, plus the error catalog:
-  one stable `PY*` code per rejectable shape (untyped `def`, dynamic idiom,
-  out-of-subset construct, annotation mismatch), each with the span it points
-  at. The catalog is what phase 3 implements, code by code. (typed `def`/`return`,
+- PR 1a: `agc-py/SUBSET.md` — closed include list (typed `def`/`return`,
   annotated names, `if`/`while`/`for`, `try/except`, expressions), the type
   table Python→Agentica, semantic rules where the languages differ (rebinding
   vs `xs = xs.push(x)`, closures, int overflow, `None`/`none`, truthiness,
   `is` vs `==`, exceptions as `Result`), lexical edge cases (string prefixes,
   triple-quoted, escapes, number forms, implicit joining vs indentation,
   `match`/`case` soft keywords, `with`/f-strings in or out), and the closed
-  exclusion list (each exclusion is a frontend error with a span).
+  exclusion list (each exclusion is a frontend error with a span), plus the
+  error catalog: one stable `PY*` code per rejectable shape (untyped `def`,
+  dynamic idiom, out-of-subset construct, annotation mismatch), each with the
+  span it points at. The catalog is what phase 3 implements, code by code.
 
 Exit: `SUBSET.md` merged; it supersedes the README sketch, and anything
 outside it is an error by definition. Later phases cite it per construct.
