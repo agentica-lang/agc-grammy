@@ -44,6 +44,10 @@ its tests in `tests/`, so always pass the folder.
   through stdin).
 - `examples/python/`: the reference user of the library (grammar in
   `grammars/python.grammar`, interpreter in `interp.agc`).
+- `agc-py/`: the Python-to-`.agcb` compiler package (own `README.md`,
+  `roadmap.md`, `src/`, `tests/`). Same manifest as grammy for now — see the
+  workspace note in `agc-py/roadmap.md` phase 0 — so the Makefile targets
+  (`check`, `fmt`, `lint`, `test`) cover `agc-py` explicitly.
 
 ## Invariants to keep
 

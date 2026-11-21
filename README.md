@@ -28,6 +28,7 @@ src/grammy.agc           the public facade (re-exports)
 src/main.agc             CLI: run a rule and print the tree
 examples/python/         interp.agc (the code that uses the grammar), main.agc, sample.py
 tests/                   Agentica unit tests
+agc-py/                  the Python-to-`.agcb` compiler (roadmap.md, src, tests)
 ```
 
 ## Quickstart
