@@ -18,7 +18,7 @@ Goal: `agc-py/` exists as a package-in-waiting without breaking grammy.
   (pipeline skeleton), `agc-py/tests/` (3 tests), Makefile/README/AGENTS.md
   wiring.
 
-Exit: `make ci` green, 185 grammy tests + the scaffold tests.
+Exit: `make ci` green — the grammy suite plus the scaffold tests.
 
 Note (repo shape): one manifest covers `src/`, `tests/` and `agc-py/` by
 release discipline, not tool requirement (a `ref` pin or `path` dep would also
@@ -39,7 +39,7 @@ Goal: the one-page contract everything else implements. No code.
 - PR 1a: `agc-py/SUBSET.md` — closed include list (typed `def`/`return`,
   annotated names, `if`/`while`/`for`, `try/except`, expressions), the type
   table Python→Agentica, semantic rules where the languages differ (rebinding
-  vs `xs = xs.push(x)`, closures, int overflow, `None`/`nil`, truthiness,
+  vs `xs = xs.push(x)`, closures, int overflow, `None`/`none`, truthiness,
   `is` vs `==`, exceptions as `Result`), lexical edge cases (string prefixes,
   triple-quoted, escapes, number forms, implicit joining vs indentation,
   `match`/`case` soft keywords, `with`/f-strings in or out), and the closed
