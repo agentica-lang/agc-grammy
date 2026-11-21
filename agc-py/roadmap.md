@@ -43,7 +43,10 @@ Goal: the one-page contract everything else implements. No code.
   `is` vs `==`, exceptions as `Result`), lexical edge cases (string prefixes,
   triple-quoted, escapes, number forms, implicit joining vs indentation,
   `match`/`case` soft keywords, `with`/f-strings in or out), and the closed
-  exclusion list (each exclusion is a frontend error with a span).
+  exclusion list (each exclusion is a frontend error with a span), plus the
+  error catalog: one stable `PY*` code per rejectable shape (untyped `def`,
+  dynamic idiom, out-of-subset construct, annotation mismatch), each with the
+  span it points at. The catalog is what phase 3 implements, code by code.
 
 Exit: `SUBSET.md` merged; it supersedes the README sketch, and anything
 outside it is an error by definition. Later phases cite it per construct.
@@ -85,9 +88,12 @@ untyped code never reaches emission, and emitted code carries full annotations
 so `agentica check` enforces the rest.
 
 - PR 3a (AST + scopes): AST nodes over `Grammy.Node` with `start`/`stop`,
-  name resolution and scopes, structured diagnostics (span + line/column +
-  line text) reusing grammy's error shape. Tests: scopes resolve/shadow/reject
-  as specified; diagnostics print the offending line.
+  name resolution and scopes, diagnostics in the Agentica shape
+  (`file:line:col error[PY-*]` + explanation + marked source line + `= help:`
+  when known). Stages run in order and each refuses before the next starts,
+  so a scope error never surfaces as an emit crash. Tests: scopes
+  resolve/shadow/reject as specified; every catalog code fires at its span
+  with the offending line printed.
 - PR 3b (expressions): literals, operators with the true-division rule,
   calls, subscripting, builtin mapping (`print`→`puts`, `len`, `range`).
   Tests: each emitted form passes `agentica check` in the test itself.
