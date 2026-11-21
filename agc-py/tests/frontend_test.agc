@@ -137,6 +137,12 @@ def main() -> Void
       try Test.eq(codes(diags), ["PY-ANNOTATION-UNKNOWN"])
       Test.eq(span_text(source, List.first(diags)), "nosuch")
     end,
+    Test.test("a quoted forward reference resolves clean") do
+      try Test.ok?(check(compiled, "z: \"Fwd\" = 1\n"))
+      try Test.ok?(check(compiled, "x: \"A\" | None = 1\n"))
+      Test.ok?(check(compiled, "xs: list[\"Fwd\"] = []\n"))
+    end,
+    Test.test("a single-quoted forward reference resolves clean") do Test.ok?(check(compiled, "z: 'Fwd' = 1\n")) end,
     Test.test("a bare Any annotation is rejected") do
       source = "x: Any = 1\n"
       diags = try analyze(compiled, source)
@@ -163,6 +169,14 @@ def main() -> Void
         error(e) -> Test.assert(e.message.include?("error[PY-UNTYPED-DEF]"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
+    end,
+    Test.test("diagnostics sort by start offset across module and body") do
+      source = "def f() -> None:\n    print(y)\n\nx = 1\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-NAME-UNKNOWN", "PY-UNTYPED-NAME"])
+      try Test.eq(span_text(source, List.first(diags)), "y")
+      try Test.eq(span_text(source, List.first(diags.drop(1))), "x")
+      Test.assert(List.first(diags).start < List.first(diags.drop(1)).start, "expected body diag before module diag")
     end,
     Test.test("a bare raise name stays skipped") do Test.ok?(check(compiled, "def f() -> None:\n    raise E\n")) end,
     Test.test("a raise factory call resolves its head") do
@@ -195,6 +209,17 @@ def main() -> Void
         some(diag) ->
           try Test.eq(diag.code, "PY-UNTYPED-DEF")
           Test.eq(span_text(source, diag), "x")
+        none -> Test.assert(false, "expected a diagnostic")
+      end
+    end,
+    Test.test("an untyped parameter matching the def name points at the parameter") do
+      source = "def f(f=0) -> int:\n    return f\n"
+      found = Frontend.untyped_def(source)
+      case found
+        some(diag) ->
+          try Test.eq(diag.code, "PY-UNTYPED-DEF")
+          try Test.eq(span_text(source, diag), "f")
+          Test.eq(diag.start, 6)
         none -> Test.assert(false, "expected a diagnostic")
       end
     end,

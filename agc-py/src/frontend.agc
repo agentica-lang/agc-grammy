@@ -34,12 +34,14 @@
 ## all `def` names plus only the top-level bindings seen so far. A body use
 ## of a later-bound module variable is `PY-NAME-UNKNOWN`. Top-level
 ## statements are checked strictly in order, so a call before its `def` is
-## `PY-NAME-UNKNOWN` too.
+## `PY-NAME-UNKNOWN` too. The final diagnostics are sorted by start offset,
+## so a body problem can surface before a later top-level one.
 ##
 ## Annotations are checked against the known-type set (`int`, `str`, `float`,
 ## `bool`, `None`, `list`, `dict`, `Optional`): an unknown bare or dotted-head
 ## name is `PY-ANNOTATION-UNKNOWN`, while a bare `Any` (or `object`) and a
-## `typing.Any` head are `PY-ANY`.
+## `typing.Any` head are `PY-ANY`. Quoted forward references (`"Fwd"`,
+## `list["Fwd"]`) are skipped: their targets are classes, unmodeled in 3a.
 ##
 ## `render` prints one diagnostic in the Agentica shape (`file:line:col`
 ## `error[PY-*]` + explanation + marked source line + `= help:` when known).
@@ -176,8 +178,8 @@ end
 ## checked against its parameters plus the module scope as it stands at that
 ## `def` (all `def` names plus only the top-level bindings seen so far, so a
 ## body use of a later-bound module variable is `PY-NAME-UNKNOWN`). Answers
-## every problem in source order; an empty list means the program resolved
-## cleanly.
+## every problem sorted by start offset; an empty list means the program
+## resolved cleanly.
 def resolve(program: Program) -> List[Diagnostic]
   all_defs: Set[String] = Set.new([])
   for func_def in program.funcs
@@ -212,7 +214,7 @@ def resolve(program: Program) -> List[Diagnostic]
     diags = check_func_body(diags, snapshot_scope(program, all_defs, func_def.span.start), func_def)
   end
 
-  diags
+  diags.sort_by { |diag| diag.start }
 end
 
 # The earliest name position in a top-level item, or none when the item
@@ -997,37 +999,53 @@ end
 # Checks every head identifier in an annotation against the known-type set.
 # Only dotted heads are checked (`nosuch.X` points at `nosuch`); a `typing`
 # head followed by `Any` (or `object`) is `PY-ANY`, like a bare `Any`.
+# Quoted segments (`"Fwd"`, `list["Fwd"]`) are skipped entirely: string
+# forward references resolve like bare names per `SUBSET.md` section 1, and
+# their targets are classes, unmodeled in 3a (same rationale as the
+# class-like `raise` skip).
 def ann_diags(text: String, span: Span) -> List[Diagnostic]
   chars = text.split("")
   diags: List[Diagnostic] = []
   i = 0
   while i < chars.size
-    if ident_start?(chars[i])
-      start_i = i
-      pieces: List[String] = []
-      while i < chars.size and ident_char?(chars[i])
-        pieces = pieces.push(chars[i])
+    if chars[i] == "\"" or chars[i] == "'"
+      quote = chars[i]
+      i += 1
+      while i < chars.size and chars[i] != quote
         i += 1
       end
 
-      word = pieces.join("")
+      if i < chars.size
+        i += 1
+      end
+    else
+      if ident_start?(chars[i])
+        start_i = i
+        pieces: List[String] = []
+        while i < chars.size and ident_char?(chars[i])
+          pieces = pieces.push(chars[i])
+          i += 1
+        end
 
-      if !dotted_attr?(chars, start_i)
-        if word == "Any" or word == "object"
-          diags = diags.push(any_diag(word, span.start + start_i, span.start + i))
-        else
-          if word == "typing"
-            diags = diags + typing_head_diags(chars, span, start_i, i)
-            i = typing_head_end(chars, i)
+        word = pieces.join("")
+
+        if !dotted_attr?(chars, start_i)
+          if word == "Any" or word == "object"
+            diags = diags.push(any_diag(word, span.start + start_i, span.start + i))
           else
-            if !KNOWN_TYPES.include?(word)
-              diags = diags.push(ann_unknown_diag(word, span.start + start_i, span.start + i))
+            if word == "typing"
+              diags = diags + typing_head_diags(chars, span, start_i, i)
+              i = typing_head_end(chars, i)
+            else
+              if !KNOWN_TYPES.include?(word)
+                diags = diags.push(ann_unknown_diag(word, span.start + start_i, span.start + i))
+              end
             end
           end
         end
+      else
+        i += 1
       end
-    else
-      i += 1
     end
   end
 
@@ -1158,7 +1176,7 @@ end
 def check_params(header: String, start: Int, name: String) -> Optional[Diagnostic]
   open = header.index_of("(")
   case open
-    some(at) -> check_param_list(param_text(header, at), header, start, name)
+    some(at) -> check_param_list(param_text(header, at), header, start, name, at)
     none -> none
   end
 end
@@ -1186,10 +1204,16 @@ def param_text(header: String, at: Int) -> Optional[String]
   none
 end
 
-def check_param_list(params: Optional[String], header: String, start: Int, name: String) -> Optional[Diagnostic]
+def check_param_list(
+  params: Optional[String],
+  header: String,
+  start: Int,
+  name: String,
+  open: Int,
+) -> Optional[Diagnostic]
   case params
     some(text) ->
-      search_from = 0
+      search_from = open + 1
       for part in text.split(",")
         trimmed = part.strip
         if trimmed != "" and !trimmed.include?(":")
