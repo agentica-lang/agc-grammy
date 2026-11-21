@@ -25,9 +25,14 @@
 ## was emitted: `while` with `break`, `for` over a list literal, a `Range`
 ## and `split("")`, `next` inside both loop kinds, and nested `if`/`else`
 ## chains all check clean on agentica 0.35.0. `for` binds its target
-## implicitly (no declaration line): the target enters `StmtOut.scope` with
-## its element type, shadowing or reusing the slot exactly like the
-## frontend's silent `reuse` binding.
+## implicitly (no declaration line). A first-time target stays inside the
+## loop: the backend scopes the loop variable to the loop body, so it never
+## enters `StmtOut.scope` (using it afterwards refuses at the use: a narrow
+## 3c limitation, documented not defaulted, since no value is invented for
+## the empty-iteration case). A target already in scope keeps Python's
+## update semantics through a fresh `py_tK` iterator plus `target = py_tK`
+## as the first body line, so empty iteration leaves the outer value alone
+## and no shadowing error arises; a mismatched element type refuses instead.
 ##
 ## Temps from a condition preamble (`py_tN`, e.g. a chained comparison that
 ## evaluates a middle operand once) are shifted by `ctx.next_temp`, so a
@@ -118,10 +123,16 @@ def emit_while(ctx: EmitCtx.EmitCtx, cond: Tree.Node, body_code: List[String]) -
 end
 
 ## Emits `for <target> in <iterable>` over the pre-emitted `body_code`
-## lines. The target enters the outgoing scope with its element type; a
-## `String` iterable maps to `(<code>).split("")`, the parens keeping a
-## concatenated source from binding to the last piece only. An empty body
-## emits `nil`.
+## lines. A first-time target emits the direct header (`for <target> in
+## ...`): the backend binds the loop variable itself and keeps it inside
+## the loop, so the outgoing scope is the incoming one. A prebound target
+## emits a fresh iterator (`for py_tK in ...` plus `<target> = py_tK` as
+## the first body line), updating the outer slot like Python instead of
+## shadowing it; the iterator temp sits past the iterable preamble and the
+## body (the spine hands a `next_temp` beyond the body), so it collides
+## with neither. A `String` iterable maps to `(<code>).split("")`, the
+## parens keeping a concatenated source from binding to the last piece
+## only. An empty body emits `nil`.
 def emit_for(
   ctx: EmitCtx.EmitCtx,
   target: Frontend.NameOcc,
@@ -143,21 +154,12 @@ def emit_for(
             iterable.stop,
           )
         some(item) ->
-          shifted_pre = out.pre.map { |line| shift_code(line, ctx.next_temp) }
-          shifted = shift_code(out.code, ctx.next_temp)
-          advanced = advance_temp(ctx.next_temp, out.pre + [out.code])
-          header = "for #{target.name} in #{shifted}"
-          if base_of(out.type) == "String"
-            header = "for #{target.name} in (#{shifted}).split(\"\")"
+          existing = ctx.scope.get(target.name, "")
+          if existing == ""
+            emit_first_for(ctx, out, target.name, body_code)
+          else
+            emit_reuse_for(ctx, out, target, existing, item, body_code)
           end
-
-          lines = EmitCtx.indented(shifted_pre, 0)
-          lines = lines.push(header)
-          lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
-          lines = lines.push("end")
-          EmitCtx.StmtRes.Ok(
-            EmitCtx.StmtOut(code: lines, scope: ctx.scope.put(target.name, item), next_temp: advanced),
-          )
       end
   end
 end
@@ -271,6 +273,80 @@ def refusal_from_emit(message: String, node: Tree.Node) -> EmitCtx.StmtRes
   end
 
   EmitCtx.StmtRes.No(EmitCtx.Refusal(code: code, message: text, help: help, start: node.start, stop: node.stop))
+end
+
+# A first-time target: the direct header binds the loop variable in the
+# backend, which keeps it inside the loop, so the outgoing scope is the
+# incoming one. Post-loop uses refuse at the use (a narrow 3c limitation:
+# no default is invented for the empty-iteration case).
+def emit_first_for(ctx: EmitCtx.EmitCtx, out: EmitExpr.Out, name: String, body_code: List[String]) -> EmitCtx.StmtRes
+  shifted_pre = out.pre.map { |line| shift_code(line, ctx.next_temp) }
+  shifted = shift_code(out.code, ctx.next_temp)
+  advanced = advance_temp(ctx.next_temp, out.pre + [out.code])
+  lines = EmitCtx.indented(shifted_pre, 0)
+  lines = lines.push(for_header(name, out.type, shifted))
+  lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
+  lines = lines.push("end")
+  EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: advanced))
+end
+
+# A prebound target: a fresh iterator plus an assignment keeps Python's
+# update semantics (empty iteration leaves the outer value alone, `break`
+# keeps the current element) without shadowing the outer slot. A
+# mismatched element type refuses as `PY-TYPE-MISMATCH` at the target span.
+def emit_reuse_for(
+  ctx: EmitCtx.EmitCtx,
+  out: EmitExpr.Out,
+  target: Frontend.NameOcc,
+  existing: String,
+  item: String,
+  body_code: List[String],
+) -> EmitCtx.StmtRes
+  if !for_types_match?(existing, item)
+    return EmitCtx.refuse_at(
+      "PY-TYPE-MISMATCH",
+      "cannot bind #{item} to `#{target.name}: #{existing}`",
+      some("convert the value explicitly or fix the annotation"),
+      target.span.start,
+      target.span.stop,
+    )
+  end
+
+  shifted_pre = out.pre.map { |line| shift_code(line, ctx.next_temp) }
+  shifted = shift_code(out.code, ctx.next_temp)
+  advanced = advance_temp(ctx.next_temp, out.pre + [out.code])
+  iter = "py_t#{advanced}"
+  lines = EmitCtx.indented(shifted_pre, 0)
+  lines = lines.push(for_header(iter, out.type, shifted))
+  lines = lines.push("  #{target.name} = #{iter}")
+  lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
+  lines = lines.push("end")
+  EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: advanced + 1))
+end
+
+# The `for` header line for iterator `name` over emitted iterable code of
+# static type `found` (a `String` iterable desugars through `split("")`).
+def for_header(name: String, found: String, code: String) -> String
+  if base_of(found) == "String"
+    "for #{name} in (#{code}).split(\"\")"
+  else
+    "for #{name} in #{code}"
+  end
+end
+
+# Whether a prebound loop target of type `want` accepts an element of type
+# `got`: exact names, `Unknown` either side, or a bare `List`/`Map`
+# against the same base (mirrors the lane A binding rule).
+def for_types_match?(want: String, got: String) -> Bool
+  return true if want == got
+
+  return true if want == "Unknown" or got == "Unknown"
+
+  if base_of(want) == base_of(got) and (base_of(want) == "List" or base_of(want) == "Map")
+    return true if want == base_of(want) or got == base_of(got)
+  end
+
+  false
 end
 
 # The head of a type name: `List` for `List[Int]`, the name itself when bare.

@@ -393,24 +393,24 @@ def main() -> Void
       try accumulate("whilechain", 0, ["a: Int = 1", "b: Int = 2", "c: Int = 3"], done.code)
       ok()
     end,
-    Test.test("for over a list binds the element type") do
+    Test.test("for over a list keeps a first-time target inside the loop") do
       source = "for x in xs:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       res = EmitFlow.emit_for(flow_ctx(source, {"xs": "List[Int]"}), parts.target, parts.iterable, ["puts(x)"])
       done = try assert_ok(res)
       try assert_lines(done.code, ["for x in xs", "  puts(x)", "end"])
-      try Test.eq(done.scope.get("x", ""), "Int")
+      try Test.eq(done.scope.get("x", ""), "")
       try Test.eq(done.scope.get("xs", ""), "List[Int]")
       try accumulate("forlist", 0, ["xs: List[Int] = [1, 2]"], done.code)
       ok()
     end,
-    Test.test("for over range binds Int") do
+    Test.test("for over range keeps a first-time target inside the loop") do
       source = "for i in range(3):\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       res = EmitFlow.emit_for(flow_ctx(source, {}), parts.target, parts.iterable, ["puts(i)"])
       done = try assert_ok(res)
       try assert_lines(done.code, ["for i in 0...3", "  puts(i)", "end"])
-      try Test.eq(done.scope.get("i", ""), "Int")
+      try Test.eq(done.scope.get("i", ""), "")
       try accumulate("forrange", 0, [], done.code)
       ok()
     end,
@@ -420,8 +420,72 @@ def main() -> Void
       res = EmitFlow.emit_for(flow_ctx(source, {"s": "String"}), parts.target, parts.iterable, ["puts(ch)"])
       done = try assert_ok(res)
       try assert_lines(done.code, ["for ch in (s).split(\"\")", "  puts(ch)", "end"])
-      try Test.eq(done.scope.get("ch", ""), "String")
+      try Test.eq(done.scope.get("ch", ""), "")
       try accumulate("forstr", 0, ["s: String = \"ab\""], done.code)
+      ok()
+    end,
+    Test.test("for over a prebound target assigns through a fresh iterator") do
+      source = "for i in xs:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"xs": "List[Int]", "i": "Int"})
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t0 in xs", "  i = py_t0", "  puts(i)", "end"])
+      try Test.eq(done.scope.get("i", ""), "Int")
+      try Test.eq(done.scope.get("xs", ""), "List[Int]")
+      try Test.eq(done.next_temp, 1)
+      try accumulate("forreuse", 0, ["xs: List[Int] = [1, 2]", "i: Int = 0"], done.code)
+      ok()
+    end,
+    Test.test("for over range updates a prebound target") do
+      source = "for i in range(3):\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"i": "Int"})
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t0 in 0...3", "  i = py_t0", "  puts(i)", "end"])
+      try Test.eq(done.scope.get("i", ""), "Int")
+      try Test.eq(done.next_temp, 1)
+      try accumulate("forranger", 0, ["i: Int = 0"], done.code)
+      ok()
+    end,
+    Test.test("for over a string updates a prebound target") do
+      source = "for ch in s:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"s": "String", "ch": "String"})
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(ch)"])
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t0 in (s).split(\"\")", "  ch = py_t0", "  puts(ch)", "end"])
+      try Test.eq(done.scope.get("ch", ""), "String")
+      try Test.eq(done.next_temp, 1)
+      try accumulate("forstrr", 0, ["s: String = \"ab\"", "ch: String = \"z\""], done.code)
+      ok()
+    end,
+    Test.test("for iterator temps sit past the body supply") do
+      source = "for i in xs:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"xs": "List[Int]", "i": "Int"}).with(next_temp: 3)
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t3 in xs", "  i = py_t3", "  puts(i)", "end"])
+      try Test.eq(done.next_temp, 4)
+      try accumulate("forsupply", 0, ["xs: List[Int] = [1, 2]", "i: Int = 0"], done.code)
+      ok()
+    end,
+    Test.test("for over a mismatched prebound target is refused") do
+      source = "for s in xs:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"xs": "List[Int]", "s": "String"})
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(s)"])
+      try assert_refusal(res, "PY-TYPE-MISMATCH")
+      case res
+        EmitCtx.StmtRes.No(refusal) ->
+          try Test.eq(refusal.start, 4)
+          try Test.eq(refusal.stop, 5)
+          try Test.assert(refusal.message.include?("String"), refusal.message)
+        EmitCtx.StmtRes.Ok(_) -> try Test.assert(false, "expected a refusal")
+      end
+
       ok()
     end,
     Test.test("for over an int is refused") do
