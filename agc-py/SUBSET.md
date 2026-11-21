@@ -250,6 +250,9 @@ relative imports, `__init__` packages, `\N{...}` escapes, `nan`/`inf`
 spellings, float `//`/`%`/`**`, mixed `int`/`float` arithmetic without an
 explicit conversion.
 
+`match` and `case` are soft keywords: match headers are excluded, but the
+spellings remain available in name positions, including attributes and calls.
+
 ## 10. Error catalog (stable `PY*` codes)
 
 Every code carries file/line/column, the offending span, an explanation and a

@@ -1,22 +1,33 @@
-// Python 3.12, typed subset, phases 2a-2c: typed `def`, annotations, data
+// Python 3.12, typed subset, phase 2: typed `def`, annotations, data
 // forms (subscripts, slices, attributes, full strings and numbers) and an
-// expression and control core. Phase 2d adds layout.
+// expression and control core.
 //
-// Style follows `grammars/python.grammar` on purpose: explicit `ws` (no
-// newline) and `eol` everywhere, no implicit `WHITESPACE`, so indentation
-// behaves exactly like the proven grammar. Structural rules build nodes;
-// spacing helpers (`ws`, `nl`, `eol`, `word_end`, `ident_*`) are silent.
+// Explicit `ws` and `eol` keep physical line boundaries visible to
+// INDENT/SAME. Structural rules build nodes; layout helpers are silent.
 
-// Spaces and tabs, never a newline.
-ws = _{ (" " | "\t")* }
+// Only bracketed syntax enables joined lines. The empty stack marker
+// consumes no input, and each closing delimiter drops its own marker.
+hws = _{ (" " | "\t")* }
+
+ws = _{ hws ~ joined_line* }
+
+joined_line = _{ &("#" | nl) ~ PEEK ~ comment? ~ nl ~ hws }
+
+// A token that used to require adjacency can also follow a joined line.
+joined_break = _{ (hws ~ joined_line+)? }
+
+open_paren = _{ "(" ~ PUSH_LITERAL("") }
+
+open_list = _{ "[" ~ PUSH_LITERAL("") }
+
+open_dict = _{ "{" ~ PUSH_LITERAL("") }
 
 nl = _{ "\r\n" | "\n" | "\r" }
 
-// To the end of the line: optional blanks, an optional comment, the break.
-eol = _{ ws ~ ("#" ~ [^"\n"]*)? ~ nl }
+// Physical statement boundaries never use bracket-sensitive whitespace.
+eol = _{ hws ~ comment? ~ nl }
 
-// What a line starts with when it holds no statement.
-skipped = _{ (" " | "\t")* ~ ("#" ~ [^"\n"]*)? ~ nl }
+skipped = _{ eol }
 
 ident_start = _{ [a-zA-Z_] }
 
@@ -27,14 +38,35 @@ ident = _{ ident_start ~ ident_char* }
 // After a keyword, so `defined` is not `def` + `ined`.
 word_end = _{ !ident_char }
 
-program = _{ skipped* ~ (top ~ skipped*)* ~ ws ~ EOF }
+program = _{ skipped* ~ (import_stmt ~ top_end ~ skipped*)* ~ (top ~ skipped*)* ~ ws ~ EOF }
 
-// Only definitions and statements start a top-level form, not decorators.
-top = _{ def_stmt ~ (eol | ws ~ comment? ~ EOF) | statement ~ (eol | ws ~ comment? ~ EOF) }
+// Imports are handled separately in the module preamble.
+top = _{ (def_stmt | type_alias | statement) ~ top_end }
+
+top_end = _{ eol | hws ~ comment? ~ EOF }
+
+import_stmt = { import_modules | from_import }
+
+import_modules = _{ "import" ~ word_end ~ hws ~ import_module ~ (hws ~ "," ~ hws ~ import_module)* }
+
+import_module = { dotted ~ import_alias? }
+
+import_alias = { ws ~ "as" ~ word_end ~ ws ~ name }
+
+from_import = _{ "from" ~ word_end ~ hws ~ dotted ~ hws ~ "import" ~ word_end ~ hws ~ import_names }
+
+import_names = _{ open_paren ~ ws ~ import_items ~ (ws ~ ",")? ~ ws ~ ")" ~ DROP | import_items }
+
+import_items = _{ import_item ~ (ws ~ "," ~ ws ~ import_item)* }
+
+import_item = { name ~ import_alias? }
+
+type_alias = { "type" ~ word_end ~ hws ~ name ~ hws ~ "=" ~ hws ~ annotation }
 
 statement = _{
-  !continue_keyword ~ (
+  !continue_keyword ~ !match_header ~ !case_header ~ (
     annotated
+    | augmented_assign
     | assign
     | return_stmt
     | pass_stmt
@@ -48,8 +80,17 @@ statement = _{
     | next_stmt
     | call_stmt
     | comment
+    | expr_stmt
   )
 }
+
+// Check at the header start so the diagnostic points at the soft keyword.
+match_header = { "match" ~ word_end ~ ws ~ expr ~ ws ~ ":" }
+
+case_header = { "case" ~ word_end ~ ws ~ (expr | "...") ~ ws ~ ":" }
+
+// Bare excluded statements must not fall back to name expressions.
+expr_stmt = { !(("raise" | "yield") ~ word_end ~ top_end) ~ expr }
 
 // Reject the statement spelling, not the same text in a name position.
 continue_keyword = _{ "continue" ~ word_end ~ (eol | ws ~ comment? ~ EOF) }
@@ -59,7 +100,7 @@ suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
 // `def name(params) -> type:` — annotations are mandatory, so an untyped
 // `def` fails here with the deepest span. `*args` has no rule and fails too.
 def_stmt = {
-  "def" ~ word_end ~ ws ~ name ~ "(" ~ ws ~ params? ~ ws ~ ")" ~
+  "def" ~ word_end ~ ws ~ name ~ open_paren ~ ws ~ params? ~ ws ~ ")" ~ DROP ~
   ws ~ "->" ~ ws ~ annotation ~ ws ~ ":" ~ suite
 }
 
@@ -75,7 +116,12 @@ annotated = { name ~ ws ~ ":" ~ ws ~ annotation ~ (ws ~ "=" ~ ws ~ expr)? }
 
 assign = { name ~ ws ~ "=" ~ ws ~ expr }
 
-call_stmt = { call }
+augmented_assign = { name ~ ws ~ aug_op ~ ws ~ expr }
+
+aug_op = { "+=" | "-=" | "*=" | "/=" | "%=" }
+
+// Preserve the original statement shape for a standalone named call.
+call_stmt = { call ~ &top_end }
 
 // `>` scopes the whole branch chain: `suite` alone would drop its base when
 // it returns, so `elif`/`else` in a `def` body would compare against the
@@ -106,7 +152,7 @@ raise_cause = _{ "from" ~ word_end }
 
 assert_stmt = { "assert" ~ word_end ~ ws ~ expr ~ (ws ~ "," ~ ws ~ expr)? }
 
-comment = _{ "#" ~ [^"\n"]* }
+comment = _{ "#" ~ [^"\r\n"]* }
 
 // Annotations: unions of arms; a string arm is a forward reference.
 annotation = { union }
@@ -115,11 +161,11 @@ union = { union_arm ~ (ws ~ "|" ~ ws ~ union_arm)* }
 
 union_arm = { subscript | fwd | dotted }
 
-subscript = { dotted ~ "[" ~ ws ~ type_args ~ ws ~ "]" }
+subscript = { dotted ~ joined_break ~ open_list ~ ws ~ type_args ~ (ws ~ ",")? ~ ws ~ "]" ~ DROP }
 
 type_args = { annotation ~ (ws ~ "," ~ ws ~ annotation)* }
 
-dotted = { ident ~ ("." ~ ident)* }
+dotted = { ident ~ (joined_break ~ "." ~ joined_break ~ ident)* }
 
 fwd = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
 
@@ -137,7 +183,12 @@ boolean_not = { "not" ~ word_end ~ ws ~ not_expr }
 
 comparison = { sum ~ (ws ~ cmp_op ~ ws ~ sum)* }
 
-cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+cmp_op = {
+  "==" | "!=" | "<=" | ">=" | "<" | ">"
+  | "not" ~ word_end ~ ws ~ "in" ~ word_end
+  | "in" ~ word_end
+  | "is" ~ word_end ~ (ws ~ "not" ~ word_end)?
+}
 
 sum = { term ~ (ws ~ add_op ~ ws ~ term)* }
 
@@ -145,46 +196,51 @@ add_op = { "+" | "-" }
 
 term = { unary ~ (ws ~ mul_op ~ ws ~ unary)* }
 
-mul_op = { "*" | "/" | "%" }
+mul_op = { "*" | "//" | "/" | "%" }
 
-unary = _{ minus | atom }
+unary = _{ minus | plus | atom ~ power? }
+
+plus = { "+" ~ ws ~ unary }
+
+// The right operand can itself have a power, or start with a unary sign.
+power = { ws ~ "**" ~ ws ~ unary }
 
 minus = { "-" ~ ws ~ unary }
 
 atom = _{ postfix }
 
-group = { "(" ~ ws ~ expr ~ ws ~ ")" }
+group = { open_paren ~ ws ~ expr ~ ws ~ ")" ~ DROP }
 
-attr = { name ~ ("." ~ ident)+ }
+attr = { name ~ (joined_break ~ "." ~ joined_break ~ ident)+ }
 
 // Keep the original call and name nodes for bare named calls. The head
 // then takes trailers in order, dispatched by their opening character.
-call = { (attr | name) ~ call_body }
+call = { (attr | name) ~ joined_break ~ call_body }
 
-call_body = _{ "(" ~ ws ~ (args ~ ws ~ ","? ~ ws)? ~ ")" }
+call_body = _{ open_paren ~ ws ~ (args ~ ws ~ ","? ~ ws)? ~ ")" ~ DROP }
 
-postfix = _{ postfix_head ~ postfix_trailer* }
+postfix = _{ postfix_head ~ (joined_break ~ postfix_trailer)* }
 
 postfix_head = _{ number | text | list_lit | dict_lit | boolean | none_lit | named_primary | group }
 
 // A malformed named call must not retry its arguments as a trailer.
-named_primary = _{ call | !(ident ~ ("." ~ ident)* ~ "(") ~ (attr | name) }
+named_primary = _{ call | !(ident ~ (joined_break ~ "." ~ joined_break ~ ident)* ~ joined_break ~ "(") ~ (attr | name) }
 
 postfix_trailer = _{ call_trailer | index | attr_trailer }
 
 call_trailer = { call_body }
 
-attr_trailer = { "." ~ ident }
+attr_trailer = { "." ~ joined_break ~ ident }
 
 // Parse the lower expression once, then decide between index and slice
 // at the colon. A literal negative lower bound can only be an index.
-index = { "[" ~ ws ~ (negative_index | !negative_literal ~ expr ~ (ws ~ slice)? | slice) ~ ws ~ "]" }
+index = { open_list ~ ws ~ (negative_index | !negative_literal ~ expr ~ (ws ~ slice)? | slice) ~ ws ~ "]" ~ DROP }
 
 negative_index = _{ &negative_literal ~ expr ~ &(ws ~ "]") }
 
 negative_literal = _{ negative_value ~ &(ws ~ (":" | "]")) }
 
-negative_value = _{ "-" ~ ws ~ number | "(" ~ ws ~ negative_value ~ ws ~ ")" }
+negative_value = _{ "-" ~ ws ~ number | open_paren ~ ws ~ negative_value ~ ws ~ ")" ~ DROP }
 
 slice = { ":" ~ ws ~ (!negative_literal ~ expr)? }
 
@@ -201,9 +257,9 @@ kwarg = { &kwarg_head ~ name ~ ws ~ "=" ~ ws ~ expr }
 // A list (`[1, x]`, `[]`) or dict (`{"k": v}`, `{}`) literal, with an
 // optional trailing comma. Also a postfix head, so `[1][0]`, `{"k": 1}["k"]`
 // and `"sep".join(xs)` chain like names do.
-list_lit = { "[" ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)* ~ (ws ~ ",")? ~ ws)? ~ "]" }
+list_lit = { open_list ~ ws ~ (expr ~ (ws ~ "," ~ ws ~ expr)* ~ (ws ~ ",")? ~ ws)? ~ "]" ~ DROP }
 
-dict_lit = { "{" ~ ws ~ (dict_entry ~ (ws ~ "," ~ ws ~ dict_entry)* ~ (ws ~ ",")? ~ ws)? ~ "}" }
+dict_lit = { open_dict ~ ws ~ (dict_entry ~ (ws ~ "," ~ ws ~ dict_entry)* ~ (ws ~ ",")? ~ ws)? ~ "}" ~ DROP }
 
 dict_entry = { expr ~ ws ~ ":" ~ ws ~ expr }
 
@@ -244,8 +300,8 @@ f_string = _{
   )
 }
 
-// Multi-line holes are rejected until phase 2d line joining.
-hole = { "{" ~ ws ~ expr ~ ws ~ "}" }
+// Hide any enclosing bracket marker; only brackets inside the hole join.
+hole = { "{" ~ PUSH_LITERAL("}") ~ ws ~ expr ~ ws ~ "}" ~ DROP }
 
 r_string = _{
   ("r" | "R") ~ (
