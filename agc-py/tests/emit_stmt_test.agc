@@ -1,0 +1,332 @@
+## Statement spine tests for phase 3c: every `Frontend.Stmt` shape through
+## `EmitStmt.emit_block` with threaded scopes and non-overlapping temps.
+##
+## Each test parses tiny programs (at most three lines) with a single
+## `Engine.run`, emits the statement list through the spine, asserts the
+## exact inline lines plus helpers, scope and temp supply (or the refusal
+## code and span), then appends the checkable fragments to shared
+## accumulators: one `agentica check` per test blows the runner step
+## budget, so a single final test checks every fragment together. Helpers
+## hoist to the top level, inline lines run inside their own function with
+## filtered declarations, and `main` calls each function.
+
+import EmitStmt from "../src/emit_stmt"
+import EmitCtx from "../src/emit_ctx"
+import Engine from "../../src/engine"
+import Frontend from "../src/frontend"
+import Grammar from "../../src/grammar"
+
+def stmt_ctx(source: String, scope: Map[String, String], func_ret: String, next_temp: Int) -> EmitCtx.EmitCtx
+  EmitCtx.EmitCtx(
+    source: source,
+    file: "stmt.py",
+    scope: scope,
+    func_ret: func_ret,
+    in_try: false,
+    next_temp: next_temp,
+  )
+end
+
+# Every top-level statement of a tiny program, in order.
+def stmts_of(compiled: Grammar.Grammar, source: String) -> Result[List[Frontend.Stmt]]
+  tree = try Engine.run(compiled, "program", source)
+  program = try Frontend.build(tree, source)
+  out: List[Frontend.Stmt] = []
+  for item in program.top
+    case item
+      Frontend.TopItem.StmtItem(stmt, _) -> out = out.push(stmt)
+      Frontend.TopItem.ImportItem(_) -> out = out
+    end
+  end
+
+  ok(out)
+end
+
+def assert_ok(res: EmitStmt.BlockRes) -> Result[EmitStmt.BlockOut]
+  case res
+    EmitStmt.BlockRes.Ok(done) -> ok(done)
+    EmitStmt.BlockRes.No(ref) -> error("expected ok, got #{ref.code}: #{ref.message}")
+  end
+end
+
+def assert_no(res: EmitStmt.BlockRes, code: String) -> Result[EmitCtx.Refusal]
+  case res
+    EmitStmt.BlockRes.No(ref) ->
+      try Test.eq(ref.code, code)
+      ok(ref)
+    EmitStmt.BlockRes.Ok(done) -> error("expected refusal #{code}, emitted #{done.code.join("\n")}")
+  end
+end
+
+# Appends one checkable fragment: helpers hoist to the top level, `decls`
+# that the fragment names prepend the function, `uses` append `puts` lines
+# so checked locals stay read, and the call joins `main`.
+def accumulate(
+  slug: String,
+  idx: Int,
+  done: EmitStmt.BlockOut,
+  decls: List[String],
+  uses: List[String],
+) -> Result[Void]
+  keep = filter_decls(decls, done.code + done.helpers)
+  tails = uses.map { |name| "puts(#{name})" }
+  body = (keep + done.code + tails).map { |line| "  #{line}" }.join("\n")
+  func = "def py_stmt_#{slug}#{idx}() -> Void\n#{body}\nend\n"
+  chunk = func
+  if !done.helpers.empty?
+    chunk = done.helpers.join("\n") + "\n\n" + func
+  end
+
+  blocks = try File.read_text("/tmp/3c-spine-stmt-blocks.txt")
+  try File.write_text("/tmp/3c-spine-stmt-blocks.txt", blocks + chunk + "\n")
+  calls = try File.read_text("/tmp/3c-spine-stmt-calls.txt")
+  try File.write_text("/tmp/3c-spine-stmt-calls.txt", calls + "  py_stmt_#{slug}#{idx}()\n")
+  ok()
+end
+
+def acc_ok(
+  slug: String,
+  idx: Int,
+  res: EmitStmt.BlockRes,
+  decls: List[String],
+  uses: List[String],
+) -> Result[EmitStmt.BlockOut]
+  done = try assert_ok(res)
+  try accumulate(slug, idx, done, decls, uses)
+  ok(done)
+end
+
+# Keeps only the declarations the fragment names (a checked program
+# refuses unused locals).
+def filter_decls(decls: List[String], lines: List[String]) -> List[String]
+  words = words_in(lines.join("\n"))
+  decls.select { |decl| words.include?(decl_name(decl)) }
+end
+
+def decl_name(decl: String) -> String
+  index = decl.index_of(":")
+  case index
+    some(at) -> decl.slice(0, at).strip
+    none -> decl
+  end
+end
+
+def words_in(text: String) -> List[String]
+  words: List[String] = []
+  current = ""
+  for ch in text.split("")
+    if word_char?(ch)
+      current = "#{current}#{ch}"
+    else
+      if current != ""
+        words = words.push(current)
+        current = ""
+      end
+    end
+  end
+
+  if current != ""
+    words = words.push(current)
+  end
+
+  words
+end
+
+def word_char?(ch: String) -> Bool
+  code = ch.code
+  (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 95
+end
+
+# Spells interpolation without writing it literally.
+def interp(code: String) -> String = "#" + "{" + code + "}"
+
+def quoted(inner: String) -> String = "\"" + inner + "\""
+
+def helper_defs(lines: List[String]) -> Int
+  count = 0
+  for line in lines
+    if line.start_with?("def ")
+      count += 1
+    end
+  end
+
+  count
+end
+
+def main() -> Void
+  # Agentica 0.35.0 gives discovery a separate, smaller step budget.
+  compiled: Result[Grammar.Grammar] = error("grammar is not loaded during discovery")
+  args = System.args()
+  if args != ["--agentica-test", "list"] and args != ["--agentica-test", "run"]
+    IO.warn("expected Agentica test worker args [--agentica-test, list|run], got #{args.inspect}")
+    System.exit(1)
+  end
+
+  if args == ["--agentica-test", "run"]
+    compiled = Grammar.load("agc-py/grammars/py312.grammar")
+    case reset_accumulators()
+      error(e) -> IO.warn("cannot reset fragment accumulators: #{e.message}")
+      ok(_) -> IO.puts("fragment accumulators reset")
+    end
+  end
+
+  Test.run([
+    Test.test("sequential temps never collide") do
+      source = "c: bool = True\ny: int = 1 if c else 2\nw: int = 3 if c else 4\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("temps", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), [], ["y", "w"])
+      try Test.assert(done.code.join("\n").include?("py_t0 = 2"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("py_t1 = 4"), done.code.join("\n"))
+      try Test.eq(done.next_temp, 2)
+      try Test.eq(done.scope.get("y", ""), "Int")
+      try Test.eq(done.scope.get("w", ""), "Int")
+      try Test.eq(done.helpers.size, 0)
+      ok()
+    end,
+    Test.test("two temp-producing headers stay disjoint") do
+      source = "if a < b < c:\n  pass\nif d < e < f:\n  pass\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"a": "Int", "b": "Int", "c": "Int", "d": "Int", "e": "Int", "f": "Int"}, "", 0)
+      decls = ["a: Int = 1", "b: Int = 2", "c: Int = 3", "d: Int = 1", "e: Int = 2", "f: Int = 3"]
+      done = try acc_ok("headers", 0, EmitStmt.emit_block(ctx, stmts), decls, [])
+      try Test.assert(done.code.join("\n").include?("py_t0 = b"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("py_t1 = e"), done.code.join("\n"))
+      try Test.eq(done.next_temp, 2)
+      ok()
+    end,
+    Test.test("for binds its element type") do
+      source = "for x in xs:\n  print(x)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"xs": "List[Int]"}, "", 0)
+      done = try acc_ok("for", 0, EmitStmt.emit_block(ctx, stmts), ["xs: List[Int] = [1, 2]"], [])
+      want_for = ["for x in xs", "  puts(" + quoted(interp("x")) + ")", "end"]
+      try Test.eq(done.code, want_for)
+      try Test.eq(done.scope.get("x", ""), "Int")
+      try Test.eq(done.scope.get("xs", ""), "List[Int]")
+      ok()
+    end,
+    Test.test("for over a bad iterable refuses") do
+      source = "for i in n:\n  print(i)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"n": "Int"}, "", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-OPERATOR")
+      try Test.eq(ref.start, 9)
+      ok()
+    end,
+    Test.test("if bindings do not escape") do
+      source = "if x > 0:\n  y: int = 1\n  print(y)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"x": "Int"}, "", 0)
+      done = try acc_ok("ifscope", 0, EmitStmt.emit_block(ctx, stmts), ["x: Int = 1"], [])
+      try Test.eq(done.scope.get("y", ""), "")
+      try Test.eq(done.scope.get("x", ""), "Int")
+      ok()
+    end,
+    Test.test("while re-evaluates its guard") do
+      source = "while a < b < c:\n  b = b + 1\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"a": "Int", "b": "Int", "c": "Int"}, "", 0)
+      decls = ["a: Int = 1", "b: Int = 2", "c: Int = 3"]
+      done = try acc_ok("while", 0, EmitStmt.emit_block(ctx, stmts), decls, ["b"])
+      try Test.assert(done.code.join("\n").include?("py_t0 = b"), done.code.join("\n"))
+      try Test.eq(done.next_temp, 1)
+      ok()
+    end,
+    Test.test("try hoists its helper and seeds e") do
+      source = "try:\n  print(1)\nexcept E as e:\n  print(e)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("try", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), [], [])
+      try Test.eq(helper_defs(done.helpers), 1)
+      try Test.assert(List.first(done.helpers).start_with?("def py_try_body0"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body0()"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("e: String = py_try_err0.message"), done.code.join("\n"))
+      try Test.eq(done.scope.get("e", ""), "String")
+      try Test.eq(done.next_temp, 1)
+      ok()
+    end,
+    Test.test("nested try keeps helpers separate with unique ids") do
+      source = "try:\n  try:\n    print(1)\n  except:\n    print(2)\nexcept:\n  print(3)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("nested", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 10), stmts), [], [])
+      try Test.eq(helper_defs(done.helpers), 2)
+      try Test.assert(done.helpers.join("\n").include?("def py_try_body10"), done.helpers.join("\n"))
+      try Test.assert(done.helpers.join("\n").include?("def py_try_body11"), done.helpers.join("\n"))
+      try Test.assert(done.code.join("\n").include?("case py_try_body11()"), done.code.join("\n"))
+      try Test.eq(done.next_temp, 12)
+      ok()
+    end,
+    Test.test("return inside a try body is refused before lowering") do
+      source = "try:\n  return x\nexcept:\n  print(1)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"x": "Int"}, "Int", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-TRY-CONTROL")
+      try Test.eq(ref.start, 14)
+      ok()
+    end,
+    Test.test("bare return under Int refuses") do
+      source = "return\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "Int", 0)
+      ref = try assert_no(EmitStmt.emit_block(ctx, stmts), "PY-TYPE-MISMATCH")
+      try Test.eq(ref.start, 0)
+      ok()
+    end,
+    Test.test("bare return outside a def refuses") do
+      source = "return\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "", 0)
+      res = EmitStmt.emit_block(ctx, stmts)
+      ref = try assert_no(res, "PY-OUT-OF-SUBSET")
+      try Test.eq(ref.start, 0)
+      ok()
+    end,
+    Test.test("break inside a try body is refused") do
+      source = "try:\n  break\nexcept:\n  print(1)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "", 0)
+      res = EmitStmt.emit_block(ctx, stmts)
+      ref = try assert_no(res, "PY-TRY-CONTROL")
+      try Test.assert(ref.message.include?("break"), ref.message)
+      ok()
+    end,
+    Test.test("raise emits an error return") do
+      source = "x: int = 1\nraise E(\"boom\")\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {}, "Int", 0)
+      res = EmitStmt.emit_block(ctx, stmts)
+      done = try assert_ok(res)
+      try Test.assert(done.code.join("\n").include?("return error(\"boom\")"), done.code.join("\n"))
+      try Test.eq(done.helpers.size, 0)
+      ok()
+    end,
+    Test.test("assert emits warn and exit") do
+      source = "x: int = 3\nassert x > 0\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      done = try acc_ok("assert", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), [], ["x"])
+      try Test.assert(done.code.join("\n").include?("if !(x > 0)"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("System.exit(1)"), done.code.join("\n"))
+      ok()
+    end,
+    Test.test("all fragments check clean together") do
+      blocks = try File.read_text("/tmp/3c-spine-stmt-blocks.txt")
+      calls = try File.read_text("/tmp/3c-spine-stmt-calls.txt")
+      program = "#{blocks}\ndef main() -> Void\n#{calls}end\n"
+
+      try File.write_text("/tmp/3c-spine-stmt-all.agc", program)
+      proc = try Process.spawn_captured("agentica", ["check", "/tmp/3c-spine-stmt-all.agc"])
+      result = try Process.output(proc, 30000)
+      Test.assert(
+        result.stdout.include?("check ok"),
+        "check /tmp/3c-spine-stmt-all.agc failed:\n#{result.stdout}\n#{result.stderr}\n#{program}",
+      )
+    end,
+  ])
+end
+
+# Starts the fragment accumulators empty: a fresh file per run, so a
+# previous aborted run never leaks fragments into this one.
+def reset_accumulators() -> Result[Void]
+  try File.write_text("/tmp/3c-spine-stmt-blocks.txt", "")
+  try File.write_text("/tmp/3c-spine-stmt-calls.txt", "")
+  ok()
+end
