@@ -28,7 +28,7 @@ word_end = _{ !ident_char }
 
 program = _{ skipped* ~ (top ~ skipped*)* ~ ws ~ EOF }
 
-top = _{ def_stmt ~ (eol | ws ~ EOF) | statement ~ (eol | ws ~ EOF) }
+top = _{ def_stmt ~ (eol | ws ~ comment? ~ EOF) | statement ~ (eol | ws ~ comment? ~ EOF) }
 
 statement = _{
   annotated
@@ -64,7 +64,10 @@ assign = { name ~ ws ~ "=" ~ ws ~ expr }
 
 call_stmt = { call }
 
-if_stmt = { "if" ~ ws ~ expr ~ ws ~ ":" ~ suite ~ elif_branch* ~ else_branch? }
+// `>` scopes the whole branch chain: `suite` alone would drop its base when
+// it returns, so `elif`/`else` in a `def` body would compare against the
+// wrong level. The base is the `if` line; expressions never consult it.
+if_stmt = >{ "if" ~ ws ~ expr ~ ws ~ ":" ~ suite ~ elif_branch* ~ else_branch? }
 
 elif_branch = { eol ~ SAME ~ "elif" ~ ws ~ expr ~ ws ~ ":" ~ suite }
 
@@ -74,12 +77,12 @@ while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ suite }
 
 comment = _{ "#" ~ [^"\n"]* }
 
-// Annotations: a string is a forward reference, otherwise a union of arms.
-annotation = { fwd | union }
+// Annotations: unions of arms; a string arm is a forward reference.
+annotation = { union }
 
 union = { union_arm ~ (ws ~ "|" ~ ws ~ union_arm)* }
 
-union_arm = { subscript | dotted }
+union_arm = { subscript | fwd | dotted }
 
 subscript = { dotted ~ "[" ~ ws ~ type_args ~ ws ~ "]" }
 
@@ -87,6 +90,7 @@ type_args = { annotation ~ (ws ~ "," ~ ws ~ annotation)* }
 
 dotted = { ident ~ ("." ~ ident)* }
 
+// Escape decoding arrives with phase 2b strings; for now the raw text.
 fwd = { "\"" ~ [^"\"\n"]* ~ "\"" | "'" ~ [^"'\n"]* ~ "'" }
 
 expr = _{ cond_expr }
@@ -101,7 +105,7 @@ not_expr = _{ boolean_not | comparison }
 
 boolean_not = { "not" ~ word_end ~ ws ~ not_expr }
 
-comparison = { sum ~ (ws ~ cmp_op ~ ws ~ sum)? }
+comparison = { sum ~ (ws ~ cmp_op ~ ws ~ sum)* }
 
 cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
 
@@ -121,11 +125,15 @@ atom = _{ number | text | boolean | none_lit | call | name | group }
 
 group = { "(" ~ ws ~ expr ~ ws ~ ")" }
 
-call = { name ~ "(" ~ ws ~ (args ~ ws)? ~ ")" }
+call = { name ~ "(" ~ ws ~ (args ~ ws ~ (",")? ~ ws)? ~ ")" }
 
-args = _{ arg ~ (ws ~ "," ~ ws ~ arg)* }
+// Keyword args come last: once a `kwarg` matches, only `kwarg` may follow,
+// so `f(x=1, y)` fails while `f(x == 1)` still parses as an expression.
+args = _{ kwarg ~ (ws ~ "," ~ ws ~ kwarg)* | expr ~ (ws ~ "," ~ ws ~ arg)* }
 
-arg = { name ~ ws ~ "=" ~ ws ~ expr | expr }
+arg = { kwarg | expr }
+
+kwarg = { name ~ ws ~ "=" ~ ws ~ expr }
 
 number = { ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 

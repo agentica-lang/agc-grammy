@@ -64,7 +64,8 @@ and the interpreter keep passing untouched.
 - PR 2a (functions): typed `def` with params/return, annotated assignments,
   annotation syntax (subscripts `list[int]`, `X | None`, string forward refs).
   Tests: one `.py` fixture per form, parsed to a tree with the expected nodes.
-- PR 2b (data): list/dict literals, subscripting, slicing, complete strings
+- PR 2b (data): list/dict literals, subscripting, attribute access (`a.b`,
+  needed for stdlib calls like `math.sqrt(x)`), slicing, complete strings
   (prefixes, triple-quoted, escapes decoded) and numbers (hex/oct/bin,
   underscores, exponents). Tests: fixtures + decoded values.
 - PR 2c (control): `for`, `try/except`, `with` (or rejection with a span if
@@ -91,7 +92,8 @@ so `agentica check` enforces the rest.
 - PR 3a (AST + scopes): AST nodes over `Grammy.Node` with `start`/`stop`,
   name resolution and scopes, diagnostics in the Agentica shape
   (`file:line:col error[PY-*]` + explanation + marked source line + `= help:`
-  when known). Stages run in order and each refuses before the next starts,
+  when known). Reserved words used as names are rejected here
+  (`PY-RESERVED-NAME`). Stages run in order and each refuses before the next starts,
   so a scope error never surfaces as an emit crash. Tests: scopes
   resolve/shadow/reject as specified; every catalog code fires at its span
   with the offending line printed.

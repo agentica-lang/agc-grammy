@@ -33,7 +33,7 @@ def main() -> Void
     end,
     Test.test("keyword args parse in calls") do
       tree = try parse_py("f(x=1, y=s)\n")
-      try Test.eq(Tree.find_all(tree, "arg").size, 2)
+      try Test.eq(Tree.find_all(tree, "kwarg").size, 2)
       Test.eq(Tree.text(Tree.first(tree, "call").unwrap!, "f(x=1, y=s)\n"), "f(x=1, y=s)")
     end,
     Test.test("an untyped def is rejected") do Test.error?(parse_py("def f(x):\n    return x\n")) end,
@@ -81,6 +81,91 @@ def main() -> Void
       try Test.eq(Tree.find_all(tree, "if_stmt").size, 1)
       try Test.eq(Tree.find_all(tree, "while_loop").size, 1)
       Test.eq(Tree.find_all(tree, "return_stmt").size, 1)
+    end,
+    Test.test("a chained comparison parses as one node") do
+      program = "def f(a: int, b: int, c: int) -> int:\n    if a < b < c:\n        return a\n    return b\n"
+      tree = try parse_py(program)
+      cond = Tree.first(Tree.first(tree, "if_stmt").unwrap!, "comparison").unwrap!
+
+      Test.eq(Tree.text(cond, program), "a < b < c")
+    end,
+    Test.test("unions cover forward refs on either side") do
+      input = "x: \"A\" | None\ny: int | \"Fwd\"\nz: list[\"Fwd\"]\nw: X | Y | Z\n"
+      tree = try parse_py(input)
+      try Test.eq(Tree.find_all(tree, "annotated").size, 4)
+      top = Tree.find_all(tree, "annotated").map { |node|
+        Tree.text(Tree.first_child(node, "annotation").unwrap!, input)
+      }
+
+      Test.eq(top, ["\"A\" | None", "int | \"Fwd\"", "list[\"Fwd\"]", "X | Y | Z"])
+    end,
+    Test.test("a dotted annotation parses") do
+      tree = try parse_py("x: a.b.C\n")
+      Test.eq(annotation_texts(tree, "x: a.b.C\n"), ["a.b.C"])
+    end,
+    Test.test("elif and else branches parse in a body") do
+      program = (
+        "def f(a: int) -> int:\n    if a > 0:\n        return a\n    elif a < 0:\n        return b\n    else:\n        return c\n"
+      )
+
+      tree = try parse_py(program)
+      try Test.eq(Tree.find_all(tree, "if_stmt").size, 1)
+      try Test.eq(Tree.find_all(tree, "elif_branch").size, 1)
+      try Test.eq(Tree.find_all(tree, "else_branch").size, 1)
+      Test.eq(Tree.find_all(tree, "return_stmt").size, 3)
+    end,
+    Test.test("a comparison call arg is not a kwarg") do
+      tree = try parse_py("f(x == 1)\n")
+      try Test.eq(Tree.find_all(tree, "kwarg").size, 0)
+      Test.eq(Tree.text(Tree.first(tree, "call").unwrap!, "f(x == 1)\n"), "f(x == 1)")
+    end,
+    Test.test("kwargs come last in calls") do
+      tree = try parse_py("f(x, y=1)\n")
+      try Test.eq(Tree.find_all(tree, "arg").size, 1)
+      try Test.eq(Tree.find_all(tree, "kwarg").size, 1)
+      Test.eq(Tree.text(Tree.first(tree, "call").unwrap!, "f(x, y=1)\n"), "f(x, y=1)")
+    end,
+    Test.test("a positional arg after a kwarg is rejected at the statement") do
+      case parse_py("f(x=1, y)\n")
+        error(e) ->
+          try Test.assert(e.message.include?("line 1, column 1"), e.message)
+          Test.assert(e.message.include?("def_stmt"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a nested ternary parses") do
+      program = "def f(a: int) -> int:\n    return a if c1 else b if c2 else c3\n"
+      tree = try parse_py(program)
+      try Test.eq(Tree.find_all(tree, "cond_expr").size, 3)
+      Test.eq(Tree.text(Tree.first(tree, "cond_expr").unwrap!, program), "a if c1 else b if c2 else c3")
+    end,
+    Test.test("empty calls and trailing commas parse") do
+      tree = try parse_py("f()\n")
+      try Test.eq(Tree.find_all(tree, "call").size, 1)
+      tree = try parse_py("f(a,)\n")
+      Test.eq(Tree.text(Tree.first(tree, "call").unwrap!, "f(a,)\n"), "f(a,)")
+    end,
+    Test.test("a missing trailing newline still parses") do
+      tree = try parse_py("x: int = 1")
+      try Test.eq(Tree.find_all(tree, "annotated").size, 1)
+      tree = try parse_py("def f(a: int) -> int:\n    return a")
+      Test.eq(Tree.find_all(tree, "return_stmt").size, 1)
+    end,
+    Test.test("a trailing comment may run to EOF") do
+      tree = try parse_py("x: int = 1 # c")
+      Test.eq(Tree.find_all(tree, "annotated").size, 1)
+    end,
+    Test.test("empty and whitespace-only programs are accepted") do
+      try Test.ok?(parse_py(""))
+      Test.ok?(parse_py("   \n  \n"))
+    end,
+    Test.test("star-star kwargs are rejected where the arg starts") do
+      case parse_py("f(**kw)\n")
+        error(e) ->
+          try Test.assert(e.message.include?("line 1, column 3"), e.message)
+          Test.assert(e.message.include?("kwarg"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
     end,
   ])
 end

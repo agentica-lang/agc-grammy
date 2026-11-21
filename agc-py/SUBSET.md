@@ -39,6 +39,8 @@ plain types only.
   no `del`. Module level plus one function level; with no function values
   in the subset there is nothing to close over.
 - `pass` is a no-op. `...` (Ellipsis) is excluded.
+- A keyword in name position (`if = 1`) parses as a name but is rejected at
+  scope-check (`PY-RESERVED-NAME`).
 
 ## 3. Expressions
 
@@ -147,19 +149,32 @@ plain types only.
   - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),
     `range` (-> `Range`, 3-arg form desugars), `str`/`int`/`float`/`bool`
     conversions, `sorted` (-> `List.sort`), `sum`/`min`/`max` (->
-    `List.sum`/`min`/`max`), `abs` (-> `.abs`), `round` (-> `.round`),
+    `List.sum`/`min`/`max`), `abs` (-> `.abs`), `round` (-> `.round`,
+    `Float` only — probed: `Int` has no `round`, an `int` needs no rounding),
     `chr`/`ord` (-> `String.from_code`/`.code`), `enumerate` (desugars to an
     index counter), `reversed` (-> `List.reverse`), `all`/`any` (->
     `List.all?`/`any?`), `map`/`filter` over named functions (->
     `List.map`/`select`).
   - `math`: `sqrt` (-> `Math.sqrt`), `floor`/`ceil` (-> the `Float` methods
-    `x.floor()`/`x.ceil()`), `pi`/`e`/`tau`/`inf` (constants).
+    `x.floor()`/`x.ceil()`). The backend has no `Math.pi`/`tau` constants
+    (probed: `CHECK-UNKNOWN-NAME`), so `math.pi`/`math.e`/`math.tau` lower to
+    the `Float` literals `3.141592653589793`/`2.718281828459045`/
+    `6.283185307179586`; `math.inf` has no spelling and is excluded
+    (`PY-OUT-OF-SUBSET`).
   - `sys`: `argv` (-> `System.args()`), `exit` (-> `System.exit`), stdio via
     `IO` (`stdin` -> `IO.gets`, `stderr` via `IO.warn`).
-  - `os`: `environ` (-> `System.env`), `getcwd`, file read/write (-> the
-    `File` builtins); the rest is `PY-IMPORT-UNKNOWN`.
+  - `os`: `environ[name]` key lookup only (-> `System.env(name)`, which
+    returns a catchable `Result`; `os.getenv(name)` lowers the same way).
+    Iteration, `len` and `in` over `environ` are unmapped
+    (`PY-OUT-OF-SUBSET`), `os.getcwd()` (-> `Path.cwd()`),
+    `open(path)` read-only (-> `File.read_text`), `open(p, "w")` (->
+    `File.write_text`), `open(p, "a")` (-> `File.append_text`, each a
+    catchable `Result`); other modes are `PY-OUT-OF-SUBSET`. The rest of `os`
+    is `PY-IMPORT-UNKNOWN`.
   - `json` (-> `JSON.parse`/`JSON.encode`), `re` (-> `std/regex`, RE2 subset),
-    `toml` (-> `std/toml`), `datetime` (-> `std/utc`), `urllib.parse` (->
+    `toml` (-> `std/toml`), `datetime` (-> `std/utc`, partial:
+    instants/formatting only, no arithmetic/`timedelta`/`strptime`),
+    `urllib.parse` (->
     `std/uri`), `http.client` (-> `std/http`), `html` escaping (-> `std/html`),
     `mimetypes` (-> `std/mime`), `cookies` (-> `std/cookie`), `argparse` (->
     `std/option_parser`), `logging` (-> `std/logger`), `time` (-> `Time`),
@@ -172,6 +187,11 @@ plain types only.
     `decimal`, `statistics` (beyond `List` helpers), `itertools`,
     `functools`, `collections`, `dataclasses`, `unittest`, `pdb`.
   Anything else from the stdlib is `PY-IMPORT-UNKNOWN`.
+
+Backend mismatches to remember (phase 4 lowers exactly this): `List.min`/
+`max` return `Optional` (Python raises on `[]`); `List.sort` is `Int`/`Float`/
+`String` only; `"sep".join(xs)` flips to `xs.join(sep)`; bare `sys.exit()`
+needs an explicit code (`System.exit` takes one argument, probed).
 
 ## 6. Truthiness
 
@@ -248,6 +268,7 @@ inside an annotation is `PY-ANNOTATION-UNKNOWN`, not `PY-NAME-UNKNOWN`.
 | `PY-IMPORT-CYCLE` | circular import | both import spans |
 | `PY-IMPORT-UNKNOWN` | unknown module or stdlib member | the import |
 | `PY-NAME-UNKNOWN` | unknown name | the name |
+| `PY-RESERVED-NAME` | keyword used as a name | the name |
 | `PY-OUT-OF-SUBSET` | anything else from §9 (the list is complete), naming it | the construct |
 | `PY-OPERATOR` | operand combination the backend has no operator for | the operator |
 | `PY-TRY-CONTROL` | `return`/`break`/`next` inside a `try` body | the statement |
