@@ -44,9 +44,9 @@ statement = _{
     | try_stmt
     | raise_stmt
     | assert_stmt
-    | call_stmt
     | break_stmt
     | next_stmt
+    | call_stmt
     | comment
   )
 }

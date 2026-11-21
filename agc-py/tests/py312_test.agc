@@ -343,6 +343,20 @@ def main() -> Void
       try Test.eq(Tree.find_all(tree, "call").size, 1)
       Test.eq(node_texts(tree, "name", program), ["E", "E"])
     end,
+    Test.test("break and next cannot be call statements") do
+      try Test.error?(parse_py(compiled, "break(1)"))
+      Test.error?(parse_py(compiled, "next(it)"))
+    end,
+    Test.test("for rejects unpacking and attribute targets") do
+      try assert_parse_error_at(compiled, "for a, b in xs:\n    pass\n", "line 1, column 1")
+      assert_parse_error_at(compiled, "for x.y in xs:\n    pass\n", "line 1, column 1")
+    end,
+    Test.test("with is rejected") do
+      assert_parse_error_at(compiled, "with open(p):\n    pass\n", "line 1, column 1")
+    end,
+    Test.test("try without a handler is rejected at EOF") do
+      assert_parse_error_at(compiled, "try:\n    pass\n", "line 3, column 1")
+    end,
     Test.test("loop else is rejected") do
       assert_parse_error_at(compiled, "for x in xs:\n    pass\nelse:\n    pass\n", "line 3, column 6")
     end,
