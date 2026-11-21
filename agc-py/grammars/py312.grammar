@@ -144,7 +144,7 @@ postfix_trailer = _{ call_trailer | index | attr_trailer }
 
 call_trailer = { call_body }
 
-attr_trailer = { "." ~ name }
+attr_trailer = { "." ~ ident }
 
 // Parse the lower expression once, then decide between index and slice
 // at the colon. A literal negative lower bound can only be an index.
@@ -182,7 +182,7 @@ dict_entry = { expr ~ ws ~ ":" ~ ws ~ expr }
 // precedes the plain decimal run, so `0xFF` never lexes as `0` plus a name.
 number = { hex_num | oct_num | bin_num | float_num | decimal_int }
 
-decimal_int = _{ "0" ~ ("_"? ~ "0")* | [1-9] ~ ("_"? ~ ASCII_DIGIT)* }
+decimal_int = _{ "0" ~ ("_" ~ "0")* | [1-9] ~ ("_"? ~ ASCII_DIGIT)* }
 
 hex_num = _{ "0" ~ ("x" | "X") ~ "_"? ~ ASCII_HEX_DIGIT ~ (("_")? ~ ASCII_HEX_DIGIT)* }
 
@@ -191,9 +191,9 @@ oct_num = _{ "0" ~ ("o" | "O") ~ "_"? ~ ASCII_OCT_DIGIT ~ (("_")? ~ ASCII_OCT_DI
 bin_num = _{ "0" ~ ("b" | "B") ~ "_"? ~ ASCII_BIN_DIGIT ~ (("_")? ~ ASCII_BIN_DIGIT)* }
 
 float_num = _{
-  ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)* ~ "." ~ (ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)? ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)?
+  decimal_int ~ "." ~ (ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)? ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)?
   | "." ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)* ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*)?
-  | ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)* ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*
+  | decimal_int ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT ~ (("_")? ~ ASCII_DIGIT)*
 }
 
 // Strings: plain, raw (`r` keeps backslashes literal; a trailing lone `\`
@@ -214,6 +214,7 @@ f_string = _{
   )
 }
 
+// Multi-line holes are rejected until phase 2d line joining.
 hole = { "{" ~ ws ~ expr ~ ws ~ "}" }
 
 r_string = _{

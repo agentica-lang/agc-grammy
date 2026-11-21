@@ -228,6 +228,7 @@ is rebinding:
   `\n \r \t \' \"`) and re-encodes minimally; `\N{...}` is excluded (no
   Unicode tables in the frontend). `r"..."` disables escapes; `f"..."`
   interpolates subset expressions with `{{`/`}}` for literal braces.
+  Combined prefixes (including mixed-case forms) and the `u`/`U` prefix are excluded.
   Triple-quoted strings are plain strings, not heredocs.
 
 ## 9. Excluded, each a frontend error with its own code

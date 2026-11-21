@@ -20,7 +20,13 @@ def main() -> Void
   # Agentica 0.35.0 gives discovery a separate, smaller step budget.
   # Compile only in the run worker and share its result across the fixtures.
   compiled: Result[Grammar.Grammar] = error("grammar is not loaded during discovery")
-  if System.args() == ["--agentica-test", "run"]
+  args = System.args()
+  if args != ["--agentica-test", "list"] and args != ["--agentica-test", "run"]
+    IO.warn("expected Agentica test worker args [--agentica-test, list|run], got #{args.inspect}")
+    System.exit(1)
+  end
+
+  if args == ["--agentica-test", "run"]
     compiled = Grammar.load("agc-py/grammars/py312.grammar")
   end
 
@@ -205,6 +211,7 @@ def main() -> Void
       try Test.eq(node_texts(tree, "call", program), ["f(a)", "math.sqrt(x)"])
       try Test.eq(node_texts(tree, "attr", program), ["a.b.c", "math.sqrt"])
       try Test.eq(node_texts(tree, "attr_trailer", program), [".y"])
+      try Test.eq(Tree.first(tree, "attr_trailer").unwrap!.children.size, 0)
       Test.eq(node_texts(tree, "index", program), ["[0]", "[1]", "[2]", "[\"key\"]", "[-1]"])
     end,
     Test.test("nested indexes do not retry the lower expression as a slice") do
@@ -227,7 +234,7 @@ def main() -> Void
     end,
     Test.test("plain, raw and escaped strings parse") do
       program = (
-        "x: str = \"a\\n\\t\\\\\\\"\\'\\0\\a\\b\\f\\v\\x41\\u0041\"\n" +
+        "x: str = \"a\\n\\r\\t\\\\\\\"\\'\\0\\a\\b\\f\\v\\x41\\u0041\"\n" +
         "y: str = 'sq'\n" +
         "r: str = r\"a\\nb\"\n" +
         "s: str = r'c\\td'\n"
@@ -235,7 +242,7 @@ def main() -> Void
 
       tree = try parse_py(compiled, program)
       texts = node_texts(tree, "text", program)
-      Test.eq(texts, ["\"a\\n\\t\\\\\\\"\\'\\0\\a\\b\\f\\v\\x41\\u0041\"", "'sq'", "r\"a\\nb\"", "r'c\\td'"])
+      Test.eq(texts, ["\"a\\n\\r\\t\\\\\\\"\\'\\0\\a\\b\\f\\v\\x41\\u0041\"", "'sq'", "r\"a\\nb\"", "r'c\\td'"])
     end,
     Test.test("f-strings interpolate holes and triple-quoted forms span lines") do
       program = "x: str = f\"hi {name}!\"\ny: str = f\"{{x}}\"\nz: str = \"\"\"a\nb\"\"\"\nw: str = '''q'''\n"
@@ -247,7 +254,17 @@ def main() -> Void
     end,
     Test.test("rejected string forms fail to parse") do
       try Test.error?(parse_py(compiled, "x: str = \"a\\N{BULLET}b\"\n"))
-      Test.error?(parse_py(compiled, "x: str = b\"hi\"\n"))
+      try Test.error?(parse_py(compiled, "x: str = b\"hi\"\n"))
+      try Test.error?(parse_py(compiled, "x: str = \"\\U0001F600\"\n"))
+      try Test.error?(parse_py(compiled, "x: str = \"a\\x4g\"\n"))
+      try Test.error?(parse_py(compiled, "x: str = \"a\\u123\"\n"))
+      Test.error?(parse_py(compiled, "x: str = \"a\\"))
+    end,
+    Test.test("combined and unicode string prefixes are outside the subset") do
+      try Test.error?(parse_py(compiled, "x = rf\"hi\""))
+      try Test.error?(parse_py(compiled, "x = fr\"hi\""))
+      try Test.error?(parse_py(compiled, "x = rF\"hi\""))
+      Test.error?(parse_py(compiled, "x = u\"hi\""))
     end,
     Test.test("numbers cover bases, underscores, exponents and dot forms") do
       program = (
@@ -268,10 +285,13 @@ def main() -> Void
       Test.eq(numbers, ["0xFF", "0o17", "0b101", "1_000", "1e10", "1.5e-3", "1.", ".5", "0xF_F", "1E+10"])
     end,
     Test.test("numeric separators and leading zeroes follow the literal form") do
-      program = "a = 0x_FF\nb = 00_0\nc = 01.0\n"
+      program = "a = 0x_FF\nb = 0_0\nc = 0.5\nd = 0e2\n"
       tree = try parse_py(compiled, program)
-      try Test.eq(node_texts(tree, "number", program), ["0x_FF", "00_0", "01.0"])
+      try Test.eq(node_texts(tree, "number", program), ["0x_FF", "0_0", "0.5", "0e2"])
       try Test.error?(parse_py(compiled, "x = 01"))
+      try Test.error?(parse_py(compiled, "x = 00_0"))
+      try Test.error?(parse_py(compiled, "x = 01.0"))
+      try Test.error?(parse_py(compiled, "x = 01e2"))
       try Test.error?(parse_py(compiled, "x = 1__0"))
       Test.error?(parse_py(compiled, "x = 0b2"))
     end,
