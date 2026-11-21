@@ -42,6 +42,12 @@ struct Refusal
   stop: Int
 end
 
+struct ErrorParts
+  code: String
+  message: String
+  help: Optional[String]
+end
+
 ## An emitter answer: emitted lines or a spanned refusal.
 enum StmtRes
   Ok(StmtOut)
@@ -98,4 +104,178 @@ end
 
 def take_temp(ctx: EmitCtx) -> TempTake
   TempTake(name: "py_t#{ctx.next_temp}", ctx: ctx.with(next_temp: ctx.next_temp + 1))
+end
+
+# Renames every `py_tN` temp in `text` to `py_t{base+N}`. The identity when
+# the supply is fresh. String-aware: occurrences inside `"..."` literals
+# pass through untouched (interpolated code is scanned, literal text with
+# a `\` escape is skipped as a pair). Mirrors the lane B helpers; unify
+# on a rainy day.
+def shift_code(text: String, base: Int) -> String
+  return text if base == 0
+
+  out = ""
+  chars = text.split("")
+  i = 0
+  in_string = false
+  while i < chars.size
+    ch = chars[i]
+    if in_string
+      if ch == "\\" and i + 1 < chars.size
+        out = "#{out}#{ch}#{chars[i + 1]}"
+        i += 2
+      else
+        if ch == "\""
+          in_string = false
+        end
+
+        out = "#{out}#{ch}"
+        i += 1
+      end
+    else
+      if ch == "\""
+        in_string = true
+        out = "#{out}#{ch}"
+        i += 1
+      else
+        if shift_temp_at?(chars, i)
+          num = shift_temp_num(chars, i + 4)
+          out = "#{out}py_t#{base + num}"
+          i = shift_temp_end(chars, i + 4)
+        else
+          out = "#{out}#{chars[i]}"
+          i += 1
+        end
+      end
+    end
+  end
+
+  out
+end
+
+# The highest `py_tN` index in `texts`, or -1 when there is none.
+# String-aware like `shift_code`.
+def max_temp_index(texts: List[String]) -> Int
+  found = -1
+  for text in texts
+    chars = text.split("")
+    i = 0
+    in_string = false
+    while i < chars.size
+      ch = chars[i]
+      if in_string
+        if ch == "\\" and i + 1 < chars.size
+          i += 2
+        else
+          if ch == "\""
+            in_string = false
+          end
+
+          i += 1
+        end
+      else
+        if ch == "\""
+          in_string = true
+          i += 1
+        else
+          if shift_temp_at?(chars, i)
+            num = shift_temp_num(chars, i + 4)
+            if num > found
+              found = num
+            end
+
+            i = shift_temp_end(chars, i + 4)
+          else
+            i += 1
+          end
+        end
+      end
+    end
+  end
+
+  found
+end
+
+# Advances `base` past the highest temp in `texts`.
+def advance_temp(base: Int, texts: List[String]) -> Int
+  top = max_temp_index(texts)
+  return base if top < 0
+
+  base + top + 1
+end
+
+# Whether a `py_tN` temp starts at `chars[i]`: the `py_t` letters plus at
+# least one digit.
+def shift_temp_at?(chars: List[String], i: Int) -> Bool
+  return false if i + 4 >= chars.size
+
+  return false if chars[i] != "p"
+
+  return false if chars[i + 1] != "y"
+
+  return false if chars[i + 2] != "_"
+
+  return false if chars[i + 3] != "t"
+
+  shift_digit?(chars[i + 4])
+end
+
+def shift_digit?(ch: String) -> Bool
+  code = ch.code
+  code >= 48 and code <= 57
+end
+
+def shift_temp_num(chars: List[String], from: Int) -> Int
+  num = 0
+  j = from
+  while j < chars.size
+    break if !shift_digit?(chars[j])
+
+    num = num * 10 + (chars[j].code - 48)
+    j += 1
+  end
+
+  num
+end
+
+def shift_temp_end(chars: List[String], from: Int) -> Int
+  j = from
+  while j < chars.size
+    break if !shift_digit?(chars[j])
+
+    j += 1
+  end
+
+  j
+end
+
+# Splits an emitter `PY-*` failure into a spanned refusal; anything without
+# a `PY-*` code refuses as `PY-OUT-OF-SUBSET`.
+def refusal_from_error(start: Int, stop: Int, err: Error) -> StmtRes
+  parts = split_error_parts(err.message)
+  StmtRes.No(Refusal(code: parts.code, message: parts.message, help: parts.help, start: start, stop: stop))
+end
+
+def split_error_parts(msg: String) -> ErrorParts
+  colon = msg.index_of(":")
+  case colon
+    none -> ErrorParts(code: "PY-OUT-OF-SUBSET", message: msg, help: none)
+    some(at) ->
+      code = msg.slice(0, at).strip
+      rest = msg.slice(at + 1, msg.length - at - 1).strip
+      if code.start_with?("PY-")
+        marker = rest.index_of("= help:")
+        case marker
+          none -> ErrorParts(code: code, message: rest, help: none)
+          some(found) ->
+            ErrorParts(
+              code: code,
+              message: rest.slice(0, found).strip,
+              help: some(rest.slice(found + 7, rest.length - found - 7).strip),
+            )
+        end
+      else
+        ErrorParts(code: "PY-OUT-OF-SUBSET", message: msg, help: none)
+      end
+  end
 end

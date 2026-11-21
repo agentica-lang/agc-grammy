@@ -154,6 +154,52 @@ def emit_assert(
   end
 end
 
+## Call-shape navigation shared with the coordinator spine, which finds
+## the message argument to pre-emit it: the `call` or `name` head under
+## single-child wrappers, the single-positional-arg check, and the
+## keyword-argument check.
+## Descends single-child expression wrappers to the `call` or `name` head.
+def raise_target(node: Tree.Node) -> Tree.Node
+  cur = node
+  while chain_rule?(cur.rule) and cur.children.size == 1
+    cur = List.first(cur.children)
+  end
+
+  cur
+end
+
+## The silent expression spine between a statement and its value.
+def chain_rule?(rule: String) -> Bool
+  (
+    rule == "cond_expr" or
+    rule == "or_expr" or
+    rule == "and_expr" or
+    rule == "comparison" or
+    rule == "sum" or
+    rule == "term" or
+    rule == "minus" or
+    rule == "plus" or
+    rule == "power" or
+    rule == "group"
+  )
+end
+
+## Exactly one positional argument and no keyword ones.
+def single_message_arg?(node: Tree.Node) -> Bool
+  args = node.children.drop(1)
+  return false if args.size != 1
+
+  !is_kwarg?(List.first(args))
+end
+
+## Whether `node` is a keyword argument (bare or `arg`-wrapped).
+def is_kwarg?(node: Tree.Node) -> Bool
+  return true if node.rule == "kwarg"
+
+  node.rule == "arg" and !node.children.empty? and List.last(node.children).rule == "kwarg"
+end
+
+
 private
 
 # Builds the outlined-helper plus dispatch lines for a control-clean body.
@@ -306,10 +352,10 @@ end
 # the caller's control flow either.
 def control_in(stmt: Frontend.Stmt, fallback: Frontend.Span, source: String) -> Optional[Frontend.Span]
   case stmt
-    Frontend.Stmt.ReturnStmt(value) ->
+    Frontend.Stmt.ReturnStmt(value, span) ->
       case value
         some(node) -> some(Frontend.Span(start: node.start, stop: node.stop))
-        none -> some(fallback)
+        none -> some(span)
       end
 
     Frontend.Stmt.Other(span) ->
@@ -345,17 +391,17 @@ end
 # The first span a statement offers for diagnostics.
 def stmt_span(stmt: Frontend.Stmt) -> Optional[Frontend.Span]
   case stmt
-    Frontend.Stmt.ReturnStmt(value) ->
+    Frontend.Stmt.ReturnStmt(value, span) ->
       case value
         some(node) -> some(Frontend.Span(start: node.start, stop: node.stop))
-        none -> none
+        none -> some(span)
       end
 
     Frontend.Stmt.Other(span) -> some(span)
     Frontend.Stmt.Annotated(occ, _, _) -> some(occ.span)
     Frontend.Stmt.AliasDef(occ, _) -> some(occ.span)
     Frontend.Stmt.Assigned(occ, _) -> some(occ.span)
-    Frontend.Stmt.AugAssigned(occ, _) -> some(occ.span)
+    Frontend.Stmt.AugAssigned(occ, _, _) -> some(occ.span)
     Frontend.Stmt.ForLoop(occ, _, _) -> some(occ.span)
     Frontend.Stmt.WhileStmt(cond, _) -> some(Frontend.Span(start: cond.start, stop: cond.stop))
     Frontend.Stmt.IfStmt(arms, else_body) -> arm_span(arms, else_body)
@@ -400,46 +446,6 @@ def raise_message(target: Tree.Node) -> String
   else
     "raise takes exactly one message argument"
   end
-end
-
-# Descends single-child expression wrappers to the `call` or `name` head.
-def raise_target(node: Tree.Node) -> Tree.Node
-  cur = node
-  while chain_rule?(cur.rule) and cur.children.size == 1
-    cur = List.first(cur.children)
-  end
-
-  cur
-end
-
-# The silent expression spine between a statement and its value.
-def chain_rule?(rule: String) -> Bool
-  (
-    rule == "cond_expr" or
-    rule == "or_expr" or
-    rule == "and_expr" or
-    rule == "comparison" or
-    rule == "sum" or
-    rule == "term" or
-    rule == "minus" or
-    rule == "plus" or
-    rule == "power" or
-    rule == "group"
-  )
-end
-
-# Exactly one positional argument and no keyword ones.
-def single_message_arg?(node: Tree.Node) -> Bool
-  args = node.children.drop(1)
-  return false if args.size != 1
-
-  !is_kwarg?(List.first(args))
-end
-
-def is_kwarg?(node: Tree.Node) -> Bool
-  return true if node.rule == "kwarg"
-
-  node.rule == "arg" and !node.children.empty? and List.last(node.children).rule == "kwarg"
 end
 
 # Builds the `if !cond / warn / exit` lines for a checked condition.

@@ -201,6 +201,22 @@ def emit_next(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
   EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["next"], scope: ctx.scope, next_temp: ctx.next_temp))
 end
 
+## The element type a `for` binds, or none when the iterable has no loop
+## form. Shared with the coordinator spine, which seeds the body scope
+## before handing the pre-emitted body over. `Unknown` stays verbal.
+def elem_type(found: String) -> Optional[String]
+  return some("Unknown") if found == "Unknown"
+
+  base = base_of(found)
+  return some(inner_of(found)) if base == "List"
+
+  return some("Int") if base == "Range"
+
+  return some("String") if base == "String"
+
+  none
+end
+
 private
 
 # One emitted condition: the shifted code, its shifted preamble lines, and
@@ -255,22 +271,6 @@ def refusal_from_emit(message: String, node: Tree.Node) -> EmitCtx.StmtRes
   end
 
   EmitCtx.StmtRes.No(EmitCtx.Refusal(code: code, message: text, help: help, start: node.start, stop: node.stop))
-end
-
-# The element type a `for` binds, or none when the iterable has no loop
-# form. `Unknown` stays verbal for phase 4, like dotted module paths do in
-# phase 3b.
-def elem_type(found: String) -> Optional[String]
-  return some("Unknown") if found == "Unknown"
-
-  base = base_of(found)
-  return some(inner_of(found)) if base == "List"
-
-  return some("Int") if base == "Range"
-
-  return some("String") if base == "String"
-
-  none
 end
 
 # The head of a type name: `List` for `List[Int]`, the name itself when bare.

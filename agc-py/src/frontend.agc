@@ -85,12 +85,12 @@ enum Stmt
   Annotated(NameOcc, Ann, Optional[Tree.Node])
   AliasDef(NameOcc, Ann)
   Assigned(NameOcc, Tree.Node)
-  AugAssigned(NameOcc, Tree.Node)
+  AugAssigned(NameOcc, String, Tree.Node)
   ForLoop(NameOcc, Tree.Node, List[Stmt])
   IfStmt(List[CondArm], List[Stmt])
   WhileStmt(Tree.Node, List[Stmt])
   TryStmt(List[Stmt], List[Stmt], Optional[NameOcc])
-  ReturnStmt(Optional[Tree.Node])
+  ReturnStmt(Optional[Tree.Node], Span)
   ExprStmt(Tree.Node)
   AssertStmt(Tree.Node, Optional[Tree.Node])
   RaiseStmt(Tree.Node)
@@ -727,7 +727,15 @@ def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
       ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
     "assign" -> ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
     "augmented_assign" ->
-      ok(some(Stmt.AugAssigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
+      ok(
+        some(
+          Stmt.AugAssigned(
+            try binding_occ(node, source, "assign"),
+            try aug_op_text(node, source),
+            try expr_child(node, "assign"),
+          ),
+        ),
+      )
     "for_loop" ->
       ok(
         some(
@@ -747,7 +755,7 @@ def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
       ok(some(Stmt.IfStmt(arms, try build_else(node, source))))
     "while_loop" -> ok(some(Stmt.WhileStmt(try expr_child(node, "while"), try build_body(node.children, source))))
     "try_stmt" -> build_try(node, source)
-    "return_stmt" -> ok(some(Stmt.ReturnStmt(Tree.first_child(node, "cond_expr"))))
+    "return_stmt" -> ok(some(Stmt.ReturnStmt(Tree.first_child(node, "cond_expr"), span_of(node))))
     "pass_stmt" -> ok(some(Stmt.Other(span_of(node))))
     "break_stmt" -> ok(some(Stmt.Other(span_of(node))))
     "next_stmt" -> ok(some(Stmt.Other(span_of(node))))
@@ -769,7 +777,12 @@ def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
   end
 end
 
-# The first direct `cond_expr` child: the value of an assignment, the
+# The `+=`-style operator spelling of an augmented assignment.
+def aug_op_text(node: Tree.Node, source: String) -> Result[String]
+  op = try Tree.first_child(node, "aug_op").to_result("agc-py: augmented assignment without an operator")
+  ok(Tree.text(op, source))
+end
+
 # condition of an `if`/`while`, the iterable of a `for`, the message of a
 # `raise`. `expr` itself is silent, so the child is the `cond_expr` node an
 # emitter takes.

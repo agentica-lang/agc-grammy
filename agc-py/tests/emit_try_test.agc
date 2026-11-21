@@ -238,14 +238,14 @@ def main() -> Void
     end,
     Test.test("return with a value in a try body is refused") do
       source = "  return x"
-      body = [Stmt.ReturnStmt(some(tnode("cond_expr", 9, 10, [])))]
+      body = [Stmt.ReturnStmt(some(tnode("cond_expr", 9, 10, [])), Frontend.Span(start: 2, stop: 10))]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["puts(1)"], ["puts(2)"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 9, 10)
       ok()
     end,
     Test.test("a bare return reports at the body start") do
       source = "pass"
-      body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.ReturnStmt(none)]
+      body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.ReturnStmt(none, Frontend.Span(start: 0, stop: 4))]
       res = EmitTry.emit_try(ctx_for(source, "Void", 0), body, ["nil"], ["nil"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 0, 4)
       ok()
@@ -271,7 +271,7 @@ def main() -> Void
       source = "if c:\n  return x"
       arm = Frontend.CondArm(
         cond: tnode("cond_expr", 3, 4, []),
-        body: [Stmt.ReturnStmt(some(tnode("cond_expr", 15, 16, [])))],
+        body: [Stmt.ReturnStmt(some(tnode("cond_expr", 15, 16, [])), Frontend.Span(start: 8, stop: 16))],
       )
 
       body = [Stmt.IfStmt([arm], [])]
@@ -282,7 +282,7 @@ def main() -> Void
     Test.test("return inside a nested handler is refused") do
       source = "pass                x"
       inner_try = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
-      handler = [Stmt.ReturnStmt(some(tnode("cond_expr", 20, 21, [])))]
+      handler = [Stmt.ReturnStmt(some(tnode("cond_expr", 20, 21, [])), Frontend.Span(start: 14, stop: 21))]
       body = [Stmt.TryStmt(inner_try, handler, none)]
       res = EmitTry.emit_try(ctx_for(source, "Int", 40), body, ["nil"], ["puts(\"caught\")", "return"], none)
       try assert_no(res, source, "PY-TRY-CONTROL", 20, 21)
@@ -290,7 +290,7 @@ def main() -> Void
     end,
     Test.test("return inside a nested try body is refused") do
       source = "pass  x"
-      inner_try = [Stmt.ReturnStmt(some(tnode("cond_expr", 6, 7, [])))]
+      inner_try = [Stmt.ReturnStmt(some(tnode("cond_expr", 6, 7, [])), Frontend.Span(start: 0, stop: 7))]
       handler = [Stmt.Other(Frontend.Span(start: 0, stop: 4))]
       body = [Stmt.TryStmt(inner_try, handler, none)]
       res = EmitTry.emit_try(ctx_for(source, "Int", 0), body, ["nil"], ["nil"], none)
@@ -308,7 +308,7 @@ def main() -> Void
     end,
     Test.test("a bare return nested in an if reports at the body start") do
       source = "pass"
-      arm = Frontend.CondArm(cond: tnode("cond_expr", 5, 6, []), body: [Stmt.ReturnStmt(none)])
+      arm = Frontend.CondArm(cond: tnode("cond_expr", 5, 6, []), body: [Stmt.ReturnStmt(none, Frontend.Span(start: 0, stop: 4))])
 
       body = [Stmt.Other(Frontend.Span(start: 0, stop: 4)), Stmt.IfStmt([arm], [])]
       res = EmitTry.emit_try(ctx_for(source, "Void", 0), body, ["nil"], ["nil"], none)
