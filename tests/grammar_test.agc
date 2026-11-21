@@ -58,6 +58,18 @@ def main() -> Void
       try Test.eq(grammar.rules.size, 2)
       Test.eq(grammar.rules[1].body, Expr.Seq([Expr.RuleRef("a"), Expr.Literal("y")]))
     end,
+    Test.test("modifiers combine") do
+      grammar = try Grammar.compile("a = >_{ \"x\" }")
+      rule = grammar.rules[0]
+      try Test.eq(rule.indents, true)
+      Test.eq(rule.silent, true)
+    end,
+    Test.test("an unsupported modifier fails") do
+      case Grammar.compile("a = @{ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("not supported yet"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a rule declared twice fails") do
       case Grammar.compile("a = { \"x\" }\na = { \"y\" }")
         error(e) -> Test.assert(e.message.include?("declared twice"), e.message)
@@ -73,6 +85,49 @@ def main() -> Void
     Test.test("an unterminated string fails") do
       case Grammar.compile("a = { \"x }")
         error(e) -> Test.assert(e.message.include?("unterminated string"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("left recursion fails") do
+      case Grammar.compile("a = { a ~ \"x\" }")
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("indirect left recursion fails") do
+      case Grammar.compile("a = { b }\nb = { a }")
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("left recursion hides behind a nullable rule") do
+      case Grammar.compile("a = { ws ~ a }\nws = _{ \" \"* }")
+        error(e) -> Test.assert(e.message.include?("left recursive"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("right recursion is fine") do Test.ok?(Grammar.compile("item = { \"x\" ~ item? }")) end,
+    Test.test("repeating an expression that cannot fail fails") do
+      case Grammar.compile("a = { (\"\")* }")
+        error(e) -> Test.assert(e.message.include?("cannot fail"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("repeating a lookahead fails") do
+      case Grammar.compile("a = { (&\"x\")* }")
+        error(e) -> Test.assert(e.message.include?("never consumes input"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a reserved rule name fails") do
+      case Grammar.compile("ANY = { \"x\" }")
+        error(e) -> Test.assert(e.message.include?("reserved rule name"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a choice arm that cannot fail fails") do
+      case Grammar.compile("a = { \"\" | \"x\" }")
+        error(e) -> Test.assert(e.message.include?("arms after it are unreachable"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

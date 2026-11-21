@@ -35,7 +35,8 @@ worth having, **no** = deliberately out of scope.
 | bounds `{n}`, `{n,}`, `{,n}`, `{n,m}` | yes | missing | now |
 | `&`, `!` lookahead | yes | yes | — |
 | grouping `( )` | yes | yes | — |
-| left recursion | static error | hangs | now (validator) |
+| left recursion | static error | static error | done |
+| indentation blocks | none (users pre-process or use the stack) | `>` scope with `INDENT`/`SAME` (extension) | done |
 | `//` line and `/* */` nested comments | yes | only `#` | now (`#` stays) |
 | doc comments `///`, `//!` | yes | missing | later |
 | escapes `\" \\ \n \r \t` | yes | yes | — |
@@ -64,11 +65,11 @@ as aliases so existing grammars keep working.
 |---|---|---|---|
 | duplicate rule names | yes | yes | — |
 | unknown rule references | yes | yes | — |
-| pest keyword used as a rule name | yes | missing | now |
-| left recursion | yes, reported at compile time | missing (infinite loop) | now |
-| expression that cannot fail inside a repetition (`("")*`) | yes | missing (we stop on no progress, silently) | now |
-| non-progressing expression inside a repetition (`&""*`) | yes | missing | later |
-| unreachable choice arm (a non-failing arm before others) | yes | missing | later |
+| pest keyword used as a rule name | yes | yes | done |
+| left recursion | yes, reported at compile time | yes | done |
+| expression that cannot fail inside a repetition (`("")*`) | yes | yes | done |
+| non-progressing expression inside a repetition (`&""*`) | yes | yes | done |
+| unreachable choice arm (a non-failing arm before others) | yes | yes | done |
 | `WHITESPACE`/`COMMENT` must fail and progress | yes | n/a | later (with implicit skipping) |
 | tags on silent rules | yes | n/a | later |
 | stack-only loops | yes | n/a | later |
@@ -87,9 +88,10 @@ author almost always wrote something else.
 | named rules build nodes, silent rules do not | yes | yes |
 | the start rule must consume the whole input (`EOI`) | yes | yes |
 | `WHITESPACE`/`COMMENT` run between tokens | yes | no |
+| indentation-aware matching (`INDENT`, `SAME`) | no | yes (extension) |
 | atomic rules stop whitespace skipping and child nodes | yes | no |
 | stack mutation with rollback on a failed alternative | yes | no |
-| furthest failure with positives/negatives | yes | no (reports the start position) |
+| furthest failure with positives/negatives | yes | yes (deepest attempt, labels, line/column) |
 | custom errors, `renamed_rules` | yes | no |
 | call limit, error detail knob | yes | no (the VM's `--max-steps` is the only bound) |
 | right-to-left matching (`MatchDir`) | yes | no |
@@ -134,27 +136,32 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
 |---|---|
 | proc macro / generated `Rule` enum | Agentica has no macros. Loading a grammar at run time and querying nodes by rule name is the equivalent; a `grammy gen` that writes typed `.agc` helpers could come later, but the tree API already covers the use case. |
 | Unicode property tables (`\p{...}`) | They are megabytes of generated data in pest; as `.agc` source they would dominate the repo. A generated optional module later, if a real grammar needs it. |
-| Indentation-sensitive blocks | pest does not solve this either; users do it with the stack or a pre-pass. Not a parity gap. |
+| Indentation-sensitive blocks | We have this and pest does not (`>` scope plus `INDENT`/`SAME`, no input rewriting). It is an extension, not a parity item; keep it outside the pest syntax surface. |
 | `MatchDir`, `PrecClimber`, `PrattParser`, `miette`, debugger | Rust-ecosystem conveniences with no Agentica analogue; precedence belongs in user code over the tree. |
 | Rust keyword validation | Rust-specific. |
 
 ## 7. What to do, in order
 
-### Milestone 1 — trustworthy (cheap, high value)
+### Milestone 1 — trustworthy (cheap, high value) — DONE (1 and 2)
 
-1. **Furthest-failure errors.** Thread a failure record (position, expected
+1. **Furthest-failure errors** — done: matching threads an `Outcome` with the
+   deepest `Attempt` (labels for rule names, literals and classes; silent rules
+   drop terminal labels) and the message carries line, column and the line.
+   Pest-style `positives`/`negatives` and `renamed_rules` are not done.
+
+   Original brief: **Furthest-failure errors.** Thread a failure record (position, expected
    rules, what was negated) through matching and report the deepest one with
    line, column and the offending line. Today every error says "line 1,
    column 1", which makes real grammars undebuggable. Touches every `match_*`
    signature, but mechanically.
-2. **Validator parity for hangs.** Left recursion, non-failing expressions in
-   repetitions, pest keywords as rule names, unreachable choice arms. A
-   left-recursive grammar currently spins forever; pest refuses it at compile
-   time. Cheap static analyses over the AST we already have.
-3. **Syntax fill-ins.** Repetition bounds `{n,m}`, `^"literal"`, escapes
-   `\0 \' \xNN \u{...}`, `//` and `/* */` comments, `'a'..'z'` ranges, pest
-   builtin names (`EOI`, `SOI`, `ASCII_ALPHANUMERIC`, `ASCII_HEX_DIGIT`, the
-   missing `ASCII_*`), `NEWLINE` with `\r\n`. All local to `src/grammar.agc`.
+2. **Validator parity for hangs** — done: left recursion (through nullable
+   prefixes and mutual recursion), non-failing and non-progressing repetitions,
+   reserved (pest keyword/builtin) rule names, and unreachable choice arms.
+3. **Syntax fill-ins** — the pest builtin names (`EOI`, `SOI`, the whole
+   `ASCII_*` family) and `NEWLINE` with `\r\n` are done. Still missing, and
+   next: repetition bounds `{n,m}`, `^"literal"`, escapes `\0 \' \xNN \u{...}`,
+   `//` and `/* */` comments, `'a'..'z'` ranges, `~` required, and the `@`/`$`/`!`
+   modifiers (they parse today and report "not supported yet").
 
 ### Milestone 2 — real grammars
 
@@ -177,14 +184,21 @@ grammy ships `Node(rule, start, stop, children)` with rule names as strings.
    `Pairs::to_json`-style output, and write grammy's own `.grammar` parser as a
    `.grammar` (self-hosting).
 
-## 8. Decisions to make
+## 8. Decisions
 
-1. **Syntax compatibility**: accept both pest syntax and the current one
-   (`[a-z]`/`.`/`#` stay as extensions), or declare pest syntax canonical and
-   keep ours as sugar? Accepting both is additive and keeps the Python example
-   working.
-2. **Builtin names**: rename `EOF` → `EOI`, `ASCII_ALNUM` →
-   `ASCII_ALPHANUMERIC`, `ASCII_HEX` → `ASCII_HEX_DIGIT`, keeping the old names
-   as aliases (recommended), or break the names now while nothing depends on
-   them.
-3. **Order**: Milestone 1 as a whole, or errors first and validation second?
+1. **Syntax: pest is the base, with two documented extensions.** Any `.pest`
+   body parses: `"text"`, `^"text"`, `'a'..'z'`, `ANY`, `~`, `|`, `* + ?`,
+   `{n,m}`, `& !`, `( )`, `_ @ $ !` modifiers and `//`/`/* */` comments. The
+   extensions are `[a-z]`/`[^...]` classes and `.` for `ANY`; pest has no `[` in
+   a body, so they never conflict. `#` comments go away (they would collide
+   with node tags `#tag = expr`). `~` becomes required. These are the item 3
+   syntax fill-ins, still open.
+2. **Builtin names: pest names, old ones as aliases (done).** `EOI` and `EOF`,
+   `ASCII_ALPHANUMERIC` and `ASCII_ALNUM`, `ASCII_HEX_DIGIT` and `ASCII_HEX`
+   all work; the grammar validator reserves every one of them.
+3. **Order: errors and validation first (done), then the syntax fill-ins, then
+   atomicity with implicit whitespace.**
+4. **Indentation is ours, and it lives in the engine.** `>` rules capture the
+   line's indentation as the block base; `INDENT`/`SAME` consume and compare.
+   No input rewriting, so spans and error columns stay exact. pest has no
+   equivalent, so this stays an extension outside the pest syntax surface.

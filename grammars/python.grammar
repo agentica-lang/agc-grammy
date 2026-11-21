@@ -1,38 +1,37 @@
-# A Python subset for grammy.
+# A Python subset for grammy, with real indentation blocks.
 #
-# One statement per line. A suite is one statement, or several joined by `;`,
-# which keeps the grammar free of indentation handling:
-#
-#   while i < 5: total = total + i; i = i + 1
+# `suite = >_{ ... }` opens an indentation scope: grammy remembers the
+# indentation of the line the suite starts on, and the `INDENT`/`SAME` builtins
+# consume the next line's indentation and compare it with that scope. No input
+# is rewritten, so spans and error columns stay exact.
 #
 # Supported: numbers, text, True/False, names, print(...), `+ - * /`,
 # comparisons, `and`, `or`, `not`, parentheses, assignment, `if`/`elif`/`else`
 # and `while`. Rules marked `_` build no node.
 
+nl = _{ "\r\n" | "\n" | "\r" }
 ws = _{ (" " | "\t")* }
-nl = _{ "\r\n" | "\r" | "\n" }
+eol = _{ ws ~ ("#" ~ [^\n]*)? ~ nl }
 
 ident_start = _{ [a-zA-Z_] }
 ident_char = _{ [a-zA-Z0-9_] }
 word_end = _{ !ident_char }
-gap = _{ (nl | ws)* }
 
-program = _{ (ignored | line)* ~ ws ~ EOF }
-ignored = _{ ws ~ (nl | comment) }
+program = _{ skipped* ~ (top ~ skipped*)* ~ ws ~ EOF }
+skipped = _{ (" " | "\t")* ~ ("#" ~ [^\n]*)? ~ nl }
+top = _{ statement ~ (eol | ws ~ EOF) }
+
+statement = _{ simple | if_stmt | while_loop | comment }
 comment = _{ "#" ~ [^\n]* }
-line = _{ ws ~ statement }
-
-statement = _{ simple | if_stmt | while_loop }
-suite = _{ statement ~ (ws ~ ";" ~ ws ~ statement)* }
-
 simple = _{ assign | call_stmt }
 assign = { name ~ ws ~ "=" ~ ws ~ expr }
 call_stmt = { call }
 
-if_stmt = { "if" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite ~ (gap ~ elif_branch)* ~ (gap ~ else_branch)? }
-elif_branch = { "elif" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite }
-else_branch = { "else" ~ ws ~ ":" ~ ws ~ suite }
-while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ ws ~ suite }
+if_stmt = { "if" ~ ws ~ expr ~ ws ~ ":" ~ suite ~ elif_branch* ~ else_branch? }
+elif_branch = { eol ~ SAME ~ "elif" ~ ws ~ expr ~ ws ~ ":" ~ suite }
+else_branch = { eol ~ SAME ~ "else" ~ ws ~ ":" ~ suite }
+while_loop = { "while" ~ ws ~ expr ~ ws ~ ":" ~ suite }
+suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
 
 expr = _{ or_expr }
 or_expr = { and_expr ~ (ws ~ "or" ~ word_end ~ ws ~ and_expr)* }

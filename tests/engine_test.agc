@@ -58,9 +58,95 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
-    Test.test("a failure names the start rule and place") do
-      case parse("p = { \"a\" }", "p", "x")
-        error(e) -> Test.assert(e.message.include?("expected p at line 1, column 1"), e.message)
+    Test.test("a failure names the deepest position") do
+      case parse("p = { \"ab\" ~ \"cd\" }", "p", "abX")
+        error(e) ->
+          try Test.assert(e.message.include?("column 3"), e.message)
+          Test.assert(e.message.include?("expected \"cd\""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a choice lists the rules it tried") do
+      case parse("p = { \"a\" | \"b\" }", "p", "c")
+        error(e) ->
+          try Test.assert(e.message.include?("\"a\""), e.message)
+          Test.assert(e.message.include?("\"b\""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a negative lookahead reports what it refused") do
+      case parse("p = { !\"x\" ~ ANY }", "p", "x")
+        error(e) -> Test.assert(e.message.include?("unexpected \"x\""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a silent rule adds no terminal noise") do
+      case parse("p = { \"a\" ~ ws ~ \"b\" }\nws = _{ \" \"* }", "p", "aX")
+        error(e) ->
+          try Test.assert(e.message.include?("expected \"b\""), e.message)
+          Test.assert(!e.message.include?("expected \" \""), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("the ASCII builtins") do
+      try Test.ok?(parse("p = { ASCII_ALPHA_LOWER+ }", "p", "abc"))
+      try Test.ok?(parse("p = { ASCII_ALPHA_UPPER+ }", "p", "ABC"))
+      try Test.ok?(parse("p = { ASCII_BIN_DIGIT+ }", "p", "0101"))
+      try Test.ok?(parse("p = { ASCII_OCT_DIGIT+ }", "p", "01234567"))
+      try Test.ok?(parse("p = { ASCII_NONZERO_DIGIT+ }", "p", "123"))
+      try Test.ok?(parse("p = { ASCII_HEX_DIGIT+ }", "p", "0aF"))
+      try Test.ok?(parse("p = { ASCII_ALPHANUMERIC+ }", "p", "a1B"))
+      try Test.ok?(parse("p = { ASCII+ }", "p", "~"))
+      Test.error?(parse("p = { ASCII }", "p", "é"))
+    end,
+    Test.test("SOI and EOI mark the ends") do
+      try Test.ok?(parse("p = { SOI ~ ANY ~ EOI }", "p", "a"))
+      try Test.ok?(parse("p = { ANY ~ ANY ~ EOI }", "p", "ba"))
+      Test.error?(parse("p = { SOI ~ ANY }", "p", "ba"))
+    end,
+    Test.test("NEWLINE accepts CRLF and CR") do
+      tree = try parse("p = { NEWLINE }", "p", "\r\n")
+      try Test.eq(tree.stop, 2)
+      try Test.ok?(parse("p = { NEWLINE }", "p", "\n"))
+      Test.ok?(parse("p = { NEWLINE }", "p", "\r"))
+    end,
+    Test.test("INDENT consumes a deeper line and INDENT stops on dedent") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* ~ nl? }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  a\n  b\n")
+      try Test.eq(Tree.find_all(tree, "item").size, 2)
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 5)
+      Test.eq(Tree.find_all(tree, "item")[1].stop, 10)
+    end,
+    Test.test("INDENT skips blank lines") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  a\n\n  b")
+      Test.eq(Tree.find_all(tree, "item").size, 2)
+    end,
+    Test.test("tabs count as indentation") do
+      grammar_text = "p = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      Test.ok?(parse(grammar_text, "p", "go\n\ta"))
+    end,
+    Test.test("SAME wants the block indentation") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ item ~ nl ~ SAME ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      try Test.ok?(parse(grammar_text, "p", "go\n  a\nend"))
+      case parse(grammar_text, "p", "go\n  a\n  end")
+        error(e) -> Test.assert(e.message.include?("a line at this indentation"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("a missing block names the indentation") do
+      grammar_text = "p = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      case parse(grammar_text, "p", "go\na")
+        error(e) -> Test.assert(e.message.include?("an indented line"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

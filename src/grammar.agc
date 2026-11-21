@@ -9,10 +9,12 @@
 ## The max of a `Repeat` that never stops, as in `*` and `+`.
 UNBOUNDED = -1
 
-## One rule: its name, whether it builds no node, and its body.
+## One rule: its name, whether it builds no node, whether it opens an
+## indentation scope, and its body.
 struct Rule
   name: String
   silent: Bool
+  indents: Bool
   body: Expr
 end
 
@@ -82,9 +84,61 @@ end
 
 private
 
-BUILTIN_NAMES = Set.new(["ANY", "EOF", "ASCII_DIGIT", "ASCII_ALPHA", "ASCII_ALNUM", "ASCII_HEX", "NEWLINE"])
+BUILTIN_NAMES = Set.new([
+  "ANY",
+  "SOI",
+  "EOI",
+  "EOF",
+  "NEWLINE",
+  "INDENT",
+  "SAME",
+  "ASCII_DIGIT",
+  "ASCII_NONZERO_DIGIT",
+  "ASCII_BIN_DIGIT",
+  "ASCII_OCT_DIGIT",
+  "ASCII_HEX",
+  "ASCII_HEX_DIGIT",
+  "ASCII_ALPHA",
+  "ASCII_ALPHA_LOWER",
+  "ASCII_ALPHA_UPPER",
+  "ASCII_ALNUM",
+  "ASCII_ALPHANUMERIC",
+  "ASCII",
+])
 
 ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "\"": "\""}
+
+# Names a rule must not take: pest keywords and the builtin rules.
+RESERVED = Set.new([
+  "ANY",
+  "SOI",
+  "EOI",
+  "EOF",
+  "PUSH",
+  "PUSH_LITERAL",
+  "POP",
+  "POP_ALL",
+  "PEEK",
+  "PEEK_ALL",
+  "DROP",
+  "WHITESPACE",
+  "COMMENT",
+  "NEWLINE",
+  "INDENT",
+  "SAME",
+  "ASCII_DIGIT",
+  "ASCII_NONZERO_DIGIT",
+  "ASCII_BIN_DIGIT",
+  "ASCII_OCT_DIGIT",
+  "ASCII_HEX",
+  "ASCII_HEX_DIGIT",
+  "ASCII_ALPHA",
+  "ASCII_ALPHA_LOWER",
+  "ASCII_ALPHA_UPPER",
+  "ASCII_ALNUM",
+  "ASCII_ALPHANUMERIC",
+  "ASCII",
+])
 
 struct ParsedExpr
   expr: Expr
@@ -117,6 +171,17 @@ struct ParsedChar
   pos: Int
 end
 
+struct ParsedFlags
+  silent: Bool
+  indents: Bool
+  pos: Int
+end
+
+struct ParsedPrefixes
+  ops: List[String]
+  pos: Int
+end
+
 # Reads every rule of the file, skipping blanks and comments.
 def scan(text: String) -> Result[Grammar]
   chars = text.split("")
@@ -137,16 +202,33 @@ def parse_rule(chars: List[String], pos: Int) -> Result[ParsedRule]
   ident = try read_ident(chars, pos).to_result("grammar: expected a rule name at character #{pos}")
   after_name = try expect_char(chars, skip_blanks(chars, ident.pos), "=")
   at = skip_blanks(chars, after_name)
-  silent = false
-  if char_at(chars, at) == "_"
-    silent = true
-    at = skip_blanks(chars, at + 1)
-  end
-
-  body_start = try expect_char(chars, at, "{")
+  flags = try read_modifiers(chars, at)
+  body_start = try expect_char(chars, flags.pos, "{")
   body = try parse_expr(chars, body_start)
   after_body = try expect_char(chars, skip_blanks(chars, body.pos), "}")
-  ok(ParsedRule(rule: Rule(name: ident.name, silent: silent, body: body.expr), pos: after_body))
+  rule = Rule(name: ident.name, silent: flags.silent, indents: flags.indents, body: body.expr)
+  ok(ParsedRule(rule: rule, pos: after_body))
+end
+
+# `_` builds no node, `>` opens an indentation scope (INDENT/SAME use it).
+def read_modifiers(chars: List[String], pos: Int) -> Result[ParsedFlags]
+  silent = false
+  indents = false
+  at = pos
+  while true
+    case char_at(chars, at)
+      "_" ->
+        silent = true
+        at = skip_blanks(chars, at + 1)
+      ">" ->
+        indents = true
+        at = skip_blanks(chars, at + 1)
+      "@", "$", "!" -> return error("grammar: the #{char_at(chars, at)} modifier is not supported yet")
+      _ -> break
+    end
+  end
+
+  ok(ParsedFlags(silent: silent, indents: indents, pos: at))
 end
 
 def parse_expr(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -170,7 +252,7 @@ def parse_seq(chars: List[String], pos: Int) -> Result[ParsedExpr]
   while true
     c = char_at(chars, at)
     break if c == "|" or c == ")" or c == "}" or c == ""
-    part = try parse_postfix(chars, at)
+    part = try parse_term(chars, at)
     parts = parts.push(part.expr)
     at = skip_tilde(chars, part.pos)
   end
@@ -181,10 +263,42 @@ def parse_seq(chars: List[String], pos: Int) -> Result[ParsedExpr]
   ok(ParsedExpr(expr: Expr.Seq(parts), pos: at))
 end
 
-def parse_postfix(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  prefix = try parse_prefix(chars, pos)
-  expr = prefix.expr
-  at = skip_blanks(chars, prefix.pos)
+def parse_term(chars: List[String], pos: Int) -> Result[ParsedExpr]
+  prefixes = read_prefixes(chars, pos)
+  base = try parse_primary(chars, prefixes.pos)
+  applied = try apply_postfix(chars, base)
+  ok(ParsedExpr(expr: wrap_prefixes(prefixes.ops, applied.expr), pos: applied.pos))
+end
+
+# Reads the `!` and `&` before a term, as pest does: they bind looser than `*`.
+def read_prefixes(chars: List[String], pos: Int) -> ParsedPrefixes
+  ops: List[String] = []
+  at = skip_blanks(chars, pos)
+  while char_at(chars, at) == "!" or char_at(chars, at) == "&"
+    ops = ops.push(char_at(chars, at))
+    at = skip_blanks(chars, at + 1)
+  end
+
+  ParsedPrefixes(ops: ops, pos: at)
+end
+
+# `!&e` is `!(&e)`: the last operator read wraps the innermost.
+def wrap_prefixes(ops: List[String], expr: Expr) -> Expr
+  result = expr
+  for i in 0...ops.size
+    if ops[ops.size - 1 - i] == "!"
+      result = Expr.Negative(result)
+    else
+      result = Expr.Lookahead(result)
+    end
+  end
+
+  result
+end
+
+def apply_postfix(chars: List[String], base: ParsedExpr) -> Result[ParsedExpr]
+  expr = base.expr
+  at = skip_blanks(chars, base.pos)
   while true
     case char_at(chars, at)
       "*" ->
@@ -201,19 +315,6 @@ def parse_postfix(chars: List[String], pos: Int) -> Result[ParsedExpr]
   end
 
   ok(ParsedExpr(expr: expr, pos: at))
-end
-
-def parse_prefix(chars: List[String], pos: Int) -> Result[ParsedExpr]
-  at = skip_blanks(chars, pos)
-  case char_at(chars, at)
-    "!" ->
-      inner = try parse_prefix(chars, at + 1)
-      ok(ParsedExpr(expr: Expr.Negative(inner.expr), pos: inner.pos))
-    "&" ->
-      inner = try parse_prefix(chars, at + 1)
-      ok(ParsedExpr(expr: Expr.Lookahead(inner.expr), pos: inner.pos))
-    _ -> parse_primary(chars, at)
-  end
 end
 
 def parse_primary(chars: List[String], pos: Int) -> Result[ParsedExpr]
@@ -377,41 +478,73 @@ def char_at(chars: List[String], pos: Int) -> String
   chars[pos]
 end
 
-# The first duplicate rule name or unknown reference, if any.
+# The first problem in the grammar, if any.
 def first_problem(grammar: Grammar) -> Optional[String]
-  known: Set[String] = Set.new([])
-  found: Optional[String] = none
-  for candidate in grammar.rules
-    if known.include?(candidate.name)
-      found = some("grammar: rule #{candidate.name} is declared twice")
-    else
-      known = known.add(candidate.name)
-    end
-
-    break if found.some?
-  end
-
-  case found
-    some(message) -> some(message)
-    none -> first_unknown_ref(grammar.rules, known)
-  end
+  rules = grammar.rules
+  first_of([
+    reserved_problem(rules),
+    duplicate_problem(rules),
+    unknown_ref_problem(rules),
+    recursion_problem(rules),
+    repetition_problem(rules),
+    choice_problem(rules),
+  ])
 end
 
-def first_unknown_ref(rules: List[Rule], known: Set[String]) -> Optional[String]
+def first_of(problems: List[Optional[String]]) -> Optional[String]
   found: Optional[String] = none
-  for candidate in rules
+  for problem in problems
     break if found.some?
-    found = unknown_ref(candidate.name, candidate.body, known)
+    if problem.some?
+      found = problem
+    end
   end
 
   found
 end
 
+def reserved_problem(rules: List[Rule]) -> Optional[String]
+  for candidate in rules
+    return some("grammar: #{candidate.name} is a reserved rule name") if RESERVED.include?(candidate.name)
+  end
+
+  none
+end
+
+def duplicate_problem(rules: List[Rule]) -> Optional[String]
+  known: Set[String] = Set.new([])
+  for candidate in rules
+    return some("grammar: rule #{candidate.name} is declared twice") if known.include?(candidate.name)
+    known = known.add(candidate.name)
+  end
+
+  none
+end
+
+def unknown_ref_problem(rules: List[Rule]) -> Optional[String]
+  known = name_set(rules)
+  for candidate in rules
+    problem = unknown_ref(candidate.name, candidate.body, known)
+    return problem if problem.some?
+  end
+
+  none
+end
+
+def name_set(rules: List[Rule]) -> Set[String]
+  names: Set[String] = Set.new([])
+  for candidate in rules
+    names = names.add(candidate.name)
+  end
+
+  names
+end
+
 def unknown_ref(owner: String, expr: Expr, known: Set[String]) -> Optional[String]
   case expr
     Expr.RuleRef(name) -> ref_problem(owner, name, known)
-    Expr.Seq(parts) -> parts_problem(owner, parts, known)
-    Expr.Choice(parts) -> parts_problem(owner, parts, known)
+    Expr.Seq(parts) -> nested_unknown(owner, parts, known)
+    Expr.Choice(parts) -> nested_unknown(owner, parts, known)
     Expr.Repeat(inner, _, _) -> unknown_ref(owner, inner, known)
     Expr.Lookahead(inner) -> unknown_ref(owner, inner, known)
     Expr.Negative(inner) -> unknown_ref(owner, inner, known)
@@ -419,7 +552,7 @@ def unknown_ref(owner: String, expr: Expr, known: Set[String]) -> Optional[Strin
   end
 end
 
-def parts_problem(owner: String, parts: List[Expr], known: Set[String]) -> Optional[String]
+def nested_unknown(owner: String, parts: List[Expr], known: Set[String]) -> Optional[String]
   found: Optional[String] = none
   for part in parts
     break if found.some?
@@ -433,4 +566,248 @@ def ref_problem(owner: String, name: String, known: Set[String]) -> Optional[Str
   return none if known.include?(name)
 
   some("grammar: rule #{owner} refers to unknown rule #{name}")
+end
+
+# Reports a rule that reaches itself without consuming input.
+def recursion_problem(rules: List[Rule]) -> Optional[String]
+  nullable = nullable_rules(rules)
+  edges: Map[String, Set[String]] = {}
+  for candidate in rules
+    edges = edges.put(candidate.name, left_refs(candidate.body, nullable))
+  end
+
+  for candidate in rules
+    if left_reachable(candidate.name, edges).include?(candidate.name)
+      return some("grammar: rule #{candidate.name} is left recursive")
+    end
+  end
+
+  none
+end
+
+# The rules a body can call before it consumes any input.
+def left_refs(expr: Expr, nullable: Set[String]) -> Set[String]
+  case expr
+    Expr.RuleRef(name) -> Set.new([name])
+    Expr.Seq(parts) -> seq_left_refs(parts, nullable)
+    Expr.Choice(options) -> union_all(options.map { |option| left_refs(option, nullable) })
+    Expr.Repeat(inner, _, _) -> left_refs(inner, nullable)
+    Expr.Lookahead(inner) -> left_refs(inner, nullable)
+    Expr.Negative(inner) -> left_refs(inner, nullable)
+    _ -> Set.new([])
+  end
+end
+
+def seq_left_refs(parts: List[Expr], nullable: Set[String]) -> Set[String]
+  refs: Set[String] = Set.new([])
+  for part in parts
+    refs = refs.union(left_refs(part, nullable))
+    break if !nullable_with?(part, nullable)
+  end
+
+  refs
+end
+
+def union_all(sets: List[Set[String]]) -> Set[String]
+  total: Set[String] = Set.new([])
+  for items in sets
+    total = total.union(items)
+  end
+
+  total
+end
+
+# Every rule reachable from `start` without consuming input.
+def left_reachable(start: String, edges: Map[String, Set[String]]) -> Set[String]
+  pending: List[String] = [start]
+  seen: Set[String] = Set.new([])
+  while !pending.empty?
+    name = pending.last
+    pending = pending.take(pending.size - 1)
+    for ref in Map.get(edges, name, Set.new([])).to_a
+      if !seen.include?(ref)
+        seen = seen.add(ref)
+        pending = pending.push(ref)
+      end
+    end
+  end
+
+  seen
+end
+
+# Reports a repetition of an expression that cannot end.
+def repetition_problem(rules: List[Rule]) -> Optional[String]
+  always = always_rules(rules)
+  still = still_rules(rules)
+  for candidate in rules
+    problem = repeat_in(candidate.name, candidate.body, always, still)
+    return problem if problem.some?
+  end
+
+  none
+end
+
+def repeat_in(owner: String, expr: Expr, always: Set[String], still: Set[String]) -> Optional[String]
+  case expr
+    Expr.Repeat(inner, _, _) -> repeat_problem(owner, inner, always, still)
+    Expr.Seq(parts) -> nested_repeat(owner, parts, always, still)
+    Expr.Choice(options) -> nested_repeat(owner, options, always, still)
+    Expr.Lookahead(inner) -> repeat_in(owner, inner, always, still)
+    Expr.Negative(inner) -> repeat_in(owner, inner, always, still)
+    _ -> none
+  end
+end
+
+def repeat_problem(owner: String, inner: Expr, always: Set[String], still: Set[String]) -> Optional[String]
+  return some("grammar: rule #{owner} repeats an expression that cannot fail") if always_with?(inner, always)
+  return some("grammar: rule #{owner} repeats an expression that never consumes input") if still_with?(inner, still)
+
+  repeat_in(owner, inner, always, still)
+end
+
+def nested_repeat(owner: String, parts: List[Expr], always: Set[String], still: Set[String]) -> Optional[String]
+  found: Optional[String] = none
+  for part in parts
+    break if found.some?
+    found = repeat_in(owner, part, always, still)
+  end
+
+  found
+end
+
+# Reports a choice arm that cannot fail, which hides the arms after it.
+def choice_problem(rules: List[Rule]) -> Optional[String]
+  always = always_rules(rules)
+  for candidate in rules
+    problem = choice_in(candidate.name, candidate.body, always)
+    return problem if problem.some?
+  end
+
+  none
+end
+
+def choice_in(owner: String, expr: Expr, always: Set[String]) -> Optional[String]
+  case expr
+    Expr.Choice(options) -> arms_problem(owner, options, always)
+    Expr.Seq(parts) -> nested_choice(owner, parts, always)
+    Expr.Repeat(inner, _, _) -> choice_in(owner, inner, always)
+    Expr.Lookahead(inner) -> choice_in(owner, inner, always)
+    Expr.Negative(inner) -> choice_in(owner, inner, always)
+    _ -> none
+  end
+end
+
+def nested_choice(owner: String, parts: List[Expr], always: Set[String]) -> Optional[String]
+  found: Optional[String] = none
+  for part in parts
+    break if found.some?
+    found = choice_in(owner, part, always)
+  end
+
+  found
+end
+
+def arms_problem(owner: String, options: List[Expr], always: Set[String]) -> Optional[String]
+  problem = some("grammar: rule #{owner} has a choice arm that cannot fail; the arms after it are unreachable")
+  for option in options.take(options.size - 1)
+    return problem if always_with?(option, always)
+  end
+
+  none
+end
+
+# Rules that can match without consuming input (computed to a fixpoint).
+def nullable_rules(rules: List[Rule]) -> Set[String]
+  known: Set[String] = Set.new([])
+  changed = true
+  while changed
+    changed = false
+    for candidate in rules
+      if !known.include?(candidate.name) and nullable_with?(candidate.body, known)
+        known = known.add(candidate.name)
+        changed = true
+      end
+    end
+  end
+
+  known
+end
+
+def nullable_with?(expr: Expr, names: Set[String]) -> Bool
+  case expr
+    Expr.Literal(text) -> text.empty?
+    Expr.CharClass(_, _) -> false
+    Expr.AnyChar -> false
+    Expr.Builtin(name) -> name == "EOF" or name == "EOI" or name == "SOI"
+    Expr.RuleRef(name) -> names.include?(name)
+    Expr.Seq(parts) -> parts.all? { |part| nullable_with?(part, names) }
+    Expr.Choice(options) -> options.any? { |option| nullable_with?(option, names) }
+    Expr.Repeat(inner, min, _) -> min == 0 or nullable_with?(inner, names)
+    Expr.Lookahead(inner) -> nullable_with?(inner, names)
+    Expr.Negative(_) -> true
+  end
+end
+
+# Rules that cannot fail (computed to a fixpoint).
+def always_rules(rules: List[Rule]) -> Set[String]
+  known: Set[String] = Set.new([])
+  changed = true
+  while changed
+    changed = false
+    for candidate in rules
+      if !known.include?(candidate.name) and always_with?(candidate.body, known)
+        known = known.add(candidate.name)
+        changed = true
+      end
+    end
+  end
+
+  known
+end
+
+def always_with?(expr: Expr, names: Set[String]) -> Bool
+  case expr
+    Expr.Literal(text) -> text.empty?
+    Expr.CharClass(_, _) -> false
+    Expr.AnyChar -> false
+    Expr.Builtin(_) -> false
+    Expr.RuleRef(name) -> names.include?(name)
+    Expr.Seq(parts) -> parts.all? { |part| always_with?(part, names) }
+    Expr.Choice(options) -> options.any? { |option| always_with?(option, names) }
+    Expr.Repeat(inner, min, _) -> min == 0 or always_with?(inner, names)
+    Expr.Lookahead(inner) -> always_with?(inner, names)
+    Expr.Negative(_) -> false
+  end
+end
+
+# Rules that never consume input when they match (computed to a fixpoint).
+def still_rules(rules: List[Rule]) -> Set[String]
+  known: Set[String] = Set.new([])
+  changed = true
+  while changed
+    changed = false
+    for candidate in rules
+      if !known.include?(candidate.name) and still_with?(candidate.body, known)
+        known = known.add(candidate.name)
+        changed = true
+      end
+    end
+  end
+
+  known
+end
+
+def still_with?(expr: Expr, names: Set[String]) -> Bool
+  case expr
+    Expr.Literal(text) -> text.empty?
+    Expr.CharClass(_, _) -> false
+    Expr.AnyChar -> false
+    Expr.Builtin(name) -> name == "EOF" or name == "EOI" or name == "SOI"
+    Expr.RuleRef(name) -> names.include?(name)
+    Expr.Seq(parts) -> parts.all? { |part| still_with?(part, names) }
+    Expr.Choice(options) -> options.all? { |option| still_with?(option, names) }
+    Expr.Repeat(inner, _, _) -> still_with?(inner, names)
+    Expr.Lookahead(_) -> true
+    Expr.Negative(_) -> true
+  end
 end

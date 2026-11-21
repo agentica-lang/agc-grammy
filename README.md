@@ -63,6 +63,23 @@ agentica src/main.agc grammars/csv.grammar file           # reads stdin
 The start rule must consume the whole input; leftover text is an error that
 names the line and column.
 
+A failure names the **deepest** position matching reached and the rules it
+expected there, with the offending line:
+
+```text
+grammar: expected "cd" at line 1, column 3: abX
+```
+
+Labels are rule names, and literals or character classes from a named rule.
+A silent rule contributes only rule names, so helper rules such as `ws` do not
+add character noise.
+
+`Grammar.compile` refuses a broken grammar before matching: a rule declared
+twice, an unknown rule, a reserved name (`ANY`, `EOI`, `ASCII_DIGIT`, ...),
+left recursion, a repetition of something that cannot fail
+(`("")*`) or never consumes input (`(&"x")*`), and a choice arm that cannot
+fail (which hides the arms after it).
+
 ## Grammar syntax
 
 A rule is `name = { body }`, or `name = _{ body }` for a silent rule that builds
@@ -74,15 +91,43 @@ no node. Rules are separated by blanks; `#` starts a comment.
 | `[a-z]`, `[^0-9]` | one character, in or out of the set; `\-` and `\]` are literal |
 | `.` | any character |
 | `name` | that rule; silent rules pass their children up |
-| `ANY`, `EOF`, `ASCII_DIGIT`, `ASCII_ALPHA`, `ASCII_ALNUM`, `ASCII_HEX`, `NEWLINE` | builtins |
+| `ANY`, `SOI`, `EOI` (alias `EOF`), `NEWLINE` | builtins |
+| `INDENT`, `SAME` | consume a line's indentation, compared with the `>` scope |
 | `a ~ b` | sequence (`~` may be left out between terms) |
 | `a \| b` | ordered choice: the first match wins, no longest match |
 | `a*`, `a+`, `a?` | repetition; a repetition that matches nothing stops |
 | `!a`, `&a` | negative and positive lookahead, consuming nothing |
 | `( ... )` | grouping |
 
+Single-character builtins, all matching one character: `ASCII_DIGIT`,
+`ASCII_NONZERO_DIGIT`, `ASCII_BIN_DIGIT`, `ASCII_OCT_DIGIT`, `ASCII_HEX_DIGIT`
+(alias `ASCII_HEX`), `ASCII_ALPHA_LOWER`, `ASCII_ALPHA_UPPER`, `ASCII_ALPHA`,
+`ASCII_ALPHANUMERIC` (alias `ASCII_ALNUM`), `ASCII`, `ANY`. `NEWLINE` matches
+`\n`, `\r\n` or `\r`; `SOI` and `EOI` match the ends of the input.
+
+Between `=` and `{` a rule takes modifiers: `_` builds no node, and `>` opens an
+indentation scope (`>_{` is both).
+
 There is no implicit whitespace skipping: write `ws` into the grammar, or use a
 silent rule. Left recursion is not supported (it will not terminate).
+
+## Indentation
+
+Blocks are matched without rewriting the input, so spans and error columns stay
+real. A rule marked `>` records the indentation of the line it starts on as the
+block base; `INDENT` then consumes the indentation of the next non-blank line
+when it is deeper than the base, and `SAME` when it is equal:
+
+```
+if_stmt = { "if" ~ ws ~ expr ~ ":" ~ suite ~ elif_branch* }
+elif_branch = { eol ~ SAME ~ "elif" ~ ws ~ expr ~ ":" ~ suite }
+suite = >_{ eol ~ INDENT ~ statement ~ (eol ~ INDENT ~ statement)* }
+```
+
+A block ends by itself: the repetition fails on the first line that is not
+deeper, and the enclosing scope continues from that line. Tabs count as one
+character each, and blank lines are skipped by `INDENT`/`SAME`, so they never
+close a block.
 
 ## API
 
@@ -110,11 +155,15 @@ interpreter: numbers, text, `True`/`False`, names, `print(...)`,
 `+ - * /`, comparisons, `and`/`or`/`not`, parentheses, assignment,
 `if`/`elif`/`else` and `while`.
 
-A suite is one statement, or several joined by `;`, so no indentation handling
-is needed:
+Blocks are real Python indentation, nested as deep as you like:
 
 ```python
-while i < 5: total = total + i * 2; i = i + 1
+if total > 20:
+    if i == 5:
+        print("counted")
+    print("twenty")
+else:
+    print("small")
 ```
 
 ```bash
@@ -124,7 +173,7 @@ agentica examples/python/main.agc examples/python/sample.py
 ```
 
 Escapes inside text are not decoded yet, and there are no functions, lists,
-dicts or `//`. `Interp.run` reads `grammars/python.grammar` relative to the
+dicts, `//` or `for`. `Interp.run` reads `grammars/python.grammar` relative to the
 working directory.
 
 ## Development
@@ -143,8 +192,9 @@ live in `tests/` and are run as `agentica test tests`.
 
 ## Not there yet
 
-- error messages report the start position, not the furthest failure
 - no implicit whitespace, no `^"case insensitive"` literals
+- no `{n,m}` repetition bounds; `.grammar` comments are `#` only
+- no atomicity (`@`, `$`, `!`) and no node tags (`#tag = expr`)
 - no packrat memoization and no left recursion
 - nodes keep no span information other than start/stop offsets
 - the Python example has no functions, lists, dicts or `//`
