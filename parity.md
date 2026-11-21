@@ -41,8 +41,9 @@ worth having, **no** = deliberately out of scope.
 | doc comments `///`, `//!` | yes | missing | later |
 | escapes `\" \\ \n \r \t` | yes | yes | — |
 | escapes `\0 \' \xNN \u{NNNN}` | yes | yes | done |
-| `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | missing | later |
-| `PEEK`, `PEEK[a..b]`, `PEEK_ALL` | yes | missing | later |
+| `PUSH`, `PUSH_LITERAL`, `POP`, `POP_ALL`, `DROP` | yes | yes | done |
+| `PEEK`, `PEEK_ALL` | yes | yes | done |
+| `PEEK[a..b]` stack slices | yes (grammar-extras) | missing | later |
 | `ANY` | yes | yes | — |
 | `SOI` | yes | yes | done |
 | `EOI` | yes | yes (alias `EOF`) | done |

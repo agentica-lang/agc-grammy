@@ -148,6 +148,16 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("a skipped rule cannot reach the stack through a helper") do
+      grammar_text = (
+        "WHITESPACE = _{ ws }\nws = _{ \" \" ~ POP }\np = { \"a\" ~ \"b\" }\nunused = _{ PUSH_LITERAL(\"x\") }"
+      )
+
+      case Grammar.compile(grammar_text)
+        error(e) -> Test.assert(e.message.include?("cannot use the stack"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("a tag over PUSH has nothing to tag") do
       case Grammar.compile("p = { #a = PUSH(ANY) }")
         error(e) -> Test.assert(e.message.include?("has no node to tag"), e.message)

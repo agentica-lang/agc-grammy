@@ -236,6 +236,7 @@ def match_repeat(
       at = skip(ctx, at)
     end
 
+    size_before = current.size
     outcome = match(ctx, current, inner, at)
     attempt = merge(attempt, outcome.attempt)
     case outcome.found
@@ -262,7 +263,9 @@ def match_repeat(
         end
 
         break if stuck
-        break if stopped and max < 0
+        # An unbounded repetition that moves only the stack (a `DROP` loop) keeps
+        # going while it shrinks, so it cannot spin forever.
+        break if stopped and max < 0 and found.stack.size >= size_before
     end
   end
 

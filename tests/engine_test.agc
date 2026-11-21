@@ -573,6 +573,12 @@ def main() -> Void
       tree = try parse("p = { PUSH(ANY) ~ \"|\" ~ POP }", "p", "#{text}|#{text}")
       Test.eq(tree.stop, 3)
     end,
+    Test.test("an unbounded repetition that only pops keeps going") do
+      # The loop drains both values, so the POP that follows has nothing to match;
+      # stopping after the first zero-width iteration would have accepted it.
+      grammar_text = "p = { PUSH_LITERAL(\"a\") ~ PUSH_LITERAL(\"b\") ~ (DROP | \"x\")* ~ POP }"
+      Test.error?(parse(grammar_text, "p", "a"))
+    end,
     Test.test("a stack operation inside an atomic rule still works") do
       tree = try parse("p = { item }\nitem = @{ PUSH_LITERAL(\"ab\") ~ \"cd\" ~ POP }", "p", "cdab")
       try Test.eq(tree.children.size, 1)

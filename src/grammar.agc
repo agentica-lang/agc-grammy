@@ -34,12 +34,6 @@ struct Rule
   body: Expr
 end
 
-# Whether an expression pushes to the stack or reads from it.
-enum StackUse
-  Push
-  Read
-end
-
 ## A whole grammar: its rules, in file order.
 struct Grammar
   rules: List[Rule]
@@ -229,6 +223,12 @@ end
 struct ParsedPrefixes
   ops: List[String]
   pos: Int
+end
+
+# Whether an expression pushes to the stack or reads from it.
+enum StackUse
+  Push
+  Read
 end
 
 # Reads every rule of the file, skipping blanks and comments.
@@ -578,7 +578,7 @@ def parse_push_literal(chars: List[String], pos: Int) -> Result[ParsedExpr]
   at = skip_blanks(chars, pos + 1)
   if char_at(chars, at) != "\""
     return error(
-      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, at).inspect} at character #{pos}",
+      "grammar: PUSH_LITERAL needs a string in parentheses, found #{char_at(chars, at).inspect} at character #{at}",
     )
   end
 
@@ -885,9 +885,13 @@ end
 # fail (it matches the empty string) or that never consumes input makes skipping
 # meaningless. pest refuses both, and so do we.
 def whitespace_problem(rules: List[Rule], always: Set[String], still: Set[String]) -> Optional[String]
+  pushes = stack_use_rules(rules, StackUse.Push)
+  reads = stack_use_rules(rules, StackUse.Read)
   for candidate in rules
     next if candidate.name != "WHITESPACE" and candidate.name != "COMMENT"
-    if uses_stack?(candidate.body, StackUse.Push) or uses_stack?(candidate.body, StackUse.Read)
+    # A helper rule reached from here may use the stack too, so this reads the
+    # fixpoint sets rather than the body alone.
+    if pushes.include?(candidate.name) or reads.include?(candidate.name)
       return some("grammar: #{candidate.name} is skipped, so it cannot use the stack")
     end
 
@@ -950,17 +954,11 @@ end
 # graph per rule; we keep the cheap whole-grammar version and let the parse fail
 # on an empty stack at run time.
 def stack_problem(rules: List[Rule]) -> Optional[String]
-  pushes = false
-  for candidate in rules
-    if uses_stack?(candidate.body, StackUse.Push)
-      pushes = true
-    end
-  end
+  return none if !stack_use_rules(rules, StackUse.Push).empty?
 
-  return none if pushes
-
+  reading = stack_use_rules(rules, StackUse.Read)
   for candidate in rules
-    if uses_stack?(candidate.body, StackUse.Read)
+    if reading.include?(candidate.name)
       return some("grammar: rule #{candidate.name} reads the stack but nothing pushes to it")
     end
   end
@@ -968,24 +966,43 @@ def stack_problem(rules: List[Rule]) -> Optional[String]
   none
 end
 
-def uses_stack?(expr: Expr, use: StackUse) -> Bool
+# The rules that use the stack one way or the other, following rule references
+# (a fixpoint, as `always_rules`/`still_rules` are).
+def stack_use_rules(rules: List[Rule], use: StackUse) -> Set[String]
+  known: Set[String] = Set.new([])
+  changed = true
+  while changed
+    changed = false
+    for candidate in rules
+      if !known.include?(candidate.name) and uses_stack?(candidate.body, use, known)
+        known = known.add(candidate.name)
+        changed = true
+      end
+    end
+  end
+
+  known
+end
+
+def uses_stack?(expr: Expr, use: StackUse, names: Set[String]) -> Bool
   case expr
     Expr.Push(inner) ->
       return true if use == StackUse.Push
 
-      uses_stack?(inner, use)
+      uses_stack?(inner, use, names)
     Expr.PushLiteral(_) -> use == StackUse.Push
     Expr.Pop -> use == StackUse.Read
     Expr.PopAll -> use == StackUse.Read
     Expr.Peek -> use == StackUse.Read
     Expr.PeekAll -> use == StackUse.Read
     Expr.Drop -> use == StackUse.Read
-    Expr.Seq(parts) -> parts.any? { |part| uses_stack?(part, use) }
-    Expr.Choice(options) -> options.any? { |option| uses_stack?(option, use) }
-    Expr.Repeat(inner, _, _) -> uses_stack?(inner, use)
-    Expr.Lookahead(inner) -> uses_stack?(inner, use)
-    Expr.Negative(inner) -> uses_stack?(inner, use)
-    Expr.Tagged(_, inner) -> uses_stack?(inner, use)
+    Expr.RuleRef(name) -> names.include?(name)
+    Expr.Seq(parts) -> parts.any? { |part| uses_stack?(part, use, names) }
+    Expr.Choice(options) -> options.any? { |option| uses_stack?(option, use, names) }
+    Expr.Repeat(inner, _, _) -> uses_stack?(inner, use, names)
+    Expr.Lookahead(inner) -> uses_stack?(inner, use, names)
+    Expr.Negative(inner) -> uses_stack?(inner, use, names)
+    Expr.Tagged(_, inner) -> uses_stack?(inner, use, names)
     _ -> false
   end
 end
