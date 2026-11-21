@@ -252,6 +252,13 @@ def main() -> Void
       try Test.eq(Tree.find_all(tree, "hole").size, 1)
       Test.eq(Tree.text(Tree.first(tree, "hole").unwrap!, program), "{name}")
     end,
+    Test.test("only triple-quoted raw strings allow backslash-newline") do
+      try Test.error?(parse_py(compiled, "x = r\"a\\\nb\"\n"))
+      try Test.error?(parse_py(compiled, "x = r'a\\\nb'\n"))
+      program = "x = r\"\"\"a\\\nb\"\"\"\ny = r'''a\\\nb'''\n"
+      tree = try parse_py(compiled, program)
+      Test.eq(node_texts(tree, "text", program), ["r\"\"\"a\\\nb\"\"\"", "r'''a\\\nb'''"])
+    end,
     Test.test("rejected string forms fail to parse") do
       try Test.error?(parse_py(compiled, "x: str = \"a\\N{BULLET}b\"\n"))
       try Test.error?(parse_py(compiled, "x: str = b\"hi\"\n"))
