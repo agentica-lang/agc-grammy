@@ -419,6 +419,32 @@ def main() -> Void
       tree = try parse(grammar_text, "p", "go\r  ab")
       Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\r  ab"), "ab")
     end,
+    Test.test("a skip that stops inside the indentation still measures it") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" ~ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n   ab")
+      try Test.eq(Tree.first(tree, "item").unwrap!.start, 6)
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\n   ab"), "ab")
+    end,
+    Test.test("CRLF ends an indented line") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\r\\n\" | \"\\n\" | \"\\r\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\r\n  ab")
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\r\n  ab"), "ab")
+    end,
+    Test.test("SAME compares against an indented block base") do
+      grammar_text = (
+        "p = >_{ \"go\" ~ nl ~ INDENT ~ inner }\ninner = >_{ item ~ nl ~ SAME ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n  end")
+      try Test.eq(Tree.find_all(tree, "item").size, 1)
+      Test.error?(parse(grammar_text, "p", "go\n  ab\n end"))
+    end,
     Test.test("an atomic indentation scope keeps the block base") do
       grammar_text = "p = >@{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
       tree = try parse(grammar_text, "p", "go\n  ab")
