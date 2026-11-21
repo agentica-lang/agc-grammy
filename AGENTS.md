@@ -63,7 +63,8 @@ its tests in `tests/`, so always pass the folder.
   node unless its caller was atomic (`creates_node?`).
 - `INDENT`/`SAME` accept a position already inside the leading spaces of a line
   (`match_indent`), so a skip that crossed the line break does not hide the
-  indentation they measure.
+  indentation they measure. A line holding only spaces is blank there too, and
+  `line_start` treats `\r` as a break.
 - A tag (`#name = term`) lands on the last node its term built, and over `*`,
   `+`, `?` or `{n,m}` on the last node of every iteration. The validator refuses a tag on an
   expression that builds no node. `run` applies the start rule's own atomicity

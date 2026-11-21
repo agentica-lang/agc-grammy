@@ -383,6 +383,42 @@ def main() -> Void
       try Test.eq(Tree.first(tree, "item").unwrap!.start, 5)
       Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\n  ab"), "ab")
     end,
+    Test.test("a whitespace-only line does not close the block") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\n    \n  cd")
+      Test.eq(Tree.find_all(tree, "item").size, 2)
+    end,
+    Test.test("SAME works with implicit whitespace and skips blank lines") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ nl ~ SAME ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      try Test.ok?(parse(grammar_text, "p", "go\n  ab\n   \nend"))
+      Test.error?(parse(grammar_text, "p", "go\n  ab\n  end"))
+    end,
+    Test.test("INDENT still fails mid-line with implicit whitespace") do
+      grammar_text = "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ \"x\" ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }"
+      Test.error?(parse(grammar_text, "p", "go x  ab"))
+    end,
+    Test.test("a dedent closes the block with implicit whitespace") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item ~ (nl ~ INDENT ~ item)* ~ nl ~ \"end\" }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\n  ab\nend")
+      Test.eq(Tree.find_all(tree, "item").size, 1)
+    end,
+    Test.test("a carriage return ends a line for INDENT") do
+      grammar_text = (
+        "WHITESPACE = _{ \" \" }\np = >_{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\r\" }"
+      )
+
+      tree = try parse(grammar_text, "p", "go\r  ab")
+      Test.eq(Tree.text(Tree.first(tree, "item").unwrap!, "go\r  ab"), "ab")
+    end,
     Test.test("an atomic indentation scope keeps the block base") do
       grammar_text = "p = >@{ \"go\" ~ nl ~ INDENT ~ item }\nitem = { ASCII_ALPHA+ }\nnl = _{ \"\\n\" }"
       tree = try parse(grammar_text, "p", "go\n  ab")

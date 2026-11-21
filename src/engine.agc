@@ -378,23 +378,32 @@ def indent_holds?(deeper: Bool, level: Int, base: Int) -> Bool
 end
 
 def match_indent(ctx: Ctx, pos: Int, deeper: Bool) -> Outcome
-  start = line_start(ctx.chars, pos)
-  if pos > start and skip_spaces(ctx.chars, start) >= pos
-    # A skip already crossed the line break and part of the indentation, so the
-    # line is read from its own start and the rest of it is what INDENT takes.
-    after = skip_spaces(ctx.chars, start)
-    return indent_miss(after, deeper) if !indent_holds?(deeper, after - start, ctx.base)
+  line = line_start(ctx.chars, pos)
+  head = skip_spaces(ctx.chars, line)
+  start = line
+  if pos > line and head >= pos
+    # A skip already crossed the line break and the spaces, so the position sits
+    # after this line's indentation and that indentation still counts. A line
+    # holding only spaces is blank, and a blank line never closes a block.
+    if line_end?(ctx.chars, head)
+      start = skip_blank_lines(ctx.chars, head)
+    end
+  else
+    return indent_miss(pos, deeper) if !at_line_start?(ctx.chars, pos)
 
-    return matched(Progress(pos: after, nodes: []))
+    start = skip_blank_lines(ctx.chars, pos)
   end
 
-  return indent_miss(pos, deeper) if !at_line_start?(ctx.chars, pos)
-
-  first = skip_blank_lines(ctx.chars, pos)
-  spaces = skip_spaces(ctx.chars, first)
-  return indent_miss(first, deeper) if !indent_holds?(deeper, spaces - first, ctx.base)
+  spaces = skip_spaces(ctx.chars, start)
+  return indent_miss(start, deeper) if !indent_holds?(deeper, spaces - start, ctx.base)
 
   matched(Progress(pos: spaces, nodes: []))
+end
+
+def line_end?(chars: List[String], pos: Int) -> Bool
+  return false if pos >= chars.size
+
+  chars[pos] == "\n" or chars[pos] == "\r"
 end
 
 # pest's NEWLINE is `\n`, `\r\n` or `\r`.
@@ -542,7 +551,7 @@ end
 
 def line_start(chars: List[String], pos: Int) -> Int
   at = pos.clamp(0, chars.size)
-  while at > 0 and chars[at - 1] != "\n"
+  while at > 0 and chars[at - 1] != "\n" and chars[at - 1] != "\r"
     at -= 1
   end
 
