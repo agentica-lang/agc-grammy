@@ -76,16 +76,31 @@ end
 ## One statement shape, with nested bodies kept as statement lists. An
 ## `Annotated` or `AliasDef` carries its annotation as an `Ann` (text plus
 ## the span it was sliced from) so `resolve` can check the names inside it.
+## Statements that evaluate expressions also carry the parsed expression
+## nodes (`cond_expr`, `call`) their emitters need: `resolve` keeps using
+## the flat occurrence lists, so these nodes are emission-only.
+## `IfStmt` holds one arm per branch (the `if` plus each `elif`) and the
+## `else` body; `Other` is only the dataless `pass`/`break`/`next`.
 enum Stmt
-  Annotated(NameOcc, Ann)
+  Annotated(NameOcc, Ann, Optional[Tree.Node])
   AliasDef(NameOcc, Ann)
-  Assigned(NameOcc)
-  AugAssigned(NameOcc)
-  ForLoop(NameOcc, List[Stmt])
-  IfStmt(List[Stmt], List[List[Stmt]], List[Stmt])
-  WhileStmt(List[Stmt])
+  Assigned(NameOcc, Tree.Node)
+  AugAssigned(NameOcc, String, Tree.Node)
+  ForLoop(NameOcc, Tree.Node, List[Stmt])
+  IfStmt(List[CondArm], List[Stmt])
+  WhileStmt(Tree.Node, List[Stmt])
   TryStmt(List[Stmt], List[Stmt], Optional[NameOcc])
+  ReturnStmt(Optional[Tree.Node], Span)
+  ExprStmt(Tree.Node)
+  AssertStmt(Tree.Node, Optional[Tree.Node])
+  RaiseStmt(Tree.Node)
   Other(Span)
+end
+
+## One conditional arm: the condition expression plus its body.
+struct CondArm
+  cond: Tree.Node
+  body: List[Stmt]
 end
 
 ## One annotation occurrence: the raw text plus the span it covers, so
@@ -628,14 +643,9 @@ end
 
 # Whether `quote` opens or closes at `at`.
 def starts_quote?(chars: List[String], at: Int, quote: String) -> Bool
-  window = ""
-  index = 0
-  while index < quote.length and at + index < chars.size
-    window = window + chars[at + index]
-    index += 1
-  end
+  return false if at >= chars.size or chars[at] != quote.slice(0, 1)
 
-  window == quote
+  quote.length == 1 or (at + 2 < chars.size and chars[at + 1] == chars[at] and chars[at + 2] == chars[at])
 end
 
 def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
@@ -699,34 +709,80 @@ end
 def build_stmt(node: Tree.Node, source: String) -> Result[Optional[Stmt]]
   case node.rule
     "annotated" ->
-      ok(some(Stmt.Annotated(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
-    "type_alias" ->
-      ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
-    "assign" -> ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"))))
-    "augmented_assign" -> ok(some(Stmt.AugAssigned(try binding_occ(node, source, "assign"))))
-    "for_loop" -> ok(some(Stmt.ForLoop(try binding_occ(node, source, "reuse"), try build_body(node.children, source))))
-    "if_stmt" ->
       ok(
         some(
-          Stmt.IfStmt(
-            try build_body(node.children, source),
-            try build_elifs(node, source),
-            try build_else(node, source),
+          Stmt.Annotated(
+            try binding_occ(node, source, "declare"),
+            try ann_of(node, "annotation", source),
+            Tree.first_child(node, "cond_expr"),
           ),
         ),
       )
-    "while_loop" -> ok(some(Stmt.WhileStmt(try build_body(node.children, source))))
+    "type_alias" ->
+      ok(some(Stmt.AliasDef(try binding_occ(node, source, "declare"), try ann_of(node, "annotation", source))))
+    "assign" -> ok(some(Stmt.Assigned(try binding_occ(node, source, "assign"), try expr_child(node, "assign"))))
+    "augmented_assign" ->
+      ok(
+        some(
+          Stmt.AugAssigned(
+            try binding_occ(node, source, "assign"),
+            try aug_op_text(node, source),
+            try expr_child(node, "assign"),
+          ),
+        ),
+      )
+    "for_loop" ->
+      ok(
+        some(
+          Stmt.ForLoop(
+            try binding_occ(node, source, "reuse"),
+            try expr_child(node, "for"),
+            try build_body(node.children, source),
+          ),
+        ),
+      )
+    "if_stmt" ->
+      arms = [CondArm(cond: try expr_child(node, "if"), body: try build_body(node.children, source))]
+      for arm in try build_arms(node, source)
+        arms = arms.push(arm)
+      end
+
+      ok(some(Stmt.IfStmt(arms, try build_else(node, source))))
+    "while_loop" -> ok(some(Stmt.WhileStmt(try expr_child(node, "while"), try build_body(node.children, source))))
     "try_stmt" -> build_try(node, source)
-    "return_stmt" -> ok(some(Stmt.Other(span_of(node))))
+    "return_stmt" -> ok(some(Stmt.ReturnStmt(Tree.first_child(node, "cond_expr"), span_of(node))))
     "pass_stmt" -> ok(some(Stmt.Other(span_of(node))))
     "break_stmt" -> ok(some(Stmt.Other(span_of(node))))
     "next_stmt" -> ok(some(Stmt.Other(span_of(node))))
-    "raise_stmt" -> ok(some(Stmt.Other(span_of(node))))
-    "assert_stmt" -> ok(some(Stmt.Other(span_of(node))))
-    "call_stmt" -> ok(some(Stmt.Other(span_of(node))))
-    "expr_stmt" -> ok(some(Stmt.Other(span_of(node))))
+    "raise_stmt" -> ok(some(Stmt.RaiseStmt(try expr_child(node, "raise"))))
+    "assert_stmt" ->
+      cond = try expr_child(node, "assert")
+      rest = Tree.children_of(node, "cond_expr").drop(1)
+      msg: Optional[Tree.Node] = none
+      if !rest.empty?
+        msg = some(List.first(rest))
+      end
+
+      ok(some(Stmt.AssertStmt(cond, msg)))
+    "call_stmt" ->
+      callee = try Tree.first_child(node, "call").to_result("agc-py: call without a call in #{node.rule}")
+      ok(some(Stmt.ExprStmt(callee)))
+    "expr_stmt" -> ok(some(Stmt.ExprStmt(try expr_child(node, "expression statement"))))
     _ -> ok(none)
   end
+end
+
+# The `+=`-style operator spelling of an augmented assignment.
+def aug_op_text(node: Tree.Node, source: String) -> Result[String]
+  op = try Tree.first_child(node, "aug_op").to_result("agc-py: augmented assignment without an operator")
+  ok(Tree.text(op, source))
+end
+
+# condition of an `if`/`while`, the iterable of a `for`, the message of a
+# `raise`. `expr` itself is silent, so the child is the `cond_expr` node an
+# emitter takes.
+def expr_child(node: Tree.Node, owner: String) -> Result[Tree.Node]
+  Tree.first_child(node, "cond_expr").to_result("agc-py: #{owner} without a value")
 end
 
 def build_body(nodes: List[Tree.Node], source: String) -> Result[List[Stmt]]
@@ -742,10 +798,10 @@ def build_body(nodes: List[Tree.Node], source: String) -> Result[List[Stmt]]
   ok(stmts)
 end
 
-def build_elifs(node: Tree.Node, source: String) -> Result[List[List[Stmt]]]
-  arms: List[List[Stmt]] = []
+def build_arms(node: Tree.Node, source: String) -> Result[List[CondArm]]
+  arms: List[CondArm] = []
   for child in Tree.children_of(node, "elif_branch")
-    arms = arms.push(try build_body(child.children, source))
+    arms = arms.push(CondArm(cond: try expr_child(child, "elif"), body: try build_body(child.children, source)))
   end
 
   ok(arms)
@@ -1204,20 +1260,20 @@ end
 
 def stmt_ann_diags(stmt: Stmt) -> List[Diagnostic]
   case stmt
-    Stmt.Annotated(_, ann) -> ann_diags(ann.text, ann.span)
+    Stmt.Annotated(_, ann, _) -> ann_diags(ann.text, ann.span)
     Stmt.AliasDef(_, ann) -> ann_diags(ann.text, ann.span)
-    Stmt.ForLoop(_, body) -> stmts_ann_diags(body)
-    Stmt.IfStmt(then_body, elifs, else_body) -> if_ann_diags(then_body, elifs, else_body)
-    Stmt.WhileStmt(body) -> stmts_ann_diags(body)
+    Stmt.ForLoop(_, _, body) -> stmts_ann_diags(body)
+    Stmt.IfStmt(arms, else_body) -> if_ann_diags(arms, else_body)
+    Stmt.WhileStmt(_, body) -> stmts_ann_diags(body)
     Stmt.TryStmt(try_body, handler_body, _) -> stmts_ann_diags(try_body) + stmts_ann_diags(handler_body)
     _ -> []
   end
 end
 
-def if_ann_diags(then_body: List[Stmt], elifs: List[List[Stmt]], else_body: List[Stmt]) -> List[Diagnostic]
-  out = stmts_ann_diags(then_body)
-  for arm in elifs
-    out = out + stmts_ann_diags(arm)
+def if_ann_diags(arms: List[CondArm], else_body: List[Stmt]) -> List[Diagnostic]
+  out: List[Diagnostic] = []
+  for arm in arms
+    out = out + stmts_ann_diags(arm.body)
   end
 
   out + stmts_ann_diags(else_body)
