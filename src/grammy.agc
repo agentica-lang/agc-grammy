@@ -36,3 +36,5 @@ export T.find_all
 export T.tagged
 export T.first_tagged
 export T.position
+export T.to_json
+export T.json_string

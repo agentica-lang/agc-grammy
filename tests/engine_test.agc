@@ -481,6 +481,96 @@ def main() -> Void
       try Test.eq(Tree.find_all(tree, "string").size, 4)
       Test.eq(Tree.find_all(tree, "inner").size, 0)
     end,
+    Test.test("grammars/json.grammar parses verbatim from pest") do
+      grammar = try Grammar.load("grammars/json.grammar")
+      input = "{\"a\": [1, -2.5e3, true, null], \"b\": {\"c\": \"x\\n\"}}  "
+      tree = try Engine.run(grammar, "json", input)
+      try Test.eq(Tree.find_all(tree, "pair").size, 3)
+      try Test.eq(Tree.find_all(tree, "string").size, 4)
+      try Test.eq(tree.stop, input.split("").size)
+      try Test.eq(Tree.find_all(tree, "inner").size, 0)
+      try JSON.parse(Tree.to_json(tree, input))
+      try Test.ok?(Engine.run(grammar, "json", "{}"))
+      try Test.ok?(Engine.run(grammar, "json", "[]"))
+      try Test.eq(Tree.find_all(try Engine.run(grammar, "json", "{\"e\": \"A\"}"), "string").size, 2)
+      try Test.eq(Tree.find_all(try Engine.run(grammar, "json", "[0, -0, 1e+10]"), "number").size, 3)
+      try Test.error?(Engine.run(grammar, "json", "01"))
+      Test.error?(Engine.run(grammar, "json", "tru"))
+    end,
+    Test.test("to_json matches the pest shape") do
+      tree = try parse("p = { \"a\" ~ word }\nword = { ASCII_ALPHA+ }", "p", "ab")
+      expected = "{\n"
+      expected += "  \"pos\": [\n"
+      expected += "    0,\n"
+      expected += "    2\n"
+      expected += "  ],\n"
+      expected += "  \"rule\": \"p\",\n"
+      expected += "  \"inner\": {\n"
+      expected += "    \"pos\": [\n"
+      expected += "      1,\n"
+      expected += "      2\n"
+      expected += "    ],\n"
+      expected += "    \"pairs\": [\n"
+      expected += "      {\n"
+      expected += "        \"pos\": [\n"
+      expected += "          1,\n"
+      expected += "          2\n"
+      expected += "        ],\n"
+      expected += "        \"rule\": \"word\",\n"
+      expected += "        \"inner\": \"b\"\n"
+      expected += "      }\n"
+      expected += "    ]\n"
+      expected += "  }\n"
+      expected += "}"
+      try Test.eq(Tree.to_json(tree, "ab"), expected)
+      try JSON.parse(Tree.to_json(tree, "ab"))
+      Test.eq(Tree.text(tree, "ab"), "ab")
+    end,
+    Test.test("to_json escapes its text") do
+      try Test.eq(Tree.json_string("a\"b\\c"), "\"a\\\"b\\\\c\"")
+      try Test.eq(Tree.json_string("x\ny\tz"), "\"x\\ny\\tz\"")
+      try Test.eq(Tree.json_string(String.from_code(1)), "\"\\u0001\"")
+      try Test.eq(Tree.json_string(String.from_code(8)), "\"\\b\"")
+      try Test.eq(Tree.json_string(String.from_code(12)), "\"\\f\"")
+      try Test.eq(Tree.json_string("a/b"), "\"a/b\"")
+      try Test.eq(Tree.json_string(""), "\"\"")
+      for code in [1, 8, 12, 13, 31]
+        try JSON.parse(Tree.json_string(String.from_code(code)))
+      end
+
+      try JSON.parse(Tree.json_string("a/b"))
+      try JSON.parse(Tree.json_string(String.from_code(127)))
+      try JSON.parse(Tree.json_string("héllo 😀"))
+      leaf = Tree.Node(rule: "r", start: 0, stop: 1, children: [], tag: none)
+      try JSON.parse(Tree.to_json(leaf, "é"))
+      Test.eq(Tree.text(leaf, "é"), "é")
+    end,
+    Test.test("to_json carries the tag") do
+      tree = try parse("p = { #v = digit }\ndigit = { ASCII_DIGIT }", "p", "7")
+      try Test.eq(Tree.tagged(tree, "v").size, 1)
+      tagged = Tree.to_json(tree, "7")
+      try JSON.parse(tagged)
+      try Test.eq(tagged.include?("  \"tag\": \"v\",\n"), true)
+      plain = try parse("p = { ASCII_DIGIT }", "p", "7")
+      Test.assert(!Tree.to_json(plain, "7").include?("\"tag\""), Tree.to_json(plain, "7"))
+    end,
+    Test.test("to_json positions are character offsets") do
+      tree = try parse("p = { ANY }", "p", "é")
+      try Test.eq(tree.stop, 1)
+      try JSON.parse(Tree.to_json(tree, "é"))
+      Test.assert(Tree.to_json(tree, "é").include?("0,\n    1"), Tree.to_json(tree, "é"))
+    end,
+    Test.test("to_json inner pos spans gapped children") do
+      grammar = try Grammar.load("grammars/json.grammar")
+      tree = try Engine.run(grammar, "json", "{\"a\": 1}")
+      pair = Tree.first(tree, "pair").unwrap!
+      inner = Tree.to_json(pair, "{\"a\": 1}")
+      try JSON.parse(inner)
+      try Test.eq(pair.stop - pair.start, 6)
+      try Test.eq(pair.start, 1)
+      try Test.eq(pair.stop, 7)
+      Test.assert(inner.include?("\"pos\": [\n      1,\n      7\n    ]"), inner)
+    end,
     Test.test("PUSH stores the text and POP matches it") do
       tree = try parse("p = { PUSH(word) ~ \" \" ~ POP }\nword = { ASCII_ALPHA+ }", "p", "abc abc")
       try Test.eq(tree.stop, 7)

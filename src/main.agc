@@ -4,10 +4,16 @@ import Engine from "engine"
 import Grammar from "grammar"
 import Tree from "tree"
 
-USAGE = "usage: agentica src/main.agc <grammar> <rule> [input-file]"
+USAGE = "usage: agentica src/main.agc <grammar> <rule> [input-file] [--json]"
 
 def main() -> Void
-  args = System.args()
+  raw = System.args()
+  json = raw.size > 0 and raw[raw.size - 1] == "--json"
+  args = raw
+  if json
+    args = raw.take(raw.size - 1)
+  end
+
   if args.size < 2
     IO.warn(USAGE)
     System.exit(2)
@@ -15,13 +21,19 @@ def main() -> Void
 
   case read_input(args)
     error(e) -> fail(e.message)
-    ok(input) -> show(args[0], args[1], input)
+    ok(input) -> show(args[0], args[1], input, json)
   end
 end
 
-def show(grammar_path: String, rule_name: String, input: String) -> Void
+def show(grammar_path: String, rule_name: String, input: String, json: Bool) -> Void
   case parse(grammar_path, rule_name, input)
-    ok(tree) -> puts(render(tree, input))
+    ok(tree) ->
+      if json
+        puts(Tree.to_json(tree, input))
+      else
+        puts(render(tree, input))
+      end
+
     error(e) -> fail(e.message)
   end
 end

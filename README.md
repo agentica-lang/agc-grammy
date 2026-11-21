@@ -210,6 +210,13 @@ Grammy.find_all(node, name) -> List[Node]           # depth first
 Grammy.tagged(node, tag) -> List[Node]              # depth first, by tag
 Grammy.first_tagged(node, tag) -> Optional[Node]
 Grammy.position(input, offset) -> Position          # line, column, line_text
+Grammy.to_json(node, input) -> String              # the tree as JSON, pest `Pair::to_json` style
+Grammy.json_string(value) -> String                # a string as a JSON string literal
+```
+
+```text
+agentica src/main.agc <grammar> <rule> [input-file]         # prints the tree, one node per line
+agentica src/main.agc <grammar> <rule> [input-file] --json  # prints the tree as JSON (`--json` only counts last)
 ```
 
 `Grammar`, `Rule`, `Expr`, `ClassItem`, `Atomicity`, `UNBOUNDED`, `Node` and
