@@ -507,8 +507,9 @@ end
 # A use of a name the stream never bound: while only annotated it is the
 # Python unbound read, a module value has no form inside a def, an alias is
 # a type and never a value; def markers and builtins pass through (a bare
-# use of a def name flows the callable marker into a type position and
-# refuses downstream, like the backend's own "functions are not values").
+# use of a def name keeps the callable marker and refuses at the value
+# emission: `EmitExpr.emit_name` refuses `Function` values, since the
+# backend has no function values).
 def walk_use(
   walk: WalkState,
   occ: Frontend.NameOcc,

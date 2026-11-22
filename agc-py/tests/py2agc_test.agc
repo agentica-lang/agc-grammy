@@ -149,6 +149,54 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    # A bare def name is not a value: the old emission let `print(greet)`
+    # through as `puts("#{greet}")`, which the backend refuses ("functions
+    # are not values", probed CHECK-UNKNOWN-NAME), so the value occurrence
+    # refuses spanned. Calls, a parameter shadowing the name and the
+    # `map`/`filter` function slot keep working.
+    Test.test("a bare def value refuses spanned at the occurrence") do
+      # (source, rendered source line of the refusal) pairs: top level, an
+      # f-string hole and a def-body return.
+      sources: List[String] = [
+        "def greet() -> int:\n    return 1\nprint(greet)\n",
+        "def greet() -> int:\n    return 1\nprint(f\"{greet}\")\n",
+        "def greet() -> int:\n    return 1\ndef f() -> int:\n    return greet\n",
+      ]
+
+      lines: List[String] = ["3 | print(greet)", "print(f\"{greet}\")", "4 |     return greet"]
+      i = 0
+      for source in sources
+        case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+          error(e) ->
+            try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
+            try Test.assert(e.message.include?("function `greet` is not a value"), e.message)
+            try Test.assert(e.message.include?("= help: call it, for example `greet(...)`"), e.message)
+            try Test.assert(e.message.include?(List.first(lines.drop(i))), e.message)
+          ok(_) -> try Test.assert(false, "expected an error at case #{i}")
+        end
+
+        i += 1
+      end
+
+      ok()
+    end,
+    Test.test("a def call, a parameter shadow and map/filter still check and run") do
+      source = (
+        "def greet() -> int:\n    return 1\ndef f(greet: int) -> int:\n    return greet\n" +
+        "def inc(x: int) -> int:\n    return x + 1\nxs: list[int] = [1, 2]\n" +
+        "print(f(greet()))\nprint(sum(map(inc, xs)))\n"
+      )
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("def f(greet: Int) -> Int"), text)
+          try Test.assert(text.include?("xs.map { |py_x0| inc(py_x0) }"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_def_value.agc")
+          try Test.assert(ran.include?("1"), ran)
+          Test.assert(ran.include?("5"), ran)
+      end
+    end,
     Test.test("a type alias hoists and its variable updates") do
       source = "type Count = int\nc: Count = 1\nc += 2\nprint(c)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", source)

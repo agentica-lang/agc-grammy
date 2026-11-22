@@ -14,6 +14,7 @@
 ## `math.sqrt`, left for phase 4) assert structure only and name their TODO
 ## mapping; see the stdlib TODO block above the attribute tests.
 
+import EmitCtx from "../src/emit_ctx"
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
@@ -787,6 +788,9 @@ def main() -> Void
           errcased("-len", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("len + 1", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("str", empty_scope(), "PY-OUT-OF-SUBSET"),
+          # A def name carries the callable marker and is not a value either:
+          # the backend has no function values, so a bare use refuses.
+          errcased("greet", {"greet": EmitCtx.def_marker()}, "PY-OUT-OF-SUBSET"),
         ],
       )
     end,

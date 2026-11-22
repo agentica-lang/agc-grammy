@@ -37,6 +37,7 @@
 ## TODO(phase-3c): emitter errors are message-only strings; phase 3c will
 ## thread node spans into rendered `Diagnostic` values.
 
+import EmitCtx from "emit_ctx"
 import Tree from "../../src/tree"
 
 ## One emitted expression: Agentica text, its static type, and the temp
@@ -995,6 +996,14 @@ def emit_name(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
     return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
   end
 
+  # A def name carries the callable marker, not a type: the backend has no
+  # function values, so a bare use (`print(greet)`, `f"{greet}"`, a returned
+  # `greet`) refuses at the value; only a call uses a def name and a call
+  # never routes here (`emit_head_call` spells it).
+  if found == EmitCtx.def_marker()
+    return error("PY-OUT-OF-SUBSET: function `#{name}` is not a value = help: call it, for example `#{name}(...)`")
+  end
+
   ok(Done(code: name, type: found, cx: cx))
 end
 
@@ -1499,11 +1508,22 @@ def emit_call(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return error("agc-py: call without a head") if node.children.empty?
 
   head = List.first(node.children)
-  args = try emit_call_args(cx, node.children.drop(1), source)
+  args = try emit_call_args(cx, node.children.drop(1), func_slot_head(head, source), source)
   emit_head_call(args.cx, head, args, source)
 end
 
-def emit_call_args(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[CallArgs]
+# The head name when the call is `map` / `filter`: their first positional
+# argument is a named function slot, every other head takes only values.
+def func_slot_head(head: Tree.Node, source: String) -> Optional[String]
+  return none if head.rule != "name"
+
+  name = Tree.text(head, source)
+  return some(name) if name == "map" or name == "filter"
+
+  none
+end
+
+def emit_call_args(cx: Cx, nodes: List[Tree.Node], func_slot: Optional[String], source: String) -> Result[CallArgs]
   pos: List[Done] = []
   raws: List[Tree.Node] = []
   kw: List[Kw] = []
@@ -1517,10 +1537,25 @@ def emit_call_args(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Cal
         kw = kw.push(try emit_kwarg(current, List.last(child.children), source))
         current = List.last(kw).value.cx
       else
-        value = try emit_in(current, arg_expr(child), source)
-        pos = pos.push(value)
-        raws = raws.push(child)
-        current = value.cx
+        # The function slot of `map` / `filter` is a name, not a value: the
+        # block lowering spells the call itself (`emit_map_filter`), so the
+        # first positional slot bypasses the value emission instead of
+        # refusing a def name. Later arguments stay values.
+        slot: Optional[String] = none
+        if func_slot.some? and pos.empty?
+          slot = bare_name(child, source)
+        end
+
+        case slot
+          some(fname) ->
+            pos = pos.push(Done(code: fname, type: EmitCtx.def_marker(), cx: current))
+            raws = raws.push(child)
+          none ->
+            value = try emit_in(current, arg_expr(child), source)
+            pos = pos.push(value)
+            raws = raws.push(child)
+            current = value.cx
+        end
       end
     end
   end
@@ -1596,7 +1631,7 @@ def emit_attr_call(cx: Cx, head: Tree.Node, args: CallArgs, source: String) -> R
 end
 
 def emit_trailer_call(cx: Cx, recv: Done, attrs: List[String], trailer: Tree.Node, source: String) -> Result[Done]
-  args = try emit_call_args(cx, trailer.children, source)
+  args = try emit_call_args(cx, trailer.children, none, source)
   return error("PY-OPERATOR: calling a value as a function = help: call a named function instead") if attrs.empty?
 
   target = recv
