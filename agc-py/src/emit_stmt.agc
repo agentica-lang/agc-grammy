@@ -318,7 +318,7 @@ end
 
 # The static type of `node`.
 def emit_expr_type(ctx: EmitCtx.EmitCtx, node: Tree.Node) -> Result[String]
-  case EmitExpr.emit(node, ctx.source, ctx.scope)
+  case EmitExpr.emit(node, ctx.source, ctx.scope, ctx.sigs)
     error(e) -> error(e.message)
     ok(out) -> ok(out.type)
   end
@@ -404,6 +404,7 @@ def emit_try_block(
         in_try: ctx.in_try,
         in_loop: ctx.in_loop,
         next_temp: try_out.next_temp,
+        sigs: ctx.sigs,
       )
 
       handler_frag = emit_block(handler_ctx, handler_body)

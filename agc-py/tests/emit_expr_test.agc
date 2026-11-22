@@ -31,6 +31,7 @@ struct ErrCase
   expr: String
   scope: Map[String, String]
   code: String
+  sigs: Map[String, EmitCtx.Sig] = {}
 end
 
 struct Case
@@ -44,6 +45,7 @@ struct Case
   as_type: String
   skip_check: Bool
   tops: List[String]
+  sigs: Map[String, EmitCtx.Sig] = {}
 end
 
 def cased(expr: String, scope: Map[String, String], decls: List[String], want_type: String, want_code: String) -> Case
@@ -86,6 +88,37 @@ end
 # One refusal fixture: emitting `expr` must fail with `code`.
 def errcased(expr: String, scope: Map[String, String], code: String) -> ErrCase
   ErrCase(expr: expr, scope: scope, code: code)
+end
+
+# One refusal fixture carrying call ABI signatures for the expression.
+def errcased_sigs(expr: String, scope: Map[String, String], code: String, sigs: Map[String, EmitCtx.Sig]) -> ErrCase
+  ErrCase(expr: expr, scope: scope, code: code, sigs: sigs)
+end
+
+# One fixture whose expression runs through the call ABI signatures.
+def abi_case(
+  expr: String,
+  scope: Map[String, String],
+  decls: List[String],
+  want_type: String,
+  want_code: String,
+  want_pre: List[String],
+  tops: List[String],
+  sigs: Map[String, EmitCtx.Sig],
+) -> Case
+  Case(
+    expr: expr,
+    scope: scope,
+    decls: decls,
+    want_type: want_type,
+    want_code: want_code,
+    want_contains: [],
+    want_pre: want_pre,
+    as_type: "",
+    skip_check: false,
+    tops: tops,
+    sigs: sigs,
+  )
 end
 
 def empty_scope() -> Map[String, String] = {}
@@ -146,14 +179,14 @@ def check_all(compiled: Grammar.Grammar, slug: String, cases: List[Case], errs: 
   nodes = try parse_values(compiled, exprs)
   outs: List[EmitExpr.Out] = []
   for i in 0...cases.size
-    out = try EmitExpr.emit(List.first(nodes.drop(i)), full, cases[i].scope)
+    out = try EmitExpr.emit(List.first(nodes.drop(i)), full, cases[i].scope, cases[i].sigs)
     try assert_out(out, cases[i])
     outs = outs.push(out)
   end
 
   for i in 0...errs.size
     target = List.first(nodes.drop(cases.size + i))
-    emitted = EmitExpr.emit(target, full, errs[i].scope)
+    emitted = EmitExpr.emit(target, full, errs[i].scope, errs[i].sigs)
     try assert_err(emitted, errs[i].code)
   end
 
@@ -761,8 +794,8 @@ def main() -> Void
       )
     end,
     Test.test("calls pass positionals and refuse keywords") do
-      # Keyword calls have no backend form (`f(x=1)` miscompiles), so until
-      # the full call ABI (issue #23) lowers them they refuse spanned.
+      # A name bound to a value keeps the verbatim value-call spelling (the
+      # backend judges it); a keyword there still refuses.
       check_all(
         compiled.unwrap!,
         "calls",
@@ -918,7 +951,7 @@ def main() -> Void
           cased("any(bs)", scope, decls, "Bool", "bs.any? { |py_x0| py_x0 }"),
           Case(
             expr: "map(inc, xs)",
-            scope: {"inc": "Unknown", "xs": "List[Int]"},
+            scope: {"inc": EmitCtx.def_marker(), "xs": "List[Int]"},
             decls: ["xs: List[Int] = [1]"],
             want_type: "List",
             want_code: "xs.map { |py_x0| inc(py_x0) }",
@@ -930,7 +963,7 @@ def main() -> Void
           ),
           Case(
             expr: "filter(keep, xs)",
-            scope: {"keep": "Unknown", "xs": "List[Int]"},
+            scope: {"keep": EmitCtx.def_marker(), "xs": "List[Int]"},
             decls: ["xs: List[Int] = [1]"],
             want_type: "List",
             want_code: "xs.filter { |py_x0| keep(py_x0) }",
@@ -947,6 +980,9 @@ def main() -> Void
           errcased("map(nosuch, xs)", {"xs": "List[Int]"}, "PY-NAME-UNKNOWN"),
           errcased("filter(nosuch, xs)", {"xs": "List[Int]"}, "PY-NAME-UNKNOWN"),
           errcased("map(nosuch(x), xs)", {"xs": "List[Int]", "x": "Int"}, "PY-NAME-UNKNOWN"),
+          # A local holding a value is not a callable: only a `def` name
+          # lowers to the block callback.
+          errcased("map(n, xs)", {"n": "Int", "xs": "List[Int]"}, "PY-OPERATOR"),
           errcased("reversed(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
           errcased("all(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),
           errcased("any(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),

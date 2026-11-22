@@ -134,7 +134,7 @@ end
 ## consumed `Result[T]` unwraps with `try` so the error reaches the
 ## handler; outside `try` it stays a type error (no handler to catch it).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope)
+  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -242,7 +242,7 @@ def emit_augassigned_value(
   expr: Tree.Node,
   source: String,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope)
+  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -342,7 +342,7 @@ def emit_value_binding(
   source: String,
   decl: Bool,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope)
+  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -461,7 +461,7 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span
       case map_ann_scoped(ctx.func_ret, ctx.scope)
         error(e) -> refuse_split(span.start, span.stop, e)
         ok(want) ->
-          case EmitExpr.emit(expr, source, ctx.scope)
+          case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
             error(e) -> refuse_split(expr.start, expr.stop, e)
             ok(out) -> emit_return_line(ctx, expr, want, out)
           end

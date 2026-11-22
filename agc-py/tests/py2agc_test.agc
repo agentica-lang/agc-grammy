@@ -140,13 +140,17 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
-    Test.test("a defaulted parameter refuses spanned") do
-      source = "def add(x: int = 1) -> int:\n    return x\nprint(add())\n"
+    # The call ABI lowers a defaulted parameter at every call site, so the
+    # old refusal is now a working default.
+    Test.test("a defaulted parameter lowers at the call site") do
+      source = "def add(x: int = 1) -> int:\n    return x\nprint(add())\nprint(add(4))\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
-        error(e) ->
-          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
-          Test.assert(e.message.include?("default value"), e.message)
-        ok(_) -> Test.assert(false, "expected an error")
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("def add(x: Int) -> Int"), text)
+          try Test.assert(text.include?("#" + "{add(1)}"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_default.agc")
+          Test.assert(ran.include?("1\n4"), ran)
       end
     end,
     # A bare def name is not a value: the old emission let `print(greet)`

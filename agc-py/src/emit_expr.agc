@@ -48,8 +48,9 @@ struct Out
   pre: List[String]
 end
 
-## Emits `node` (an expression rule) with `scope` naming every visible name.
-def emit(node: Tree.Node, source: String, scope: Map[String, String]) -> Result[Out]
+## Emits `node` (an expression rule) with `scope` naming every visible name
+## and `sigs` carrying the call ABI signatures of the callable `def`s.
+def emit(node: Tree.Node, source: String, scope: Map[String, String], sigs: Map[String, EmitCtx.Sig]) -> Result[Out]
   bare = bare_builtin_name(node, source)
   case bare
     some(name) ->
@@ -57,7 +58,7 @@ def emit(node: Tree.Node, source: String, scope: Map[String, String]) -> Result[
     none -> bare = bare
   end
 
-  done = try emit_in(Cx(scope: scope, next_temp: 0, pre: []), node, source)
+  done = try emit_in(Cx(scope: scope, next_temp: 0, pre: [], sigs: sigs, substs: {}), node, source)
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
 end
 
@@ -206,11 +207,15 @@ BUILTINS = [
   "enumerate",
 ]
 
-# Emission state: the visible names, the next temp number, and the preamble.
+# Emission state: the visible names, the next temp number, the preamble,
+# the call ABI signatures, and the parameter substitutions a default-value
+# emission binds (a callee parameter name spells its passed argument).
 struct Cx
   scope: Map[String, String]
   next_temp: Int
   pre: List[String]
+  sigs: Map[String, EmitCtx.Sig]
+  substs: Map[String, String]
 end
 
 # An emitted expression still carrying its state.
@@ -237,6 +242,29 @@ struct CallArgs
   raws: List[Tree.Node]
   kw: List[Kw]
   cx: Cx
+  sig: Optional[EmitCtx.Sig]
+end
+
+# One prepared call: the parameter slots in signature order and the temp
+# state after every hoist the preparation made.
+struct Prepared
+  slots: List[ArgSlot]
+  cx: Cx
+end
+
+# One parameter slot of a call: the argument a positional or keyword slot
+# filled, or the default-value node to lower at the call site.
+enum ArgSlot
+  Value(Done)
+  Default(Tree.Node)
+end
+
+# One `bind_substs` answer: the advanced state plus exactly the bindings
+# this call installed, so a default lowers with only its own call's
+# parameters bound (nested defaults never inherit an outer call's temps).
+struct Bound
+  cx: Cx
+  own: Map[String, String]
 end
 
 def emit_in(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
@@ -989,6 +1017,15 @@ end
 
 def emit_name(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   name = Tree.text(node, source)
+  # A default-value emission binds callee parameter names to the values the
+  # current call passed: the spelled code is that argument (already a temp
+  # when the keyword path or the subst binding hoisted one).
+  bound = cx.substs.get(name)
+  case bound
+    some(code) -> return ok(Done(code: code, type: cx.scope.get(name, "Unknown"), cx: cx))
+    none -> bound = bound
+  end
+
   found = cx.scope.get(name, "")
   if found == ""
     return ok(Done(code: name, type: "Unknown", cx: cx)) if BUILTINS.include?(name)
@@ -1508,8 +1545,157 @@ def emit_call(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return error("agc-py: call without a head") if node.children.empty?
 
   head = List.first(node.children)
+  sig = try call_sig(cx, head, source)
+  case sig
+    some(found) ->
+      shaped = validate_call_shape(node.children.drop(1), found, source)
+      case shaped
+        error(e) -> return error(e.message)
+        ok(_) -> shaped = shaped
+      end
+
+    none -> sig = sig
+  end
+
   args = try emit_call_args(cx, node.children.drop(1), func_slot_head(head, source), source)
-  emit_head_call(args.cx, head, args, source)
+  emit_head_call(args.cx, head, args.with(sig: sig), source)
+end
+
+# The signature of a named user call: the scope gate runs here (before any
+# argument emits) so an unknown callee refuses at the call instead of
+# emitting its arguments first, and a `Function` marker resolves through the
+# ABI signatures. A name bound to a value keeps the value-call spelling.
+def call_sig(cx: Cx, head: Tree.Node, source: String) -> Result[Optional[EmitCtx.Sig]]
+  return ok(none) if head.rule != "name"
+
+  name = Tree.text(head, source)
+  return ok(none) if BUILTINS.include?(name)
+
+  found = cx.scope.get(name, "")
+  if found == ""
+    return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
+  end
+
+  return ok(none) if found != EmitCtx.def_marker()
+
+  case cx.sigs.get(name)
+    some(sig) -> ok(some(sig))
+    none -> error("agc-py: no typed signature for `#{name}`")
+  end
+end
+
+# The grammar keeps positionals ahead of every keyword, so source order is
+# the positional values first and the keyword values after them — the order
+# the ABI hoists in when the call text must reorder into parameter order.
+def validate_call_shape(args: List[Tree.Node], sig: EmitCtx.Sig, source: String) -> Result[Void]
+  pos_count = 0
+  seen: List[String] = []
+  kw_names: List[String] = []
+  for child in args
+    kw_node = kwarg_of(child)
+    case kw_node
+      some(node) ->
+        name_node = try Tree.first_child(node, "name").to_result("agc-py: kwarg without a name")
+        kwname = Tree.text(name_node, source)
+        if seen.include?(kwname)
+          return kwarg_error(
+            "PY-KWARG-DUPLICATE",
+            sig.name,
+            "keyword argument `#{kwname}` is repeated",
+            "pass it once",
+          )
+        end
+
+        if !sig.params.include?(kwname)
+          return kwarg_error(
+            "PY-KWARG-UNKNOWN",
+            sig.name,
+            "`#{sig.name}` has no parameter `#{kwname}`",
+            "use one of (#{sig.params.join(", ")})",
+          )
+        end
+
+        if param_index(sig, kwname) < pos_count
+          return kwarg_error(
+            "PY-KWARG-DUPLICATE",
+            sig.name,
+            "multiple values for parameter `#{kwname}`",
+            "drop the keyword or the positional argument",
+          )
+        end
+
+        seen = seen.push(kwname)
+        kw_names = kw_names.push(kwname)
+      none -> pos_count += 1
+    end
+  end
+
+  if pos_count > sig.params.size
+    return error(
+      "PY-CALL-ARITY: `#{sig.name}` takes #{sig.params.size} argument#{plural(sig.params.size)}, #{pos_count} given = help: drop the extra argument or widen the signature",
+    )
+  end
+
+  missing: List[String] = []
+  index = 0
+  for param in sig.params
+    if index >= pos_count and !kw_names.include?(param) and !has_default?(sig, index)
+      missing = missing.push(param)
+    end
+
+    index += 1
+  end
+
+  return ok() if missing.empty?
+
+  listed = missing.map { |param| "`#{param}`" }.join(", ")
+  count_word = "#{missing.size} required arguments"
+  if missing.size == 1
+    count_word = "1 required argument"
+  end
+
+  error(
+    "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}` or give it a default",
+  )
+end
+
+# The `kwarg` node a call argument slot carries: a bare `kwarg`, or an `arg`
+# wrapper whose only child is one.
+def kwarg_of(node: Tree.Node) -> Optional[Tree.Node]
+  return some(node) if node.rule == "kwarg"
+
+  if node.rule == "arg" and !node.children.empty? and List.last(node.children).rule == "kwarg"
+    return some(List.last(node.children))
+  end
+
+  none
+end
+
+# The statement emitter spans the enclosing expression (see the header
+# note); these refusals name the offending keyword in the message itself.
+def kwarg_error(code: String, callee: String, message: String, help: String) -> Result[Void]
+  error("#{code}: `#{callee}`: #{message} = help: #{help}")
+end
+
+def plural(count: Int) -> String
+  return "" if count == 1
+
+  "s"
+end
+
+# Whether parameter `at` of `sig` has a default-value expression.
+def has_default?(sig: EmitCtx.Sig, at: Int) -> Bool
+  slot = List.first(sig.defaults.drop(at))
+  slot.some?
+end
+
+# The parameter slot a keyword names (validated before use).
+def param_index(sig: EmitCtx.Sig, param: String) -> Int
+  found = sig.params.find_index { |one| one == param }
+  case found
+    some(at) -> at
+    none -> sig.params.size
+  end
 end
 
 # The head name when the call is `map` / `filter`: their first positional
@@ -1560,14 +1746,15 @@ def emit_call_args(cx: Cx, nodes: List[Tree.Node], func_slot: Optional[String], 
     end
   end
 
-  ok(CallArgs(pos: pos, raws: raws, kw: kw, cx: current))
+  ok(CallArgs(pos: pos, raws: raws, kw: kw, cx: current, sig: none))
 end
 
 def emit_kwarg(cx: Cx, node: Tree.Node, source: String) -> Result[Kw]
   name_node = Tree.first_child(node, "name")
   case name_node
     some(found) ->
-      value = try emit_in(cx, List.last(node.children), source)
+      value_node = List.last(node.children)
+      value = try emit_in(cx, value_node, source)
       ok(Kw(name: Tree.text(found, source), value: value))
     none -> error("agc-py: kwarg without a name")
   end
@@ -1594,7 +1781,7 @@ def emit_head_call(cx: Cx, head: Tree.Node, args: CallArgs, source: String) -> R
   mapped = try emit_builtin(name, args, source)
   case mapped
     some(done) -> ok(done)
-    none -> emit_user_call(args.cx, name, args)
+    none -> emit_user_call(args.cx, name, args, source)
   end
 end
 
@@ -1753,23 +1940,655 @@ def format_args(args: CallArgs) -> String
   parts.join(", ")
 end
 
-def emit_user_call(cx: Cx, name: String, args: CallArgs) -> Result[Done]
+def emit_user_call(cx: Cx, name: String, args: CallArgs, source: String) -> Result[Done]
   found = cx.scope.get(name, "")
   if found == "" and !BUILTINS.include?(name)
     return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
   end
 
-  # The backend call form is positional only (probed PARSE-UNEXPECTED-TOKEN
-  # on `f(x=1)`), so a keyword argument would miscompile if it passed
-  # through: the full call ABI (defaults re-evaluated, keywords) is issue
-  # #23, and until it lands the shape refuses spanned at the caller.
-  if !args.kw.empty?
-    return error(
-      "PY-OUT-OF-SUBSET: keyword arguments to `#{name}` have no form until the full call ABI (issue #23) = help: pass every argument positionally",
-    )
+  case args.sig
+    some(sig) -> emit_abi_call(cx, name, sig, args, source)
+    none ->
+      # A value bound to a callable-looking name has no function form; the
+      # verbatim call reaches the backend's own check (and a keyword would
+      # miscompile there, so it refuses here).
+      if !args.kw.empty?
+        return error(
+          "PY-OUT-OF-SUBSET: keyword arguments to `#{name}` have no form = help: pass every argument positionally",
+        )
+      end
+
+      ok(Done(code: "#{name}(#{format_args(args)})", type: "Unknown", cx: args.cx))
+  end
+end
+
+# The full call ABI (`SUBSET.md` sections 3-4): arguments map onto the
+# signature in parameter order, defaults lower at the call site after every
+# explicit argument, and the shapes that cannot fit refuse spanned. The
+# callee parameter substitutions live only for this call: the answer
+# restores the caller's own, keeping the preamble and the temp supply, so a
+# sibling (`g(3) + a`) or a later argument still reads the caller binding.
+# A default lowers with exactly this call's bound parameters in scope: a
+# nested call inside a default still evaluates its own explicit arguments
+# against them, but its own defaults never inherit them (each default level
+# sees only the parameters of its own call).
+def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source: String) -> Result[Done]
+  caller_substs = cx.substs
+  prepared = try prepare_slots(cx, sig, args)
+  slots = prepared.slots
+  current = prepared.cx
+
+  # Parameters a default reads lower as that call's argument values: each
+  # one hoists to a temp (a reused one when the value already spells exactly
+  # one generated temp) and the default emission binds the name to it.
+  needed = try subst_params(sig, slots, source)
+  own: Map[String, String] = {}
+  if !needed.empty?
+    bounded = try bind_substs(current, sig, slots, needed)
+    current = bounded.cx
+    own = bounded.own
   end
 
-  ok(Done(code: "#{name}(#{format_args(args)})", type: "Unknown", cx: args.cx))
+  parts: List[String] = []
+  index = 0
+  for _ in sig.params
+    slot = List.first(slots.drop(index))
+    case slot
+      ArgSlot.Value(done) ->
+        # A parameter a default reads was hoisted to a temp: the call spells
+        # that temp, so the argument evaluates once even when the default
+        # reads it repeatedly (`g(f())` with `b = a + a` runs `f()` a single
+        # time, in the hoist line).
+        use = done
+        hit = own.get(List.first(sig.params.drop(index)))
+        case hit
+          some(temp) -> use = done.with(code: temp)
+          none -> use = use
+        end
+
+        parts = parts.push(try fit_arg(sig, index, use, name))
+      ArgSlot.Default(node) ->
+        default = try emit_default(current, sig, index, node, needed, own, source)
+        fitted = try fit_default(sig, index, default, name)
+        current = fitted.cx
+        parts = parts.push(fitted.code)
+    end
+
+    index += 1
+  end
+
+  ok(Done(code: "#{name}(#{parts.join(", ")})", type: sig.ret, cx: current.with(substs: caller_substs)))
+end
+
+# An earlier inline value that would otherwise run after a later preamble:
+# only a call still spelled inline (a `(`) can run out of order; a plain
+# temp, variable or literal stays inline.
+def inline_effectful?(code: String) -> Bool
+  return false if is_abi_temp?(code)
+
+  code.include?("(")
+end
+
+# Maps the call's arguments onto the signature in parameter order. Keyword
+# calls hoist every explicit argument to a temp in source order (the grammar
+# keeps positionals ahead of every keyword, so source order is the
+# positional values first and the keyword values after them) and spell the
+# call from the temps — the backend call form is positional only, so
+# spelling in parameter order must not reorder the evaluations. Without a
+# keyword the call text already spells the arguments in source order.
+def prepare_slots(cx: Cx, sig: EmitCtx.Sig, args: CallArgs) -> Result[Prepared]
+  current = cx
+  pos_values: List[Done] = []
+  kw_values: Map[String, Done] = {}
+  if args.kw.empty?
+    if args.pos.empty?
+      pos_values = []
+    else
+      # Positional user calls keep source order: a later argument's preamble
+      # (a chained middle, a ternary) would otherwise run before an earlier
+      # inline call (`h(tag(10), 1<tag(20)<3)` ran `tag(20)` first). Only an
+      # earlier inline call hoists, and only when a later preamble exists,
+      # so pure values stay inline and every value still evaluates once. A
+      # `Void` argument into an `Optional` parameter spells its statement
+      # line where the argument sat instead of appending it after the whole
+      # preamble.
+      ordered_codes: List[String] = args.pos.map { |done| done.code }
+      ordered_pres: List[List[String]] = args.pos.map { |done| done.cx.pre }
+      void_flags: List[Bool] = []
+      probe_index = 0
+      for done in args.pos
+        want_probe = ""
+        if probe_index < sig.params.size
+          want_probe = base_of(List.first(sig.types.drop(probe_index)))
+        end
+
+        is_void = false
+        case none_result_line(done, want_probe)
+          some(_) -> is_void = true
+          none -> is_void = false
+        end
+
+        void_flags = void_flags.push(is_void)
+        probe_index += 1
+      end
+
+      later_flags: List[Bool] = []
+      later_index = 0
+      for _ in args.pos
+        has_later = false
+        check = later_index + 1
+        while check < args.pos.size
+          prev_pre = List.first(ordered_pres.drop(check - 1))
+          cur_pre = List.first(ordered_pres.drop(check))
+          if cur_pre.size > prev_pre.size
+            has_later = true
+          end
+
+          check += 1
+        end
+
+        later_flags = later_flags.push(has_later)
+        later_index += 1
+      end
+
+      need_flags: List[Bool] = []
+      need_index = 0
+      for code in ordered_codes
+        needs = false
+        if !List.first(void_flags.drop(need_index)) and List.first(later_flags.drop(need_index))
+          if inline_effectful?(code)
+            needs = true
+          end
+        end
+
+        need_flags = need_flags.push(needs)
+        need_index += 1
+      end
+
+      hoist_names: List[String] = []
+      next_temp = current.next_temp
+      for flag in need_flags
+        if flag
+          hoist_names = hoist_names.push("py_t#{next_temp}")
+          next_temp += 1
+        else
+          hoist_names = hoist_names.push("")
+        end
+      end
+
+      rebuilt_pos: List[String] = List.first(ordered_pres)
+      if List.first(void_flags)
+        rebuilt_pos = rebuilt_pos.push(List.first(ordered_codes))
+      else
+        if List.first(need_flags)
+          rebuilt_pos = rebuilt_pos.push("#{List.first(hoist_names)} = #{List.first(ordered_codes)}")
+        end
+      end
+
+      prefixes_pos: List[List[String]] = [rebuilt_pos]
+      build_index = 1
+      for _ in ordered_pres.drop(1)
+        prev_pre = List.first(ordered_pres.drop(build_index - 1))
+        cur_pre = List.first(ordered_pres.drop(build_index))
+        rebuilt_pos = rebuilt_pos + cur_pre.drop(prev_pre.size)
+        if List.first(void_flags.drop(build_index))
+          rebuilt_pos = rebuilt_pos.push(List.first(ordered_codes.drop(build_index)))
+        else
+          if List.first(need_flags.drop(build_index))
+            rebuilt_pos = rebuilt_pos.push(
+              "#{List.first(hoist_names.drop(build_index))} = #{List.first(ordered_codes.drop(build_index))}",
+            )
+          end
+        end
+
+        prefixes_pos = prefixes_pos.push(rebuilt_pos)
+        build_index += 1
+      end
+
+      current = current.with(next_temp: next_temp, pre: rebuilt_pos)
+      pos_index = 0
+      for done in args.pos
+        prefix = List.first(prefixes_pos.drop(pos_index))
+        prefix_cx = current.with(pre: prefix)
+        if List.first(void_flags.drop(pos_index))
+          pos_values = pos_values.push(done.with(code: "none", type: "none", cx: prefix_cx))
+        else
+          if List.first(need_flags.drop(pos_index))
+            pos_values = pos_values.push(done.with(code: List.first(hoist_names.drop(pos_index)), cx: prefix_cx))
+          else
+            pos_values = pos_values.push(done.with(cx: prefix_cx))
+          end
+        end
+
+        pos_index += 1
+      end
+    end
+  else
+    ordered_codes: List[String] = []
+    ordered_pres: List[List[String]] = []
+    for done in args.pos
+      ordered_codes = ordered_codes.push(done.code)
+      ordered_pres = ordered_pres.push(done.cx.pre)
+    end
+
+    for kw in args.kw
+      ordered_codes = ordered_codes.push(kw.value.code)
+      ordered_pres = ordered_pres.push(kw.value.cx.pre)
+    end
+
+    # Keyword hoists stay in source order, interleaved with each argument's
+    # own preamble: capturing an earlier argument after a later preamble
+    # would run the later effects first. A `Void` argument into an
+    # `Optional` parameter spells its statement line where it sat (like the
+    # positional path) instead of hoisting to a temp the backend refuses.
+    ordered_dones: List[Done] = []
+    for done in args.pos
+      ordered_dones = ordered_dones.push(done)
+    end
+
+    for kw in args.kw
+      ordered_dones = ordered_dones.push(kw.value)
+    end
+
+    ordered_wants: List[String] = []
+    want_pos = 0
+    for _ in args.pos
+      want = ""
+      if want_pos < sig.params.size
+        want = base_of(List.first(sig.types.drop(want_pos)))
+      end
+
+      ordered_wants = ordered_wants.push(want)
+      want_pos += 1
+    end
+
+    for kw in args.kw
+      ordered_wants = ordered_wants.push(base_of(List.first(sig.types.drop(param_index(sig, kw.name)))))
+    end
+
+    void_flags: List[Bool] = []
+    flag_at = 0
+    for done in ordered_dones
+      is_void = false
+      case none_result_line(done, List.first(ordered_wants.drop(flag_at)))
+        some(_) -> is_void = true
+        none -> is_void = false
+      end
+
+      void_flags = void_flags.push(is_void)
+      flag_at += 1
+    end
+
+    temps: List[String] = []
+    next_temp = current.next_temp
+    for flag in void_flags
+      if flag
+        temps = temps.push("")
+      else
+        temps = temps.push("py_t#{next_temp}")
+        next_temp += 1
+      end
+    end
+
+    rebuilt: List[String] = List.first(ordered_pres)
+    if List.first(void_flags)
+      rebuilt = rebuilt.push(List.first(ordered_codes))
+    else
+      rebuilt = rebuilt.push("#{List.first(temps)} = #{List.first(ordered_codes)}")
+    end
+
+    hoist_index = 1
+    for _ in ordered_pres.drop(1)
+      prev = List.first(ordered_pres.drop(hoist_index - 1))
+      cur_pre = List.first(ordered_pres.drop(hoist_index))
+      rebuilt = rebuilt + cur_pre.drop(prev.size)
+      if List.first(void_flags.drop(hoist_index))
+        rebuilt = rebuilt.push(List.first(ordered_codes.drop(hoist_index)))
+      else
+        rebuilt = rebuilt.push(
+          "#{List.first(temps.drop(hoist_index))} = #{List.first(ordered_codes.drop(hoist_index))}",
+        )
+      end
+
+      hoist_index += 1
+    end
+
+    current = current.with(next_temp: next_temp, pre: rebuilt)
+    pos_index = 0
+    for done in args.pos
+      if List.first(void_flags.drop(pos_index))
+        pos_values = pos_values.push(done.with(code: "none", type: "none", cx: current))
+      else
+        temp = List.first(temps.drop(pos_index))
+        pos_values = pos_values.push(done.with(code: temp, cx: current))
+      end
+
+      pos_index += 1
+    end
+
+    kw_index = 0
+    for kw in args.kw
+      ordered_at = args.pos.size + kw_index
+      if List.first(void_flags.drop(ordered_at))
+        kw_values = kw_values.put(kw.name, kw.value.with(code: "none", type: "none", cx: current))
+      else
+        temp = List.first(temps.drop(ordered_at))
+        kw_values = kw_values.put(kw.name, kw.value.with(code: temp, cx: current))
+      end
+
+      kw_index += 1
+    end
+  end
+
+  slots: List[ArgSlot] = []
+  index = 0
+  for param in sig.params
+    want = base_of(List.first(sig.types.drop(index)))
+    if index < args.pos.size
+      slot_done = List.first(pos_values.drop(index))
+      case none_result_line(slot_done, want)
+        some(line) ->
+          current = current.with(pre: current.pre.push(line))
+          slots = slots.push(ArgSlot.Value(slot_done.with(code: "none", type: "none", cx: current)))
+        none -> slots = slots.push(ArgSlot.Value(slot_done))
+      end
+    else
+      bound = kw_values.get(param)
+      case bound
+        some(value) ->
+          case none_result_line(value, want)
+            some(line) ->
+              current = current.with(pre: current.pre.push(line))
+              slots = slots.push(ArgSlot.Value(value.with(code: "none", type: "none", cx: current)))
+            none -> slots = slots.push(ArgSlot.Value(value))
+          end
+
+        none -> slots = slots.push(ArgSlot.Default(List.first(sig.defaults.drop(index)).unwrap!))
+      end
+    end
+
+    index += 1
+  end
+
+  ok(Prepared(slots: slots, cx: current))
+end
+
+# A `-> None` call result is Python's `None`: into an `Optional[...]`
+# parameter it binds `none`, with the call itself spelled as its own
+# statement line so it still evaluates exactly where the argument sat (the
+# backend refuses a Void value in a discard).
+def none_result_line(done: Done, want: String) -> Optional[String]
+  return some(done.code) if done.type == "Void" and want == "Optional"
+
+  none
+end
+
+# The parameters whose names any default of this call reads: those lower
+# with the call's own argument values bound to the parameter names. A
+# default reading its own parameter refuses: no call could satisfy that by
+# passing (passing it skips the default), so lowering it would only read a
+# like-named caller local by accident.
+def subst_params(sig: EmitCtx.Sig, slots: List[ArgSlot], source: String) -> Result[List[String]]
+  out: List[String] = []
+  index = 0
+  for slot in slots
+    case slot
+      ArgSlot.Default(node) ->
+        param = List.first(sig.params.drop(index))
+        for used in default_names(node, source)
+          if used == param
+            return error(
+              "PY-OUT-OF-SUBSET: a default of `#{sig.name}` reads its own parameter `#{param}` = help: pass `#{param}` explicitly or rewrite the default",
+            )
+          end
+
+          if sig.params.include?(used) and !out.include?(used)
+            out = out.push(used)
+          end
+        end
+
+      ArgSlot.Value(_) -> index = index
+    end
+
+    index += 1
+  end
+
+  ok(out)
+end
+
+# Every `name` occurrence in a default-value expression, skipping keyword
+# names (they name nothing, like a call's keyword slots). The default node
+# spans into the module source, like every parse-tree node.
+def default_names(node: Tree.Node, source: String) -> List[String]
+  if node.rule == "name"
+    [Tree.text(node, source)]
+  else
+    if node.rule == "kwarg" and !node.children.empty?
+      default_names(List.last(node.children), source)
+    else
+      out: List[String] = []
+      for child in node.children
+        for used in default_names(child, source)
+          if !out.include?(used)
+            out = out.push(used)
+          end
+        end
+      end
+
+      out
+    end
+  end
+end
+
+# Hoists every explicitly-passed parameter a default reads to a temp and
+# binds its parameter name to that temp for the default emission. Only a
+# value spelling exactly one generated temp is reused as is (`py_tmp + f()`
+# merely starts with those letters, so it hoists: a default reading the
+# parameter twice must still evaluate the argument once). A needed
+# parameter the call does not pass explicitly would evaluate nothing here,
+# so it refuses instead of silently binding the caller's like-named value.
+def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[String]) -> Result[Bound]
+  substs = cx.substs
+  own: Map[String, String] = {}
+  hoist_temps: Map[String, String] = {}
+  hoist_codes: Map[String, String] = {}
+  next_temp = cx.next_temp
+  index = 0
+  for param in sig.params
+    slot = List.first(slots.drop(index))
+    if needed.include?(param)
+      case slot
+        ArgSlot.Value(done) ->
+          if is_abi_temp?(done.code)
+            substs = substs.put(param, done.code)
+            own = own.put(param, done.code)
+          else
+            temp = "py_t#{next_temp}"
+            next_temp += 1
+            hoist_temps = hoist_temps.put(param, temp)
+            hoist_codes = hoist_codes.put(param, done.code)
+            substs = substs.put(param, temp)
+            own = own.put(param, temp)
+          end
+
+        ArgSlot.Default(_) ->
+          return error(
+            "PY-OUT-OF-SUBSET: a default of `#{sig.name}` reads `#{param}`, which this call does not pass = help: pass `#{param}` explicitly at every call that uses this default",
+          )
+      end
+    end
+
+    index += 1
+  end
+
+  return ok(Bound(cx: cx.with(next_temp: next_temp, substs: substs), own: own)) if Map.empty?(hoist_temps)
+
+  # Each capture runs where its argument sat: appending every hoist after a
+  # later argument's preamble would run the later effects first.
+  exp_dones: List[Done] = []
+  exp_params: List[String] = []
+  exp_index = 0
+  for param in sig.params
+    slot = List.first(slots.drop(exp_index))
+    case slot
+      ArgSlot.Value(done) ->
+        exp_dones = exp_dones.push(done)
+        exp_params = exp_params.push(param)
+      ArgSlot.Default(_) -> exp_dones = exp_dones
+    end
+
+    exp_index += 1
+  end
+
+  exp_pres: List[List[String]] = exp_dones.map { |done| done.cx.pre }
+  rebuilt: List[String] = List.first(exp_pres)
+  first_param = List.first(exp_params)
+  first_hit = hoist_temps.get(first_param)
+  case first_hit
+    some(temp) ->
+      first_code = hoist_codes.get(first_param).unwrap!
+      rebuilt = rebuilt.push("#{temp} = #{first_code}")
+    none -> rebuilt = rebuilt
+  end
+
+  bind_index = 1
+  for _ in exp_dones.drop(1)
+    prev = List.first(exp_pres.drop(bind_index - 1))
+    cur_pre = List.first(exp_pres.drop(bind_index))
+    rebuilt = rebuilt + cur_pre.drop(prev.size)
+    param = List.first(exp_params.drop(bind_index))
+    hit = hoist_temps.get(param)
+    case hit
+      some(temp) ->
+        code = hoist_codes.get(param).unwrap!
+        rebuilt = rebuilt.push("#{temp} = #{code}")
+      none -> rebuilt = rebuilt
+    end
+
+    bind_index += 1
+  end
+
+  ok(Bound(cx: cx.with(next_temp: next_temp, pre: rebuilt, substs: substs), own: own))
+end
+
+# Whether `code` spells exactly one generated temp (`py_t` plus digits, and
+# nothing else): only then may a repeated parameter read reuse it as is.
+def is_abi_temp?(code: String) -> Bool
+  return false if !code.start_with?("py_t")
+
+  rest = code.slice(4, code.length - 4)
+  return false if rest.empty?
+
+  temp_digits?(rest)
+end
+
+def temp_digits?(text: String) -> Bool
+  for ch in text.split("")
+    code = ch.code
+    return false if code < 48 or code > 57
+  end
+
+  true
+end
+
+# Emits one parameter's default value at the call site: the caller's scope
+# (the defaults see the caller's bindings — a module value read was refused
+# when the `def` emitted), the parameter types a default reads bound in
+# `scope`, and exactly this call's bound parameters in `substs` (no outer
+# call's temps leak into a nested default through a shared name).
+# The default node spans into the module source the call was parsed from,
+# so `Tree.text` slices its header text with the same string.
+def emit_default(
+  cx: Cx,
+  sig: EmitCtx.Sig,
+  at: Int,
+  node: Tree.Node,
+  needed: List[String],
+  own: Map[String, String],
+  source: String,
+) -> Result[Done]
+  scope = cx.scope
+  index = 0
+  for param in sig.params
+    if needed.include?(param)
+      scope = scope.put(param, List.first(sig.types.drop(index)))
+    end
+
+    index += 1
+  end
+
+  emit_in(cx.with(scope: scope, substs: own), node, source)
+end
+
+# Fits one lowered default exactly like an explicit argument: a `-> None`
+# call into an `Optional` parameter evaluates as its own statement line and
+# binds `none`, a plain value into an `Optional` parameter wraps in `some`,
+# and a known type against a known parameter type checks here (the backend
+# would only fail later, unspanned).
+def fit_default(sig: EmitCtx.Sig, at: Int, done: Done, callee: String) -> Result[Done]
+  want = base_of(List.first(sig.types.drop(at)))
+  case none_result_line(done, want)
+    some(line) ->
+      current = done.cx.with(pre: done.cx.pre.push(line))
+      ok(Done(code: "none", type: "none", cx: current))
+    none ->
+      code = try fit_arg(sig, at, done, callee)
+      ok(Done(code: code, type: done.type, cx: done.cx))
+  end
+end
+
+# The spelled argument for one parameter: an argument type the emitter knows
+# against a known parameter type checks here (the backend would only fail
+# later, unspanned); `Unknown` passes through for the backend to decide.
+def fit_arg(sig: EmitCtx.Sig, at: Int, done: Done, callee: String) -> Result[String]
+  want = List.first(sig.types.drop(at))
+  got = done.type
+  return ok(done.code) if got == "Unknown" or want == "Unknown"
+
+  param = List.first(sig.params.drop(at))
+  if base_of(want) == "Optional"
+    inner = optional_inner(want)
+    return ok(done.code) if got == want
+    return ok("some(#{done.code})") if got == inner
+    return ok(done.code) if got == "none"
+    if base_of(got) == base_of(inner) and (base_of(got) == "List" or base_of(got) == "Map")
+      return ok("some(#{done.code})") if inner == base_of(inner) or got == base_of(got)
+    end
+
+    return arg_mismatch(callee, want, param, got)
+  end
+
+  return ok(done.code) if container_fit?(want, got)
+
+  arg_mismatch(callee, want, param, got)
+end
+
+def arg_mismatch(callee: String, want: String, param: String, got: String) -> Result[String]
+  error(
+    "PY-TYPE-MISMATCH: `#{callee}` expects `#{want}` for parameter `#{param}`, found `#{got}` = help: convert the argument to `#{want}`",
+  )
+end
+
+# The inner of `Optional[X]`: a full outer slice, so `Optional[List[Int]]`
+# reads `List[Int]` where `elem_of` would stop at the first `]` (`List[Int`).
+def optional_inner(want: String) -> String
+  open = want.index_of("[")
+  case open
+    some(at) -> want.slice(at + 1, want.length - at - 2).strip
+    none -> "Unknown"
+  end
+end
+
+# Container erasure like the binding lane: `List` against `List[E]` fits,
+# element disagreement only when both sides are concrete.
+def container_fit?(want: String, got: String) -> Bool
+  return true if want == got
+
+  if base_of(want) == base_of(got) and (base_of(want) == "List" or base_of(want) == "Map")
+    return true if want == base_of(want) or got == base_of(got)
+  end
+
+  false
 end
 
 # Builtins map by the section 5 table; anything else is `none` here so the
@@ -2082,6 +2901,15 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
       found = args.cx.scope.get(name, "")
       if found == ""
         return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
+      end
+
+      # Only a `def` is a callable value: a local holding an `Int` (or any
+      # other value) cannot become a callback, and spelling `name(x)` inside
+      # the block would miscompile instead of refusing.
+      if found != EmitCtx.def_marker()
+        return error(
+          "PY-OPERATOR: `#{target}` takes a named function, `#{name}` holds a `#{found}` value = help: wrap the call in a def first",
+        )
       end
 
       temp = "py_x#{args.cx.next_temp}"
