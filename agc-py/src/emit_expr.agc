@@ -2547,10 +2547,13 @@ def fit_arg(sig: EmitCtx.Sig, at: Int, done: Done, callee: String) -> Result[Str
 
   param = List.first(sig.params.drop(at))
   if base_of(want) == "Optional"
-    inner = elem_of(want)
+    inner = optional_inner(want)
     return ok(done.code) if got == want
     return ok("some(#{done.code})") if got == inner
     return ok(done.code) if got == "none"
+    if base_of(got) == base_of(inner) and (base_of(got) == "List" or base_of(got) == "Map")
+      return ok("some(#{done.code})") if inner == base_of(inner) or got == base_of(got)
+    end
 
     return arg_mismatch(callee, want, param, got)
   end
@@ -2564,6 +2567,16 @@ def arg_mismatch(callee: String, want: String, param: String, got: String) -> Re
   error(
     "PY-TYPE-MISMATCH: `#{callee}` expects `#{want}` for parameter `#{param}`, found `#{got}` = help: convert the argument to `#{want}`",
   )
+end
+
+# The inner of `Optional[X]`: a full outer slice, so `Optional[List[Int]]`
+# reads `List[Int]` where `elem_of` would stop at the first `]` (`List[Int`).
+def optional_inner(want: String) -> String
+  open = want.index_of("[")
+  case open
+    some(at) -> want.slice(at + 1, want.length - at - 2).strip
+    none -> "Unknown"
+  end
 end
 
 # Container erasure like the binding lane: `List` against `List[E]` fits,

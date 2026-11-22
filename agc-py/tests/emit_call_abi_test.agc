@@ -45,6 +45,7 @@ def main() -> Void
     Test.test("a default capture runs where its argument sat") do default_order_flow(compiled.unwrap!) end,
     Test.test("a positional call keeps source order before a later preamble") do pos_order_flow(compiled.unwrap!) end,
     Test.test("a void argument runs where it sat before a later preamble") do void_order_flow(compiled.unwrap!) end,
+    Test.test("an optional list wraps bare and typed lists") do optional_list_flow(compiled.unwrap!) end,
     Test.test("a void keyword passes none through an effect line") do kw_void_flow(compiled.unwrap!) end,
     Test.test("a mixed void keyword keeps source order before a later preamble") do
       kw_void_order_flow(compiled.unwrap!)
@@ -420,6 +421,41 @@ def kw_void_order_flow(compiled: Grammar.Grammar) -> Result[Void]
   try Test.eq(out.type, "Int")
   try Test.eq(out.code, "h(py_t1, none, py_t2)")
   try Test.eq(out.pre, ["py_t1 = f()", "v()", "py_t0 = g()", "py_t2 = 1 < py_t0 and py_t0 < 3"])
+  ok()
+end
+
+def optional_list_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h([])", "h([1, 2])"])
+  nodes = try parse_values(compiled, full)
+  h_sig = Sig(name: "h", params: ["x"], types: ["Optional[List[Int]]"], defaults: [none], ret: "Int")
+  sigs = {"h": h_sig}
+  scope = {"h": EmitCtx.def_marker()}
+
+  # A bare `[]` and a typed list both spell `some(...)` into `Optional[List[Int]]`.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.code, "h(some([]))")
+  out = try EmitExpr.emit(List.first(nodes.drop(1)), full, scope, sigs)
+  try Test.eq(out.code, "h(some([1, 2]))")
+
+  # A known wrong element type still refuses instead of wrapping.
+  bad_full = wrap_all(["h([\"a\"])"])
+  bad_nodes = try parse_values(compiled, bad_full)
+  bad = EmitExpr.emit(List.first(bad_nodes), bad_full, scope, sigs)
+  try assert_err(bad, "PY-TYPE-MISMATCH")
+
+  # A default `[]` lowers like an explicit argument.
+  dflt_full = wrap_all(["h()", "[]"])
+  dflt_nodes = try parse_values(compiled, dflt_full)
+  dflt_sig = Sig(
+    name: "h",
+    params: ["x"],
+    types: ["Optional[List[Int]]"],
+    defaults: [some(List.last(dflt_nodes))],
+    ret: "Int",
+  )
+
+  dflt = try EmitExpr.emit(List.first(dflt_nodes), dflt_full, scope, {"h": dflt_sig})
+  try Test.eq(dflt.code, "h(some([]))")
   ok()
 end
 
