@@ -1724,6 +1724,16 @@ def emit_user_call(cx: Cx, name: String, args: CallArgs) -> Result[Done]
     return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
   end
 
+  # The backend call form is positional only (probed PARSE-UNEXPECTED-TOKEN
+  # on `f(x=1)`), so a keyword argument would miscompile if it passed
+  # through: the full call ABI (defaults re-evaluated, keywords) is issue
+  # #23, and until it lands the shape refuses spanned at the caller.
+  if !args.kw.empty?
+    return error(
+      "PY-OUT-OF-SUBSET: keyword arguments to `#{name}` have no form until the full call ABI (issue #23) = help: pass every argument positionally",
+    )
+  end
+
   ok(Done(code: "#{name}(#{format_args(args)})", type: "Unknown", cx: args.cx))
 end
 

@@ -63,6 +63,15 @@ struct TempTake
   ctx: EmitCtx
 end
 
+## The scope spelling recorded for a `def` name: functions are not values
+## (probed CHECK-UNKNOWN-NAME), so the scope keeps them callable-only. A
+## call site reads the entry only for existence, while a bare use of the
+## name flows the marker into a type position and refuses downstream
+## (`PY-TYPE-MISMATCH`) instead of compiling. The try-capture scan skips
+## marker entries, so calling a def inside a try body never invents a
+## `name: Function` helper parameter.
+def def_marker() -> String = "Function"
+
 ## Refuses with the span of `node`.
 def refuse(code: String, message: String, help: Optional[String], node: Tree.Node) -> StmtRes
   refusal = Refusal(code: code, message: message, help: help, start: node.start, stop: node.stop)

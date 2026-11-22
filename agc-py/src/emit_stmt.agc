@@ -495,12 +495,15 @@ def write_in(stmt: Stmt, outer: Map[String, String]) -> Optional[Frontend.NameOc
 end
 
 # Outer locals read by the outlined body, in caller scope order: the
-# typed read-only captures the helper takes as parameters.
+# typed read-only captures the helper takes as parameters. `def` names
+# carry the callable marker in the scope, not a value type: a try body
+# that calls a def is not a capture, so marker entries never invent a
+# `name: Function` helper parameter.
 def try_captures(code: List[String], outer: Map[String, String]) -> List[String]
   words = words_in(strip_strings(code.join("\n")))
   caps: List[String] = []
   for name in outer.keys()
-    if words.include?(name)
+    if words.include?(name) and outer.get(name, "") != EmitCtx.def_marker()
       caps = caps.push(name)
     end
   end

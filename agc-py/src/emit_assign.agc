@@ -197,6 +197,11 @@ def emit_return(
   end
 end
 
+## Maps one annotation to its Agentica spelling for the module assembler:
+## the lane-internal `map_ann_scoped` rules with the scope in hand, so a
+## `def` header and the lane agree on aliases and built-in spellings.
+def map_annotation(text: String, scope: Map[String, String]) -> Result[String] = map_ann_scoped(text, scope)
+
 private
 
 # How a value of type `got` lands in the declared type `want`: `bare`
