@@ -227,7 +227,7 @@ struct InterpTake
 end
 
 # The binding target of a lane A statement comes from the coordinator as
-# a `NameOcc`; `need_*` helpers are gone with the node-based entries.
+# a `NameOcc` that retains the target span for diagnostics.
 
 def emit_augassigned_value(
   ctx: EmitCtx.EmitCtx,
@@ -493,10 +493,6 @@ def emit_return_line(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: E
 end
 
 def is_void_return?(func_ret: String) -> Bool = func_ret == "Void" or func_ret == "None" or func_ret == "none"
-
-# The value of an expression statement: the `cond_expr` of an `expr_stmt`,
-# the `call` of a `call_stmt`, or the node itself when the coordinator
-# already narrowed it to an expression.
 
 # Whether `node` spells a bare `None`: a single-child chain down to
 # `none_lit` (unary signs excluded, so `-None` never folds).
@@ -820,6 +816,7 @@ def map_bare_name(text: String, scope: Map[String, String]) -> Result[String]
     found = scope.get(text, "")
     return ok(found) if found != ""
 
+    # Leave named types not in the emitter scope for frontend resolution (#21).
     return ok(text)
   end
 
