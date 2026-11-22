@@ -19,8 +19,18 @@ frontend error before anything is emitted. See `roadmap.md` for the phases.
 agc-py/README.md        this file: goal, pipeline and subset sketch
 agc-py/roadmap.md      the work in phases, with exit criteria
 agc-py/src/py2agc.agc  the translator: `.py` in, typed `.agc` out (CLI is phase 4)
+agc-py/src/modules.agc  local module resolution: entry folder, search path, cycles
 agc-py/tests/          Agentica unit tests (run from the repo root)
 ```
+
+Import resolution (`agc-py/src/modules.agc`) is a library stage of its own:
+given the entry file and an explicit search-path list it loads, parses and
+scope-resolves every reachable local module, validates imported names, and
+answers the modules in dependency order with their resolved import edges.
+Unknown modules refuse as `PY-IMPORT-UNKNOWN`, unknown imported names as
+`PY-NAME-UNKNOWN`, and the first cycle as `PY-IMPORT-CYCLE` at every import
+span on the cycle. Linked-module emission stays issue #26;
+`Py2Agc.translate` is still single-file.
 
 grammy stays the only parser: `agc-py` will import it by relative path,
 exactly as `tests/` and `examples/python/` do. No workspace split yet by

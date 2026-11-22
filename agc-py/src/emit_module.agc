@@ -21,7 +21,7 @@
 ## for module state: a `def` body that reads a top-level binding refuses
 ## spanned (the value lives in `main`; passing it as a parameter is the
 ## spelling). Everything else the backend cannot place refuses spanned too:
-## imports (issues #25-#27) and a def that can fall through without
+## imports (issue #26) and a def that can fall through without
 ## returning (the backend demands a value on every path).
 ##
 ## The call ABI (issue #23) threads one `Sig` per `def` through every
@@ -256,12 +256,12 @@ end
 
 def step_item(asm: Asm, item: Frontend.TopItem, program: Frontend.Program, source: String, file: String) -> StepRes
   case item
-    Frontend.TopItem.ImportItem(names) ->
-      span = import_span(names, program)
+    Frontend.TopItem.ImportItem(decls) ->
+      span = import_span(decls, program)
       StepRes.No(
         EmitCtx.Refusal(
           code: "PY-OUT-OF-SUBSET",
-          message: "imports have no module form yet; issues #25-#27 own them",
+          message: "imports need linked-module emission; issue #26 owns it",
           help: some("inline the values you need for now"),
           start: span.start,
           stop: span.stop,
@@ -271,9 +271,9 @@ def step_item(asm: Asm, item: Frontend.TopItem, program: Frontend.Program, sourc
   end
 end
 
-def import_span(names: List[Frontend.NameOcc], program: Frontend.Program) -> Frontend.Span
-  for occ in names
-    return occ.span
+def import_span(decls: List[Frontend.ImportDecl], program: Frontend.Program) -> Frontend.Span
+  for decl in decls
+    return Frontend.decl_span(decl)
   end
 
   program.span
