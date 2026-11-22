@@ -353,6 +353,27 @@ def main() -> Void
       try Test.eq(seeded.code, "PY-ANNOTATION-UNKNOWN")
       ok()
     end,
+    # Bare `list`/`dict` map to no backend type (probed CHECK-UNKNOWN-TYPE
+    # for the emitted `List`/`Map` spellings), so every annotation site
+    # refuses spanned at the name with a parameterized example.
+    Test.test("bare list and dict annotations refuse spanned") do
+      ref = try run_no(compiled.unwrap!, "xs: list = []\n", top_ctx("xs: list = []\n"))
+      try Test.eq(ref.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("xs: list = []\n", ref), "list")
+      try Test.assert(ref.message.include?("one parameter"), ref.message)
+      ref2 = try run_no(compiled.unwrap!, "d: dict = {}\n", top_ctx("d: dict = {}\n"))
+      try Test.eq(ref2.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("d: dict = {}\n", ref2), "dict")
+      try Test.assert(ref2.message.include?("two parameters"), ref2.message)
+      # Nested inside a parameterized form, the bare head refuses too.
+      ref3 = try run_no(compiled.unwrap!, "xss: list[list] = []\n", top_ctx("xss: list[list] = []\n"))
+      try Test.eq(ref3.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("xss: list[list] = []\n", ref3), "list[list]")
+      # An alias declaring a bare container refuses at its own annotation.
+      ref4 = try run_no(compiled.unwrap!, "type Bunch = list\n", top_ctx("type Bunch = list\n"))
+      try Test.eq(ref4.code, "PY-ANNOTATION-UNKNOWN")
+      ok()
+    end,
     Test.test("duplicate binding refuses") do
       src = "x: int = 1\nx: int = 2\n"
       ref = try run_no(compiled.unwrap!, src, top_ctx(src))

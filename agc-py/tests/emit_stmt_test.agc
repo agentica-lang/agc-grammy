@@ -479,6 +479,47 @@ def main() -> Void
       try Test.eq(done.scope.get("x", ""), "Int")
       ok()
     end,
+    # A fresh target reassigned in the body (augmented here) gets the
+    # iterator lowering: the direct header would assign the backend's
+    # immutable loop variable (probed CHECK-IMMUTABLE-ASSIGNMENT).
+    Test.test("a reassigned fresh for target lowers through an iterator") do
+      source = "for x in xs:\n  x += 1\n  print(x)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"xs": "List[Int]"}, "", 0)
+      done = try acc_ok("forfresh", 0, EmitStmt.emit_block(ctx, stmts), ["xs: List[Int] = [1, 2]"], [])
+      text = done.code.join("\n")
+      try Test.assert(text.include?("for py_t0 in xs"), text)
+      try Test.assert(text.include?("\n  x = py_t0\n"), text)
+      try Test.assert(!text.include?("for x in xs"), text)
+      try Test.eq(done.scope.get("x", ""), "")
+      ok()
+    end,
+    # The detection recurses: an assignment nested in an `if` counts, and
+    # so does a nested loop binding the same name (Python rebinds the outer
+    # target through the inner header).
+    Test.test("a nested reassignment of a fresh for target keeps the lowering") do
+      source = "for x in xs:\n  if x > 0:\n    x = 9\n  for x in ys:\n    print(x)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      ctx = stmt_ctx(source, {"xs": "List[Int]", "ys": "List[Int]"}, "", 0)
+      done = try acc_ok(
+        "fornest",
+        0,
+        EmitStmt.emit_block(ctx, stmts),
+        ["xs: List[Int] = [1, 2]", "ys: List[Int] = [3, 4]"],
+        [],
+      )
+
+      text = done.code.join("\n")
+      # The inner loop's iterator temp comes first: body temps sit past the
+      # incoming supply, the outer iterator past the whole body.
+      try Test.assert(text.include?("for py_t1 in xs"), text)
+      try Test.assert(text.include?("\n  x = py_t1\n"), text)
+      try Test.assert(text.include?("for py_t0 in ys"), text)
+      try Test.assert(text.include?("\n    x = py_t0\n"), text)
+      try Test.assert(!text.include?("for x in xs"), text)
+      try Test.eq(done.scope.get("x", ""), "")
+      ok()
+    end,
     Test.test("nested try in the handler hoists its helper") do
       source = "try:\n  print(1)\nexcept:\n  try:\n    print(2)\n  except:\n    print(3)\n"
       stmts = try stmts_of(compiled.unwrap!, source)

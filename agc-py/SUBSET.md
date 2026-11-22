@@ -19,8 +19,8 @@ parameter and its return.** An untyped `def`, an unannotated first binding and
 | `bool` | `Bool` | `True`/`False` only; see §6 |
 | `None` (as a return) | `Void` | `def f() -> None` returns nothing |
 | `None` (as a value) | `none` | only inside `Optional[X]`; `nil` is never emitted |
-| `list[T]` | `List[T]` | fixed element type |
-| `dict[K, V]` | `Map[K, V]` | `K` is `str` or `int` |
+| `list[T]` | `List[T]` | fixed element type; bare `list` is refused (`PY-ANNOTATION-UNKNOWN`) |
+| `dict[K, V]` | `Map[K, V]` | `K` is `str` or `int`; bare `dict` is refused (`PY-ANNOTATION-UNKNOWN`) |
 | `X \| None`, `Optional[X]` | `Optional[X]` | both spellings accepted, same meaning |
 | `"Fwd"` | the named type | string forward references resolve like bare names |
 

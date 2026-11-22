@@ -768,10 +768,14 @@ def map_generic(head: String, inner: String, scope: Map[String, String]) -> Resu
   end
 
   error(
-    "PY-ANNOTATION-UNKNOWN: unknown annotation `#{head}` = help: use one of int, str, float, bool, None, list, dict, Optional",
+    "PY-ANNOTATION-UNKNOWN: unknown annotation `#{head}` = help: use one of int, str, float, bool, None, Optional, list[T], dict[K, V]",
   )
 end
 
+# A bare `list`/`dict` annotation is refused with a parameterized example:
+# the backend has no bare `List`/`Map` type (probed CHECK-UNKNOWN-TYPE on
+# agentica 0.35.0), while every parameterized form keeps its normal mapping
+# through `map_generic`.
 def map_bare(text: String, scope: Map[String, String]) -> Result[String]
   case text
     "int" -> ok("Int")
@@ -780,8 +784,14 @@ def map_bare(text: String, scope: Map[String, String]) -> Result[String]
     "bool" -> ok("Bool")
     "None" -> ok("none")
     "none" -> ok("none")
-    "list" -> ok("List")
-    "dict" -> ok("Map")
+    "list" ->
+      error(
+        "PY-ANNOTATION-UNKNOWN: annotation `list` needs one parameter = help: write `list[T]`, for example `list[int]`",
+      )
+    "dict" ->
+      error(
+        "PY-ANNOTATION-UNKNOWN: annotation `dict` needs two parameters = help: write `dict[K, V]`, for example `dict[str, int]`",
+      )
     "Int" -> ok("Int")
     "String" -> ok("String")
     "Float" -> ok("Float")
@@ -813,7 +823,7 @@ def map_bare_name(text: String, scope: Map[String, String]) -> Result[String]
     end
 
     return error(
-      "PY-ANNOTATION-UNKNOWN: unknown annotation `#{head}` = help: use one of int, str, float, bool, None, list, dict, Optional",
+      "PY-ANNOTATION-UNKNOWN: unknown annotation `#{head}` = help: use one of int, str, float, bool, None, Optional, list[T], dict[K, V]",
     )
   end
 
@@ -826,7 +836,7 @@ def map_bare_name(text: String, scope: Map[String, String]) -> Result[String]
   end
 
   error(
-    "PY-ANNOTATION-UNKNOWN: unknown annotation `#{text}` = help: use one of int, str, float, bool, None, list, dict, Optional",
+    "PY-ANNOTATION-UNKNOWN: unknown annotation `#{text}` = help: use one of int, str, float, bool, None, Optional, list[T], dict[K, V]",
   )
 end
 

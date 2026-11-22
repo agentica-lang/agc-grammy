@@ -1,7 +1,10 @@
 ## The `py2agc` pipeline: `.py` → parse/build/resolve → module `.agc`.
 ## Emitted programs are verified against the backend in one shared fixture:
 ## `agentica check` (the backend refuses the dead-rewrite regression) and a
-## run whose output is compared with Python's.
+## run whose output is compared with Python's. Loop-target reassignment and
+## annotation mapping keep their backend probes here: the immutable loop
+## variable and the bare `List`/`Map` spellings are both backend refusals,
+## so a regression shows up as a failed check, not a silent wrong type.
 
 import Grammar from "../../src/grammar"
 import Py2Agc from "../src/py2agc"
@@ -154,6 +157,112 @@ def main() -> Void
           try Test.assert(text.start_with?("type Count = Int\n"), text)
           ran = try check_and_run(text, "/tmp/agc_py2agc_alias_aug.agc")
           Test.assert(ran.include?("3"), ran)
+      end
+    end,
+    # A fresh `for` target reassigned in the body lowers through a fresh
+    # iterator: the direct header would assign the backend's immutable loop
+    # variable (probed CHECK-IMMUTABLE-ASSIGNMENT on the parent emission),
+    # while the iterator shape checks and runs with Python's values.
+    Test.test("a reassigned fresh for target checks and runs") do
+      source = "def bump() -> None:\n    for x in [1, 2, 3]:\n        x += 1\n        print(x)\nbump()\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("for py_t0 in [1, 2, 3]"), text)
+          try Test.assert(text.include?("  x = py_t0\n"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_for_reassign.agc")
+          try Test.assert(ran.include?("2"), ran)
+          try Test.assert(ran.include?("3"), ran)
+          Test.assert(ran.include?("4"), ran)
+      end
+    end,
+    # Reassignment nested in an `if` counts too, and the per-iteration
+    # binding resets: the second iteration sees the element, not 9.
+    Test.test("a nested reassignment of a fresh for target runs like Python") do
+      source = "def f() -> None:\n    for x in [1, 2]:\n        if x == 1:\n            x = 9\n        print(x)\nf()\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          ran = try check_and_run(text, "/tmp/agc_py2agc_for_nested.agc")
+          try Test.assert(ran.include?("9"), ran)
+          Test.assert(ran.include?("2"), ran)
+      end
+    end,
+    # A nested loop binding the same name rebinds the outer target through
+    # its own header, exactly as Python rebinds it.
+    Test.test("a nested for rebinding the fresh target rebinds the outer one") do
+      source = (
+        "def f() -> None:\n    for x in [1, 2]:\n        for x in [10, 20]:\n            print(x)\n        print(x)\nf()\n"
+      )
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          ran = try check_and_run(text, "/tmp/agc_py2agc_for_inner.agc")
+          try Test.assert(ran.include?("10"), ran)
+          try Test.assert(ran.include?("20"), ran)
+          # 10, 20, 20, 10, 20, 20: six prints, two of them the outer read.
+          Test.eq(ran.split("\n").size, 7)
+      end
+    end,
+    # Bare `list`/`dict` map to no backend type: every annotation site
+    # refuses spanned with a parameterized example, and a parameterized
+    # form still emits and runs.
+    Test.test("bare list and dict annotations refuse spanned end to end") do
+      param = "def f(xs: list) -> int:\n    return 0\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", param)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-ANNOTATION-UNKNOWN]"), e.message)
+          try Test.assert(e.message.include?("needs one parameter"), e.message)
+          try Test.assert(e.message.include?("write `list[T]`, for example `list[int]`"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      ret = "def f() -> dict:\n    return {}\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", ret)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-ANNOTATION-UNKNOWN]"), e.message)
+          try Test.assert(e.message.include?("needs two parameters"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      binding = "d: dict = {}\nprint(d)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", binding)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-ANNOTATION-UNKNOWN]"), e.message)
+          try Test.assert(e.message.include?("1:4"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      alias = "type Bunch = list\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", alias)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-ANNOTATION-UNKNOWN]"), e.message)
+          try Test.assert(e.message.include?("needs one parameter"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      nested = "xss: list[list] = []\nprint(xss)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", nested)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-ANNOTATION-UNKNOWN]"), e.message)
+          Test.assert(e.message.include?("needs one parameter"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    Test.test("parameterized list and dict annotations still check and run") do
+      source = (
+        "def total(xs: list[int]) -> int:\n    acc: int = 0\n    for x in xs:\n        acc += x\n    return acc\nd: dict[str, int] = {\"a\": 7}\nprint(total([1, -2, 3]))\nprint(d[\"a\"])\n"
+      )
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("def total(xs: List[Int]) -> Int"), text)
+          try Test.assert(text.include?("d: Map[String, Int]"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_parameterized.agc")
+          try Test.assert(ran.include?("2"), ran)
+          Test.assert(ran.include?("7"), ran)
       end
     end,
   ])

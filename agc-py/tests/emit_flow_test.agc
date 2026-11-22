@@ -396,7 +396,7 @@ def main() -> Void
     Test.test("for over a list keeps a first-time target inside the loop") do
       source = "for x in xs:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
-      res = EmitFlow.emit_for(flow_ctx(source, {"xs": "List[Int]"}), parts.target, parts.iterable, ["puts(x)"])
+      res = EmitFlow.emit_for(flow_ctx(source, {"xs": "List[Int]"}), parts.target, parts.iterable, ["puts(x)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for x in xs", "  puts(x)", "end"])
       try Test.eq(done.scope.get("x", ""), "")
@@ -407,7 +407,7 @@ def main() -> Void
     Test.test("for over range keeps a first-time target inside the loop") do
       source = "for i in range(3):\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
-      res = EmitFlow.emit_for(flow_ctx(source, {}), parts.target, parts.iterable, ["puts(i)"])
+      res = EmitFlow.emit_for(flow_ctx(source, {}), parts.target, parts.iterable, ["puts(i)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for i in 0...3", "  puts(i)", "end"])
       try Test.eq(done.scope.get("i", ""), "")
@@ -417,7 +417,7 @@ def main() -> Void
     Test.test("for over a string splits into scalars") do
       source = "for ch in s:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
-      res = EmitFlow.emit_for(flow_ctx(source, {"s": "String"}), parts.target, parts.iterable, ["puts(ch)"])
+      res = EmitFlow.emit_for(flow_ctx(source, {"s": "String"}), parts.target, parts.iterable, ["puts(ch)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for ch in (s).split(\"\")", "  puts(ch)", "end"])
       try Test.eq(done.scope.get("ch", ""), "")
@@ -428,7 +428,7 @@ def main() -> Void
       source = "for i in xs:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       ctx = flow_ctx(source, {"xs": "List[Int]", "i": "Int"})
-      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for py_t0 in xs", "  i = py_t0", "  puts(i)", "end"])
       try Test.eq(done.scope.get("i", ""), "Int")
@@ -437,11 +437,46 @@ def main() -> Void
       try accumulate("forreuse", 0, ["xs: List[Int] = [1, 2]", "i: Int = 0"], done.code)
       ok()
     end,
+    # A fresh target the body reassigns gets the iterator lowering too: the
+    # direct header would assign the backend's immutable loop variable
+    # (probed CHECK-IMMUTABLE-ASSIGNMENT), while `x = py_t0` declares the
+    # binding inside the loop body for every later assignment to rebind.
+    Test.test("for over a reassigned fresh target lowers through an iterator") do
+      source = "for x in xs:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      res = EmitFlow.emit_for(
+        flow_ctx(source, {"xs": "List[Int]"}),
+        parts.target,
+        parts.iterable,
+        ["x = x + (1)"],
+        true,
+      )
+
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t0 in xs", "  x = py_t0", "  x = x + (1)", "end"])
+      try Test.eq(done.scope.get("x", ""), "")
+      try Test.eq(done.scope.get("xs", ""), "List[Int]")
+      try Test.eq(done.next_temp, 1)
+      ok()
+    end,
+    # The check-clean fragment reads the target, mirroring a real body (an
+    # update-only one gains its discard read in the module assembler).
+    Test.test("for over a reassigned fresh target keeps the temp supply") do
+      source = "for x in xs:\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      ctx = flow_ctx(source, {"xs": "List[Int]"}).with(next_temp: 3)
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["x = x + (1)", "puts(x)"], true)
+      done = try assert_ok(res)
+      try assert_lines(done.code, ["for py_t3 in xs", "  x = py_t3", "  x = x + (1)", "  puts(x)", "end"])
+      try Test.eq(done.next_temp, 4)
+      try accumulate("forfreshsupply", 0, ["xs: List[Int] = [1, 2]"], done.code)
+      ok()
+    end,
     Test.test("for over range updates a prebound target") do
       source = "for i in range(3):\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       ctx = flow_ctx(source, {"i": "Int"})
-      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for py_t0 in 0...3", "  i = py_t0", "  puts(i)", "end"])
       try Test.eq(done.scope.get("i", ""), "Int")
@@ -453,7 +488,7 @@ def main() -> Void
       source = "for ch in s:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       ctx = flow_ctx(source, {"s": "String", "ch": "String"})
-      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(ch)"])
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(ch)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for py_t0 in (s).split(\"\")", "  ch = py_t0", "  puts(ch)", "end"])
       try Test.eq(done.scope.get("ch", ""), "String")
@@ -465,7 +500,7 @@ def main() -> Void
       source = "for i in xs:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       ctx = flow_ctx(source, {"xs": "List[Int]", "i": "Int"}).with(next_temp: 3)
-      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"])
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(i)"], false)
       done = try assert_ok(res)
       try assert_lines(done.code, ["for py_t3 in xs", "  i = py_t3", "  puts(i)", "end"])
       try Test.eq(done.next_temp, 4)
@@ -476,7 +511,7 @@ def main() -> Void
       source = "for s in xs:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
       ctx = flow_ctx(source, {"xs": "List[Int]", "s": "String"})
-      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(s)"])
+      res = EmitFlow.emit_for(ctx, parts.target, parts.iterable, ["puts(s)"], false)
       try assert_refusal(res, "PY-TYPE-MISMATCH")
       case res
         EmitCtx.StmtRes.No(refusal) ->
@@ -491,7 +526,7 @@ def main() -> Void
     Test.test("for over an int is refused") do
       source = "for i in n:\n  pass\n"
       parts = try for_parts_of(compiled.unwrap!, source)
-      res = EmitFlow.emit_for(flow_ctx(source, {"n": "Int"}), parts.target, parts.iterable, ["puts(i)"])
+      res = EmitFlow.emit_for(flow_ctx(source, {"n": "Int"}), parts.target, parts.iterable, ["puts(i)"], false)
       try assert_refusal(res, "PY-OPERATOR")
       ok()
     end,

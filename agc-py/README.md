@@ -18,7 +18,7 @@ frontend error before anything is emitted. See `roadmap.md` for the phases.
 ```text
 agc-py/README.md        this file: goal, pipeline and subset sketch
 agc-py/roadmap.md      the work in phases, with exit criteria
-agc-py/src/py2agc.agc  the translator (today: the pipeline skeleton)
+agc-py/src/py2agc.agc  the translator: `.py` in, typed `.agc` out (CLI is phase 4)
 agc-py/tests/          Agentica unit tests (run from the repo root)
 ```
 

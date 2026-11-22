@@ -1278,7 +1278,7 @@ def ann_unknown_diag(name: String, start: Int, stop: Int) -> Diagnostic
   Diagnostic(
     code: "PY-ANNOTATION-UNKNOWN",
     message: "unknown annotation `#{name}`",
-    help: some("use one of int, str, float, bool, None, list, dict, Optional"),
+    help: some("use one of int, str, float, bool, None, Optional, list[T], dict[K, V]"),
     start: start,
     stop: stop,
   )
