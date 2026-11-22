@@ -2037,16 +2037,52 @@ def prepare_slots(cx: Cx, sig: EmitCtx.Sig, args: CallArgs) -> Result[Prepared]
   if args.kw.empty?
     pos_values = args.pos
   else
+    ordered_codes: List[String] = []
+    ordered_pres: List[List[String]] = []
     for done in args.pos
-      temp = "py_t#{current.next_temp}"
-      current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{done.code}"))
-      pos_values = pos_values.push(done.with(code: temp, cx: current))
+      ordered_codes = ordered_codes.push(done.code)
+      ordered_pres = ordered_pres.push(done.cx.pre)
     end
 
     for kw in args.kw
-      temp = "py_t#{current.next_temp}"
-      current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{kw.value.code}"))
+      ordered_codes = ordered_codes.push(kw.value.code)
+      ordered_pres = ordered_pres.push(kw.value.cx.pre)
+    end
+
+    # Keyword hoists stay in source order, interleaved with each argument's
+    # own preamble: capturing an earlier argument after a later preamble
+    # would run the later effects first.
+    temps: List[String] = []
+    next_temp = current.next_temp
+    for _ in ordered_codes
+      temps = temps.push("py_t#{next_temp}")
+      next_temp += 1
+    end
+
+    rebuilt: List[String] = List.first(ordered_pres)
+    rebuilt = rebuilt.push("#{List.first(temps)} = #{List.first(ordered_codes)}")
+    hoist_index = 1
+    for _ in ordered_pres.drop(1)
+      prev = List.first(ordered_pres.drop(hoist_index - 1))
+      cur_pre = List.first(ordered_pres.drop(hoist_index))
+      rebuilt = rebuilt + cur_pre.drop(prev.size)
+      rebuilt = rebuilt.push("#{List.first(temps.drop(hoist_index))} = #{List.first(ordered_codes.drop(hoist_index))}")
+      hoist_index += 1
+    end
+
+    current = current.with(next_temp: next_temp, pre: rebuilt)
+    pos_index = 0
+    for done in args.pos
+      temp = List.first(temps.drop(pos_index))
+      pos_values = pos_values.push(done.with(code: temp, cx: current))
+      pos_index += 1
+    end
+
+    kw_index = 0
+    for kw in args.kw
+      temp = List.first(temps.drop(args.pos.size + kw_index))
       kw_values = kw_values.put(kw.name, kw.value.with(code: temp, cx: current))
+      kw_index += 1
     end
   end
 
@@ -2158,9 +2194,11 @@ end
 # parameter the call does not pass explicitly would evaluate nothing here,
 # so it refuses instead of silently binding the caller's like-named value.
 def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[String]) -> Result[Bound]
-  current = cx
   substs = cx.substs
   own: Map[String, String] = {}
+  hoist_temps: Map[String, String] = {}
+  hoist_codes: Map[String, String] = {}
+  next_temp = cx.next_temp
   index = 0
   for param in sig.params
     slot = List.first(slots.drop(index))
@@ -2171,8 +2209,10 @@ def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[Str
             substs = substs.put(param, done.code)
             own = own.put(param, done.code)
           else
-            temp = "py_t#{current.next_temp}"
-            current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{done.code}"))
+            temp = "py_t#{next_temp}"
+            next_temp += 1
+            hoist_temps = hoist_temps.put(param, temp)
+            hoist_codes = hoist_codes.put(param, done.code)
             substs = substs.put(param, temp)
             own = own.put(param, temp)
           end
@@ -2187,7 +2227,54 @@ def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[Str
     index += 1
   end
 
-  ok(Bound(cx: current.with(substs: substs), own: own))
+  return ok(Bound(cx: cx.with(next_temp: next_temp, substs: substs), own: own)) if Map.empty?(hoist_temps)
+
+  # Each capture runs where its argument sat: appending every hoist after a
+  # later argument's preamble would run the later effects first.
+  exp_dones: List[Done] = []
+  exp_params: List[String] = []
+  exp_index = 0
+  for param in sig.params
+    slot = List.first(slots.drop(exp_index))
+    case slot
+      ArgSlot.Value(done) ->
+        exp_dones = exp_dones.push(done)
+        exp_params = exp_params.push(param)
+      ArgSlot.Default(_) -> exp_dones = exp_dones
+    end
+
+    exp_index += 1
+  end
+
+  exp_pres: List[List[String]] = exp_dones.map { |done| done.cx.pre }
+  rebuilt: List[String] = List.first(exp_pres)
+  first_param = List.first(exp_params)
+  first_hit = hoist_temps.get(first_param)
+  case first_hit
+    some(temp) ->
+      first_code = hoist_codes.get(first_param).unwrap!
+      rebuilt = rebuilt.push("#{temp} = #{first_code}")
+    none -> rebuilt = rebuilt
+  end
+
+  bind_index = 1
+  for _ in exp_dones.drop(1)
+    prev = List.first(exp_pres.drop(bind_index - 1))
+    cur_pre = List.first(exp_pres.drop(bind_index))
+    rebuilt = rebuilt + cur_pre.drop(prev.size)
+    param = List.first(exp_params.drop(bind_index))
+    hit = hoist_temps.get(param)
+    case hit
+      some(temp) ->
+        code = hoist_codes.get(param).unwrap!
+        rebuilt = rebuilt.push("#{temp} = #{code}")
+      none -> rebuilt = rebuilt
+    end
+
+    bind_index += 1
+  end
+
+  ok(Bound(cx: cx.with(next_temp: next_temp, pre: rebuilt, substs: substs), own: own))
 end
 
 # Whether `code` spells exactly one generated temp (`py_t` plus digits, and

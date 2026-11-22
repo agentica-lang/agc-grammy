@@ -40,6 +40,8 @@ def main() -> Void
     Test.test("a repeated parameter read evaluates its argument once") do temp_flow(compiled.unwrap!) end,
     Test.test("a lowered default wraps and checks like an argument") do default_fit_flow(compiled.unwrap!) end,
     Test.test("a self-referential default refuses") do self_ref_flow(compiled.unwrap!) end,
+    Test.test("keyword hoists stay in source order before a later preamble") do kw_preamble_flow(compiled.unwrap!) end,
+    Test.test("a default capture runs where its argument sat") do default_order_flow(compiled.unwrap!) end,
   ])
 end
 
@@ -280,6 +282,50 @@ def self_ref_flow(compiled: Grammar.Grammar) -> Result[Void]
   # so it refuses instead of reading a like-named caller local.
   emitted = EmitExpr.emit(List.first(nodes), full, scope, sigs)
   try assert_err(emitted, "PY-OUT-OF-SUBSET")
+  ok()
+end
+
+def kw_preamble_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(a=f(), b=1 < g() < 3)"])
+  nodes = try parse_values(compiled, full)
+  h_sig = EmitCtx.Sig(name: "h", params: ["a", "b"], types: ["Int", "Bool"], defaults: [none, none], ret: "Int")
+  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  g_sig = EmitCtx.Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"h": h_sig, "f": f_sig, "g": g_sig}
+  scope = {"h": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "g": EmitCtx.def_marker()}
+
+  # The chained middle hoists `g()` to `py_t0`; the keyword hoists must not
+  # append `f()` after it. Source order is `f()` before `g()`.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(py_t1, py_t2)")
+  try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = g()", "py_t2 = 1 < py_t0 and py_t0 < 3"])
+  ok()
+end
+
+def default_order_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["g(f(), h() if True else 0)", "a + b"])
+  nodes = try parse_values(compiled, full)
+  dflt = List.first(nodes.drop(1))
+  g_sig = EmitCtx.Sig(
+    name: "g",
+    params: ["a", "b", "c"],
+    types: ["Int", "Int", "Int"],
+    defaults: [none, none, some(dflt)],
+    ret: "Int",
+  )
+
+  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  h_sig = EmitCtx.Sig(name: "h", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"g": g_sig, "f": f_sig, "h": h_sig}
+  scope = {"g": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "h": EmitCtx.def_marker()}
+
+  # The ternary preamble holds `h()`; capturing `a` for the default must run
+  # where `f()` sat, before that preamble, so `f()` evaluates once first.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "g(py_t1, py_t0, py_t1 + py_t0)")
+  try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = 0", "if true", "  py_t0 = h()", "end"])
   ok()
 end
 
