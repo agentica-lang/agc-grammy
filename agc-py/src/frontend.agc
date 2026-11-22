@@ -44,10 +44,12 @@
 ## so a body problem can surface before a later top-level one.
 ##
 ## Annotations are checked against the known-type set (`int`, `str`, `float`,
-## `bool`, `None`, `list`, `dict`, `Optional`): an unknown bare or dotted-head
-## name is `PY-ANNOTATION-UNKNOWN`, while a bare `Any` (or `object`) and a
-## `typing.Any` head are `PY-ANY`. Quoted forward references (`"Fwd"`,
-## `list["Fwd"]`) are skipped: their targets are classes, unmodeled in 3a.
+## `bool`, `None`, `list`, `dict`, `Optional`) plus the type aliases the
+## position already declared (`type Alias = T` at top level): an unknown bare
+## or dotted-head name is `PY-ANNOTATION-UNKNOWN`, while a bare `Any` (or
+## `object`) and a `typing.Any` head are `PY-ANY`. Quoted forward references
+## (`"Fwd"`, `list["Fwd"]`) are skipped: their targets are classes, unmodeled
+## in 3a.
 ##
 ## `render` prints one diagnostic in the Agentica shape (`file:line:col`
 ## `error[PY-*]` + explanation + marked source line + `= help:` when known).
@@ -201,6 +203,14 @@ end
 ## body use of a later-bound module variable is `PY-NAME-UNKNOWN`). Answers
 ## every problem sorted by start offset; an empty list means the program
 ## resolved cleanly.
+##
+## Type aliases join the same positional story: a top-level `type Alias = T`
+## makes `Alias` an accepted annotation head from its own span on, so the
+## emitter's structural alias resolution (`map_ann_scoped`) never sees an
+## annotation the frontend already refused. An annotation naming an alias
+## declared later, an alias inside another `def`, or no alias at all stays
+## `PY-ANNOTATION-UNKNOWN`; the alias target itself is checked against the
+## aliases declared before it, so alias-to-alias chains resolve in order.
 def resolve(program: Program) -> List[Diagnostic]
   all_defs: Set[String] = Set.new([])
   for func_def in program.funcs
@@ -209,6 +219,7 @@ def resolve(program: Program) -> List[Diagnostic]
 
   def_idx = 0
   module_state = ScopeState(scope: Set.new([]), diags: [])
+  aliases: Set[String] = Set.new([])
   for item in program.top
     pos = top_start(item)
     if pos.some?
@@ -222,7 +233,11 @@ def resolve(program: Program) -> List[Diagnostic]
       end
     end
 
-    module_state = check_top_item(module_state, item)
+    module_state = check_top_item(module_state, item, aliases)
+    case item
+      TopItem.StmtItem(Stmt.AliasDef(occ, _), _) -> aliases = aliases.add(occ.name)
+      _ -> aliases = aliases
+    end
   end
 
   while def_idx < program.funcs.size
@@ -232,10 +247,30 @@ def resolve(program: Program) -> List[Diagnostic]
 
   diags = module_state.diags
   for func_def in program.funcs
-    diags = check_func_body(diags, snapshot_scope(program, all_defs, func_def.span.start), func_def)
+    scope = snapshot_scope(program, all_defs, func_def.span.start)
+    body_aliases = aliases_at(program, func_def.span.start)
+    diags = check_func_body(diags, scope, body_aliases, func_def)
   end
 
   diags.sort_by { |diag| diag.start }
+end
+
+# The top-level aliases a `def` starting at `at` may name in its
+# annotations: those declared strictly before it, like the module scope.
+def aliases_at(program: Program, at: Int) -> Set[String]
+  aliases: Set[String] = Set.new([])
+  for item in program.top
+    case item
+      TopItem.StmtItem(Stmt.AliasDef(occ, _), _) ->
+        if occ.span.start < at
+          aliases = aliases.add(occ.name)
+        end
+
+      _ -> aliases = aliases
+    end
+  end
+
+  aliases
 end
 
 # The earliest name position in a top-level item, or none when the item
@@ -1064,10 +1099,10 @@ def bind_def_name(state: ScopeState, func_def: FuncDef) -> ScopeState
   declare_name(state, NameOcc(name: func_def.name, span: func_def.name_span, kind: "declare"))
 end
 
-def check_top_item(state: ScopeState, item: TopItem) -> ScopeState
+def check_top_item(state: ScopeState, item: TopItem, aliases: Set[String]) -> ScopeState
   case item
     TopItem.StmtItem(stmt, names) ->
-      check_top_names(ScopeState(scope: state.scope, diags: state.diags + stmt_ann_diags(stmt)), names)
+      check_top_names(ScopeState(scope: state.scope, diags: state.diags + stmt_ann_diags(stmt, aliases)), names)
     TopItem.ImportItem(names) -> declare_all(state, names)
   end
 end
@@ -1090,14 +1125,19 @@ def declare_all(state: ScopeState, names: List[NameOcc]) -> ScopeState
   current
 end
 
-def check_func_body(diags: List[Diagnostic], module: Set[String], func_def: FuncDef) -> List[Diagnostic]
+def check_func_body(
+  diags: List[Diagnostic],
+  module: Set[String],
+  aliases: Set[String],
+  func_def: FuncDef,
+) -> List[Diagnostic]
   state = ScopeState(
     scope: Set.new([]),
     diags: (
       diags +
-      anns_diags(func_def.param_anns) +
-      ann_diags(func_def.return_type, func_def.return_span) +
-      stmts_ann_diags(func_def.body)
+      anns_diags(func_def.param_anns, aliases) +
+      ann_diags(func_def.return_type, func_def.return_span, aliases) +
+      stmts_ann_diags(func_def.body, aliases)
     ),
   )
 
@@ -1249,53 +1289,55 @@ def dotted_attr?(chars: List[String], at: Int) -> Bool
   false
 end
 
-def anns_diags(anns: List[Ann]) -> List[Diagnostic]
+def anns_diags(anns: List[Ann], aliases: Set[String]) -> List[Diagnostic]
   out: List[Diagnostic] = []
   for ann in anns
-    out = out + ann_diags(ann.text, ann.span)
+    out = out + ann_diags(ann.text, ann.span, aliases)
   end
 
   out
 end
 
-def stmt_ann_diags(stmt: Stmt) -> List[Diagnostic]
+def stmt_ann_diags(stmt: Stmt, aliases: Set[String]) -> List[Diagnostic]
   case stmt
-    Stmt.Annotated(_, ann, _) -> ann_diags(ann.text, ann.span)
-    Stmt.AliasDef(_, ann) -> ann_diags(ann.text, ann.span)
-    Stmt.ForLoop(_, _, body) -> stmts_ann_diags(body)
-    Stmt.IfStmt(arms, else_body) -> if_ann_diags(arms, else_body)
-    Stmt.WhileStmt(_, body) -> stmts_ann_diags(body)
-    Stmt.TryStmt(try_body, handler_body, _) -> stmts_ann_diags(try_body) + stmts_ann_diags(handler_body)
+    Stmt.Annotated(_, ann, _) -> ann_diags(ann.text, ann.span, aliases)
+    Stmt.AliasDef(_, ann) -> ann_diags(ann.text, ann.span, aliases)
+    Stmt.ForLoop(_, _, body) -> stmts_ann_diags(body, aliases)
+    Stmt.IfStmt(arms, else_body) -> if_ann_diags(arms, else_body, aliases)
+    Stmt.WhileStmt(_, body) -> stmts_ann_diags(body, aliases)
+    Stmt.TryStmt(try_body, handler_body, _) ->
+      stmts_ann_diags(try_body, aliases) + stmts_ann_diags(handler_body, aliases)
     _ -> []
   end
 end
 
-def if_ann_diags(arms: List[CondArm], else_body: List[Stmt]) -> List[Diagnostic]
+def if_ann_diags(arms: List[CondArm], else_body: List[Stmt], aliases: Set[String]) -> List[Diagnostic]
   out: List[Diagnostic] = []
   for arm in arms
-    out = out + stmts_ann_diags(arm.body)
+    out = out + stmts_ann_diags(arm.body, aliases)
   end
 
-  out + stmts_ann_diags(else_body)
+  out + stmts_ann_diags(else_body, aliases)
 end
 
-def stmts_ann_diags(stmts: List[Stmt]) -> List[Diagnostic]
+def stmts_ann_diags(stmts: List[Stmt], aliases: Set[String]) -> List[Diagnostic]
   out: List[Diagnostic] = []
   for stmt in stmts
-    out = out + stmt_ann_diags(stmt)
+    out = out + stmt_ann_diags(stmt, aliases)
   end
 
   out
 end
 
-# Checks every head identifier in an annotation against the known-type set.
-# Only dotted heads are checked (`nosuch.X` points at `nosuch`); a `typing`
-# head followed by `Any` (or `object`) is `PY-ANY`, like a bare `Any`.
+# Checks every head identifier in an annotation against the known-type set
+# plus the aliases declared before the annotation. Only dotted heads are
+# checked (`nosuch.X` points at `nosuch`); a `typing` head followed by `Any`
+# (or `object`) is `PY-ANY`, like a bare `Any`.
 # Quoted segments (`"Fwd"`, `list["Fwd"]`) are skipped entirely: string
 # forward references resolve like bare names per `SUBSET.md` section 1, and
 # their targets are classes, unmodeled in 3a (same rationale as the
 # class-like `raise` skip).
-def ann_diags(text: String, span: Span) -> List[Diagnostic]
+def ann_diags(text: String, span: Span, aliases: Set[String]) -> List[Diagnostic]
   chars = text.split("")
   diags: List[Diagnostic] = []
   i = 0
@@ -1329,7 +1371,7 @@ def ann_diags(text: String, span: Span) -> List[Diagnostic]
               diags = diags + typing_head_diags(chars, span, start_i, i)
               i = typing_head_end(chars, i)
             else
-              if !KNOWN_TYPES.include?(word)
+              if !KNOWN_TYPES.include?(word) and !aliases.include?(word)
                 diags = diags.push(ann_unknown_diag(word, span.start + start_i, span.start + i))
               end
             end

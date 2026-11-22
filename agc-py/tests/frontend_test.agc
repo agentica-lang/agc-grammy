@@ -269,6 +269,34 @@ def main() -> Void
       source = "def f() -> None:\n    raise ValueError(\"bad\")\n"
       Test.ok?(check(compiled, source))
     end,
+    Test.test("a declared alias is an accepted annotation") do
+      try Test.ok?(check(compiled, "type Color = int\nx: Color = 3\nprint(x)\n"))
+      Test.ok?(check(compiled, "type Color = int\nxs: list[Color] = [1, 2]\nprint(xs)\n"))
+    end,
+    Test.test("a declared alias works in a def annotation") do
+      Test.ok?(check(compiled, "type Color = int\ndef f(c: Color) -> Color:\n    return c\nprint(f(1))\n"))
+    end,
+    Test.test("an alias of an alias resolves in order") do
+      Test.ok?(check(compiled, "type A = int\ntype B = A\nx: B = 1\nprint(x)\n"))
+    end,
+    Test.test("an unknown alias name refuses at the annotation") do
+      source = "x: Nope = 3\nprint(x)\n"
+      diags = try analyze(compiled, source)
+      diag = List.first(diags)
+      Test.eq(span_text(source, diag), "Nope")
+    end,
+    Test.test("an alias used before it is declared refuses") do
+      source = "x: Color = 3\ntype Color = int\nprint(x)\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANNOTATION-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "Color")
+    end,
+    Test.test("an alias declared after the def stays unknown inside it") do
+      source = "def f() -> None:\n    x: Color = 1\n    print(x)\ntype Color = int\nprint(0)\n"
+      diags = try analyze(compiled, source)
+      try Test.eq(codes(diags), ["PY-ANNOTATION-UNKNOWN"])
+      Test.eq(span_text(source, List.first(diags)), "Color")
+    end,
     Test.test("build keeps spans and header facts") do
       source = "def add(a: int, b: int) -> int:\n    return a + b\n"
       tree = try Frontend.parse_source(compiled.unwrap!, source)

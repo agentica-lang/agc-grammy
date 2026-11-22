@@ -172,7 +172,7 @@ def main() -> Void
     Test.test("raise with a literal returns the error") do
       source = "raise E(\"boom\")\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       done = try assert_ok(res)
       try assert_lines(done.code, ["return error(\"boom\")"])
       try Test.eq(done.next_temp, 0)
@@ -191,7 +191,7 @@ def main() -> Void
     Test.test("raise with a typed message keeps its type") do
       source = "raise E(msg)\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {"msg": "String"}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {"msg": "String"}, "Result[Int]", 0), expr)
       done = try assert_ok(res)
       try assert_lines(done.code, ["return error(msg)"])
       try accumulate("raisemsg", 0, ["msg: String = \"oops\""], done.code, "Result[Int]")
@@ -200,7 +200,7 @@ def main() -> Void
     Test.test("raise with a non-str message is refused") do
       source = "raise E(n)\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {"n": "Int"}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {"n": "Int"}, "Result[Int]", 0), expr)
       ref = try assert_no(res, "PY-TYPE-MISMATCH")
       try Test.eq(ref.start, 8)
       try Test.eq(ref.stop, 9)
@@ -210,7 +210,7 @@ def main() -> Void
     Test.test("raise with no message is refused") do
       source = "raise E()\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       ref = try assert_no(res, "PY-OUT-OF-SUBSET")
       try Test.eq(ref.start, expr.start)
       try Test.eq(ref.stop, expr.stop)
@@ -219,7 +219,7 @@ def main() -> Void
     Test.test("raise with two messages is refused") do
       source = "raise E(\"a\", \"b\")\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       ref = try assert_no(res, "PY-OUT-OF-SUBSET")
       try Test.eq(ref.start, expr.start)
       try Test.eq(ref.stop, expr.stop)
@@ -228,7 +228,7 @@ def main() -> Void
     Test.test("a bare raise name is refused") do
       source = "raise E\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       ref = try assert_no(res, "PY-OUT-OF-SUBSET")
       try Test.assert(ref.message.include?("needs a message"), ref.message)
       ok()
@@ -236,21 +236,21 @@ def main() -> Void
     Test.test("raise of a bare message is refused") do
       source = "raise \"boom\"\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       try assert_no(res, "PY-OUT-OF-SUBSET")
       ok()
     end,
     Test.test("raise with a keyword message is refused") do
       source = "raise E(msg=\"x\")\n"
       expr = try raise_of(compiled.unwrap!, source)
-      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Int", 0), expr)
+      res = EmitChecks.emit_raise(checks_ctx(source, {}, "Result[Int]", 0), expr)
       try assert_no(res, "PY-OUT-OF-SUBSET")
       ok()
     end,
     Test.test("raise threads temps past the supply") do
       source = "raise E(y if c else \"d\")\n"
       expr = try raise_of(compiled.unwrap!, source)
-      ctx = checks_ctx(source, {"y": "String", "c": "Bool"}, "Int", 2)
+      ctx = checks_ctx(source, {"y": "String", "c": "Bool"}, "Result[Int]", 2)
       res = EmitChecks.emit_raise(ctx, expr)
       done = try assert_ok(res)
       try assert_lines(done.code, ["py_t2 = \"d\"", "if c", "  py_t2 = y", "end", "return error(py_t2)"])
