@@ -13,16 +13,15 @@ def version() -> String = "0.0.0"
 
 ## Translates `source` (`file` names it in diagnostics, `grammar` is the
 ## owned `py312` grammar) to a standalone single-file `.agc` program: parse,
-## build and resolve refuse first with their rendered diagnostics, then the
+## build and resolve refuse first with their rendered diagnostics (`Frontend
+## .program` runs all three once and answers the validated module), then the
 ## module assembler refuses with its spanned `PY-*` refusals, and a program
 ## that passes every stage answers the full `.agc` text with a trailing
 ## newline.
 def translate(grammar: Grammar.Grammar, file: String, source: String) -> Result[String]
   return error("agc-py: an empty program has nothing to translate") if source.empty?()
 
-  try Frontend.check_source(grammar, file, source)
-  tree = try Frontend.parse_source(grammar, source)
-  program = try Frontend.build(tree, source)
+  program = try Frontend.program(grammar, file, source)
   case EmitModule.emit_program(program, source, file)
     EmitModule.ModuleRes.No(refusal) -> error(EmitCtx.render_refusal(file, source, refusal))
     EmitModule.ModuleRes.Ok(out) -> ok(out.code.join("\n") + "\n")

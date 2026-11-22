@@ -157,15 +157,25 @@ struct Diagnostic
 end
 
 ## Runs every stage on `source` (`file` names it in diagnostics): parse, then
-## build, then resolve. Every failure is an `error` carrying the rendered
-## diagnostics (or the engine message when the text is not Python at all).
-def check_source(grammar: Grammar.Grammar, file: String, source: String) -> Result[Void]
+## build, then resolve. The validated `Program` comes back in one pass, so a
+## caller that gates and then emits does not parse and build a second time.
+## Every failure is an `error` carrying the rendered diagnostics (or the
+## engine message when the text is not Python at all).
+def program(grammar: Grammar.Grammar, file: String, source: String) -> Result[Program]
   tree = try parse_with_untyped(grammar, source, file)
-  program = try build(tree, source)
-  diags = resolve(program)
-  return ok() if diags.empty?
+  built = try build(tree, source)
+  diags = resolve(built)
+  return ok(built) if diags.empty?
 
   error(diags.map { |diag| render(file, source, diag) }.join("\n\n"))
+end
+
+## Gates on every stage (`program`) without keeping the built module.
+def check_source(grammar: Grammar.Grammar, file: String, source: String) -> Result[Void]
+  case program(grammar, file, source)
+    ok(_) -> ok()
+    error(e) -> error(e)
+  end
 end
 
 ## Parses `source` with the owned grammar: the raw parse stage, without the

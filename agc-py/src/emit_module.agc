@@ -32,7 +32,10 @@
 ## binding never read emits `_ = <rhs>` (the expression still evaluates,
 ## like Python), and a name whose only reads feed its own updates keeps them
 ## and gains one `_ = name` after its last binding line, so the backend's
-## liveness sees a real read.
+## liveness sees a real read. An augmented target always reads itself
+## (`c += 1` lowers to `c = c + (1)`) even when its right-hand side never
+## mentions it, so an update-only variable keeps its declaration and gains
+## that discard read instead of disappearing under `c`'s own reference.
 
 import EmitAssign from "emit_assign"
 import EmitCtx from "emit_ctx"
@@ -475,10 +478,25 @@ def walk_occ(
 
       WalkRes.Ok(advance(walk, name, state))
     "assign" ->
+      implicit = selfs.include?("#{name}:#{occ.span.start}:#{occ.span.stop}")
       if walk.bound.get(name, "none") == "bare"
-        WalkRes.No(unbound_refusal(occ))
+        # An augmented target is a read (`c += 1` is `c = c + (1)`); a plain
+        # assignment only writes, so each gets its own message.
+        if implicit
+          WalkRes.No(unbound_refusal(occ))
+        else
+          WalkRes.No(uninitialized_refusal(occ))
+        end
       else
-        WalkRes.Ok(advance(walk, name, "value"))
+        stepped = advance(walk, name, "value")
+        # The aug target's implicit read of itself feeds only its own
+        # rebinding, so it is recorded but never real: the self-only rewrite
+        # turns it into the one real `_ = c` read after the last binding.
+        if implicit
+          WalkRes.Ok(read_step(stepped, name, false))
+        else
+          WalkRes.Ok(stepped)
+        end
       end
 
     "reuse" -> WalkRes.Ok(advance(walk, name, "value"))
@@ -590,6 +608,19 @@ def unbound_refusal(occ: Frontend.NameOcc) -> EmitCtx.Refusal
     code: "PY-NAME-UNKNOWN",
     message: "`#{occ.name}` is read before it is assigned",
     help: some("assign it first, for example `#{occ.name} = 0`"),
+    start: occ.span.start,
+    stop: occ.span.stop,
+  )
+end
+
+# A plain assignment to a name only annotated (`c: int` then `c = 5`): the
+# valueless annotation has no backend form, so nothing of `c` exists yet.
+# The span stays on the assignment, where the program fails.
+def uninitialized_refusal(occ: Frontend.NameOcc) -> EmitCtx.Refusal
+  EmitCtx.Refusal(
+    code: "PY-NAME-UNKNOWN",
+    message: "`#{occ.name}` is annotated without a value; initialize it in its declaration",
+    help: some("write `#{occ.name}: int = 0` instead of `#{occ.name}: int`"),
     start: occ.span.start,
     stop: occ.span.stop,
   )
@@ -777,7 +808,8 @@ def insert_read(lines: List[String], name: String) -> List[String]
   lines.take(at + 1) + [read] + lines.drop(at + 1)
 end
 
-# Whether the line binds `name`: `name: T = ...` or `name = ...`.
+# Whether the line binds `name`: `name: T = ...` or `name = ...`. A
+# comparison is not a binding, so `==` never counts (`name == 1`).
 def binding_for?(line: String, name: String) -> Bool
   indent = indent_of(line)
   rest = line.slice(indent.length, line.length - indent.length)
@@ -786,7 +818,9 @@ def binding_for?(line: String, name: String) -> Bool
   after = rest.slice(name.length, rest.length - name.length)
   return true if after.start_with?(":")
 
-  after.start_with?(" =") or after.start_with?("=")
+  return true if after.start_with?(" =") and !after.slice(2, after.length - 2).start_with?("=")
+
+  after.start_with?("=") and !after.slice(1, after.length - 1).start_with?("=")
 end
 
 def indent_of(line: String) -> String
@@ -969,14 +1003,18 @@ def trim_blank_tail(lines: List[String]) -> List[String]
 end
 
 # The self-update reads of one statement subtree: uses of an assignment
-# target inside its own right-hand side, the only reads the backend
-# discounts as dead. Kwarg names are skipped (they name nothing).
+# target inside its own right-hand side, plus the implicit read every
+# augmented target makes of itself (its lowering reads the name even when
+# the right-hand side never mentions it) — the reads the backend discounts
+# as dead. Kwarg names are skipped (they name nothing).
 def self_keys(stmts: List[Frontend.Stmt], source: String) -> List[String]
   out: List[String] = []
   for stmt in stmts
     case stmt
       Frontend.Stmt.Assigned(occ, value) -> out = out + target_keys(occ.name, value, source)
-      Frontend.Stmt.AugAssigned(occ, _, value) -> out = out + target_keys(occ.name, value, source)
+      Frontend.Stmt.AugAssigned(occ, _, value) ->
+        out = out.push("#{occ.name}:#{occ.span.start}:#{occ.span.stop}")
+        out = out + target_keys(occ.name, value, source)
       Frontend.Stmt.ForLoop(_, _, body) -> out = out + self_keys(body, source)
       Frontend.Stmt.IfStmt(arms, else_body) ->
         for arm in arms

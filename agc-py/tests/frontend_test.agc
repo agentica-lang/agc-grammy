@@ -43,6 +43,22 @@ def main() -> Void
       try Test.ok?(check(compiled, "x: int = 1\nprint(x)\n"))
       Test.ok?(check(compiled, "def add(a: int, b: int) -> int:\n    return a + b\nprint(add(1, 2))\n"))
     end,
+    # `program` answers the built module in one pass: the same stages as
+    # `check_source`, so the diagnostics stay identical while the next stage
+    # never parses and builds a second time.
+    Test.test("program answers the built module or the rendered diagnostics") do
+      case Frontend.program(compiled.unwrap!, "prog.py", "x: int = 1\nprint(x)\n")
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(built) ->
+          try Test.eq(built.top.size, 2)
+          try Test.eq(built.funcs.size, 0)
+      end
+
+      case Frontend.program(compiled.unwrap!, "prog.py", "x = 1\n")
+        error(e) -> Test.assert(e.message.include?("PY-UNTYPED-NAME"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("shadowing a module name in a function is allowed") do
       try Test.ok?(check(compiled, "x: int = 1\ndef f(x: int) -> int:\n    return x\n"))
       Test.ok?(check(compiled, "x: int = 1\ndef f() -> None:\n    x: int = 2\n"))
