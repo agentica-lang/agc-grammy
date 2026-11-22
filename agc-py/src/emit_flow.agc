@@ -33,6 +33,13 @@
 ## update semantics through a fresh `py_tK` iterator plus `target = py_tK`
 ## as the first body line, so empty iteration leaves the outer value alone
 ## and no shadowing error arises; a mismatched element type refuses instead.
+## A fresh target the body reassigns (reported by the spine, which sees the
+## statements) lowers the same iterator shape: the direct header would make
+## the body assign the backend's immutable loop variable (probed
+## CHECK-IMMUTABLE-ASSIGNMENT on agentica 0.35.0), while `target = py_tK`
+## declares the binding inside the loop body and every later assignment
+## rebinds that, Python's semantics. The outgoing scope stays the incoming
+## one, so a reassigned fresh target never escapes the loop either.
 ##
 ## Temps from a condition preamble (`py_tN`, e.g. a chained comparison that
 ## evaluates a middle operand once) are shifted by `ctx.next_temp`, so a
@@ -130,14 +137,17 @@ end
 ## the first body line), updating the outer slot like Python instead of
 ## shadowing it; the iterator temp sits past the iterable preamble and the
 ## body (the spine hands a `next_temp` beyond the body), so it collides
-## with neither. A `String` iterable maps to `(<code>).split("")`, the
-## parens keeping a concatenated source from binding to the last piece
-## only. An empty body emits `nil`.
+## with neither. The spine also reports (`assigned`) when a first-time
+## target is reassigned anywhere in the body, and that shape lowers like
+## the prebound one (see `emit_fresh_assigned_for`). A `String` iterable
+## maps to `(<code>).split("")`, the parens keeping a concatenated source
+## from binding to the last piece only. An empty body emits `nil`.
 def emit_for(
   ctx: EmitCtx.EmitCtx,
   target: Frontend.NameOcc,
   iterable: Tree.Node,
   body_code: List[String],
+  assigned: Bool,
 ) -> EmitCtx.StmtRes
   made = EmitExpr.emit(iterable, ctx.source, ctx.scope)
   case made
@@ -156,7 +166,11 @@ def emit_for(
         some(item) ->
           existing = ctx.scope.get(target.name, "")
           if existing == ""
-            emit_first_for(ctx, out, target.name, body_code)
+            if assigned
+              emit_fresh_assigned_for(ctx, out, target, body_code)
+            else
+              emit_first_for(ctx, out, target.name, body_code)
+            end
           else
             emit_reuse_for(ctx, out, target, existing, item, body_code)
           end
@@ -288,6 +302,30 @@ def emit_first_for(ctx: EmitCtx.EmitCtx, out: EmitExpr.Out, name: String, body_c
   lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
   lines = lines.push("end")
   EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: advanced))
+end
+
+# A fresh target the body reassigns: the same iterator shape as the
+# prebound case (`for py_tK in ...` plus `target = py_tK` as the first
+# body line). There is no element-type check here: the body scope was
+# seeded with the element type itself, and the direct header would make
+# every body assignment hit the backend's immutable loop variable. The
+# outgoing scope stays the incoming one, so the target never escapes.
+def emit_fresh_assigned_for(
+  ctx: EmitCtx.EmitCtx,
+  out: EmitExpr.Out,
+  target: Frontend.NameOcc,
+  body_code: List[String],
+) -> EmitCtx.StmtRes
+  shifted_pre = out.pre.map { |line| shift_code(line, ctx.next_temp) }
+  shifted = shift_code(out.code, ctx.next_temp)
+  advanced = advance_temp(ctx.next_temp, out.pre + [out.code])
+  iter = "py_t#{advanced}"
+  lines = EmitCtx.indented(shifted_pre, 0)
+  lines = lines.push(for_header(iter, out.type, shifted))
+  lines = lines.push("  #{target.name} = #{iter}")
+  lines = lines + EmitCtx.indented(body_or_nil(body_code), 1)
+  lines = lines.push("end")
+  EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: lines, scope: ctx.scope, next_temp: advanced + 1))
 end
 
 # A prebound target: a fresh iterator plus an assignment keeps Python's

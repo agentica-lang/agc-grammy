@@ -14,6 +14,7 @@
 ## `math.sqrt`, left for phase 4) assert structure only and name their TODO
 ## mapping; see the stdlib TODO block above the attribute tests.
 
+import EmitCtx from "../src/emit_ctx"
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
@@ -759,7 +760,9 @@ def main() -> Void
         [errcased("x is y", {"x": "Int", "y": "Int"}, "PY-IS")],
       )
     end,
-    Test.test("calls pass positionals and keywords") do
+    Test.test("calls pass positionals and refuse keywords") do
+      # Keyword calls have no backend form (`f(x=1)` miscompiles), so until
+      # the full call ABI (issue #23) lowers them they refuse spanned.
       check_all(
         compiled.unwrap!,
         "calls",
@@ -776,26 +779,18 @@ def main() -> Void
             skip_check: false,
             tops: ["def f(x: Int) -> Int\n  x\nend"],
           ),
-          Case(
-            expr: "add(x, y=1)",
-            scope: {"add": "Unknown", "x": "Int"},
-            decls: ["x: Int = 1"],
-            want_type: "Unknown",
-            want_code: "add(x, y: 1)",
-            want_contains: [],
-            want_pre: [],
-            as_type: "",
-            skip_check: false,
-            tops: ["def add(x: Int, y: Int) -> Int\n  x + y\nend"],
-          ),
         ],
         [
           errcased("nosuchfn(x)", {"x": "Int"}, "PY-NAME-UNKNOWN"),
+          errcased("add(x, y=1)", {"add": "Unknown", "x": "Int"}, "PY-OUT-OF-SUBSET"),
           errcased("len", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("(len)", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("-len", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("len + 1", empty_scope(), "PY-OUT-OF-SUBSET"),
           errcased("str", empty_scope(), "PY-OUT-OF-SUBSET"),
+          # A def name carries the callable marker and is not a value either:
+          # the backend has no function values, so a bare use refuses.
+          errcased("greet", {"greet": EmitCtx.def_marker()}, "PY-OUT-OF-SUBSET"),
         ],
       )
     end,

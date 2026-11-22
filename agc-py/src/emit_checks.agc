@@ -33,14 +33,14 @@ import Tree from "../../src/tree"
 ## (`func_ret == ""`, where `main` cannot return) halts instead, a def
 ## returning `Result[T]` (including an outlined `try` helper, which returns
 ## `Result[Void]`) returns the error, and anything else is refused spanned
-## — the explicit caller ripple of a raising def lands in phase 3d
-## (`agc-py/roadmap.md` PR 3d, issue #24).
+## — the explicit caller ripple of a raising def is issue #24, kept out of
+## 3d on purpose.
 def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   if !result_context?(ctx.func_ret)
     return EmitCtx.refuse_at(
       "PY-OUT-OF-SUBSET",
       "raise inside a def returning #{ctx.func_ret} has no backend form",
-      some("make the enclosing def return Result[T]; the caller ripple is phase 3d"),
+      some("annotate the def with the Result type its callers handle; the ripple is issue #24"),
       expr.start,
       expr.stop,
     )

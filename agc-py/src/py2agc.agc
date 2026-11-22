@@ -1,22 +1,29 @@
-## The Python-to-`.agc` translator (pipeline skeleton): today this module only
-## names the entry point; phases 1-3 of `agc-py/roadmap.md` grow it into
-## the grammar, the AST and the emitter. The pipeline stays `.py` → `.agc` →
-## `.agcb`: this package never emits bytecode, `agentica compile` does that
-## from the emitted `.agc`.
+## The Python-to-`.agc` translator: `.py` in, one standalone `.agc` program
+## out. The pipeline stays `.py` → `.agc` → `.agcb`: this package never
+## emits bytecode, `agentica compile` does that from the emitted `.agc`.
+## Phase 4 (issue #28) owns the CLI around this entry point.
 
-## The version of the translator skeleton.
+import EmitCtx from "emit_ctx"
+import EmitModule from "emit_module"
+import Frontend from "frontend"
+import Grammar from "../../src/grammar"
+
+## The version of the translator.
 def version() -> String = "0.0.0"
 
-## Translates `source` to `.agc`. Today every program is refused: the grammar
-## (phase 2) and the emitter (phase 3) do not exist yet.
-def translate(source: String) -> Result[String]
+## Translates `source` (`file` names it in diagnostics, `grammar` is the
+## owned `py312` grammar) to a standalone single-file `.agc` program: parse,
+## build and resolve refuse first with their rendered diagnostics (`Frontend
+## .program` runs all three once and answers the validated module), then the
+## module assembler refuses with its spanned `PY-*` refusals, and a program
+## that passes every stage answers the full `.agc` text with a trailing
+## newline.
+def translate(grammar: Grammar.Grammar, file: String, source: String) -> Result[String]
   return error("agc-py: an empty program has nothing to translate") if source.empty?()
 
-  error("agc-py: translation is not implemented yet for #{preview(source)} (roadmap phase 3)")
-end
-
-# The first characters of a source, for an error that names its input.
-def preview(source: String) -> String
-  shown = source.slice(0, 40.clamp(0, source.length))
-  shown.inspect
+  program = try Frontend.program(grammar, file, source)
+  case EmitModule.emit_program(program, source, file)
+    EmitModule.ModuleRes.No(refusal) -> error(EmitCtx.render_refusal(file, source, refusal))
+    EmitModule.ModuleRes.Ok(out) -> ok(out.code.join("\n") + "\n")
+  end
 end

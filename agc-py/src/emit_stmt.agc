@@ -227,17 +227,22 @@ end
 # Seeds a new loop target from the iterable element type for the body.
 # A prebound target keeps its declared type; body bindings do not escape.
 # The body runs with `in_loop`, so a `break`/`next` there reaches the lane.
+# A fresh target the body reassigns is reported to the lane: the direct
+# header would lower to assigning the backend's immutable loop variable
+# (probed CHECK-IMMUTABLE-ASSIGNMENT on agentica 0.35.0), so that shape
+# gets the iterator lowering (`emit_fresh_assigned_for`) instead.
 def emit_for_block(ctx: EmitCtx.EmitCtx, target: Frontend.NameOcc, iterable: Tree.Node, body: List[Stmt]) -> BlockRes
   elem = for_elem(ctx, iterable)
   case elem
     error(e) -> block_no(ctx, iterable, e)
     ok(item) ->
       target_type = ctx.scope.get(target.name, item)
+      assigned = ctx.scope.get(target.name, "") == "" and body_assigns_target?(body, target.name)
       body_frag = emit_block(ctx.with(scope: ctx.scope.put(target.name, target_type), in_loop: true), body)
       case body_frag
         BlockRes.No(_) -> body_frag
         BlockRes.Ok(out) ->
-          res = EmitFlow.emit_for(ctx.with(next_temp: out.next_temp), target, iterable, out.code)
+          res = EmitFlow.emit_for(ctx.with(next_temp: out.next_temp), target, iterable, out.code, assigned)
           case res
             EmitCtx.StmtRes.Ok(done) ->
               BlockRes.Ok(
@@ -247,6 +252,41 @@ def emit_for_block(ctx: EmitCtx.EmitCtx, target: Frontend.NameOcc, iterable: Tre
           end
       end
   end
+end
+
+# Whether the `for` body reassigns the fresh target `name` anywhere it
+# runs: a direct or augmented assignment, or a nested loop binding the
+# same name (Python rebinds the outer target through the inner header).
+# `try` bodies refuse outer writes on their own, so their recursion here
+# only covers the inline handler, which does rebind.
+def body_assigns_target?(stmts: List[Stmt], name: String) -> Bool
+  for stmt in stmts
+    return true if assigns_target_in(stmt, name)
+  end
+
+  false
+end
+
+# One statement's reassignment of `name`, recursing into nested bodies.
+def assigns_target_in(stmt: Stmt, name: String) -> Bool
+  case stmt
+    Stmt.Assigned(occ, _) -> occ.name == name
+    Stmt.AugAssigned(occ, _, _) -> occ.name == name
+    Stmt.ForLoop(target, _, body) -> target.name == name or body_assigns_target?(body, name)
+    Stmt.IfStmt(arms, else_body) -> if_assigns_target?(arms, else_body, name)
+    Stmt.WhileStmt(_, body) -> body_assigns_target?(body, name)
+    Stmt.TryStmt(try_body, handler_body, _) ->
+      body_assigns_target?(try_body, name) or body_assigns_target?(handler_body, name)
+    _ -> false
+  end
+end
+
+def if_assigns_target?(arms: List[Frontend.CondArm], else_body: List[Stmt], name: String) -> Bool
+  for arm in arms
+    return true if body_assigns_target?(arm.body, name)
+  end
+
+  body_assigns_target?(else_body, name)
 end
 
 # The element type for a `for` target, refusing like the lane when the
@@ -495,12 +535,15 @@ def write_in(stmt: Stmt, outer: Map[String, String]) -> Optional[Frontend.NameOc
 end
 
 # Outer locals read by the outlined body, in caller scope order: the
-# typed read-only captures the helper takes as parameters.
+# typed read-only captures the helper takes as parameters. `def` names
+# carry the callable marker in the scope, not a value type: a try body
+# that calls a def is not a capture, so marker entries never invent a
+# `name: Function` helper parameter.
 def try_captures(code: List[String], outer: Map[String, String]) -> List[String]
   words = words_in(strip_strings(code.join("\n")))
   caps: List[String] = []
   for name in outer.keys()
-    if words.include?(name)
+    if words.include?(name) and outer.get(name, "") != EmitCtx.def_marker()
       caps = caps.push(name)
     end
   end
