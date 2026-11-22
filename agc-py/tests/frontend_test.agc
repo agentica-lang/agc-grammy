@@ -126,6 +126,26 @@ def main() -> Void
       try Test.eq(codes(diags), ["PY-RESERVED-NAME"])
       Test.eq(span_text(source, List.first(diags)), "if")
     end,
+    Test.test("an import keeps its module paths, bound names and spans") do
+      source = "import os.path\nimport sys as system\nfrom math import (\n    floor,\n    ceil as up,\n)\n"
+      tree = try Frontend.parse_source(compiled.unwrap!, source)
+      program = try Frontend.build(tree, source)
+      decls: List[Frontend.ImportDecl] = []
+      for item in program.top
+        case item
+          Frontend.TopItem.ImportItem(found) -> decls = decls + found
+          _ -> decls = decls
+        end
+      end
+
+      try Test.eq(decls.size, 3)
+      try Test.eq(Frontend.decl_path(List.first(decls)).text, "os.path")
+      try Test.eq(Frontend.decl_names(List.first(decls)).map { |occ| occ.name }, ["os"])
+      try Test.eq(Frontend.decl_names(List.first(decls.drop(1))).map { |occ| occ.name }, ["system"])
+      try Test.eq(Frontend.decl_names(List.last(decls)).map { |occ| occ.name }, ["floor", "up"])
+      span = Frontend.decl_span(List.last(decls))
+      Test.eq(source.slice(span.start, span.stop - span.start).slice(0, 9), "from math")
+    end,
     Test.test("mutual recursion resolves") do
       Test.ok?(check(compiled, "def f() -> None:\n    g()\n\ndef g() -> None:\n    f()\n"))
     end,

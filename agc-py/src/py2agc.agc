@@ -2,6 +2,10 @@
 ## out. The pipeline stays `.py` → `.agc` → `.agcb`: this package never
 ## emits bytecode, `agentica compile` does that from the emitted `.agc`.
 ## Phase 4 (issue #28) owns the CLI around this entry point.
+##
+## Local imports resolve in a separate library stage (`Modules`,
+## `src/modules.agc`) that answers the module graph #26 feeds to emission;
+## this single-file entry point keeps refusing imports until then.
 
 import EmitCtx from "emit_ctx"
 import EmitModule from "emit_module"

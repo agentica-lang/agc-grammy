@@ -173,12 +173,16 @@ plain types only.
   after the first non-import statement is `PY-IMPORT-POSITION`. One file is
   one module; the module name is the file stem, which must be a valid
   identifier (else `PY-IMPORT-UNKNOWN`).
-- Search path: the file's folder first, then an explicit list (CLI flag in
-  phase 4). Circular imports are `PY-IMPORT-CYCLE`, carrying every import
-  span of the cycle. Relative imports, packages (`__init__`), and
-  `TYPE_CHECKING`-gated imports are excluded.
-- Unknown modules/names are `PY-IMPORT-UNKNOWN` / `PY-NAME-UNKNOWN` at the
-  importing span.
+- Search path: the entry file's folder first, then an explicit list (CLI
+  flag in phase 4). The model is one flat module directory: a module is
+  found by name, not beside its importer, and a local file shadows a
+  supported stdlib module of the same path. Circular imports are
+  `PY-IMPORT-CYCLE`, carrying every import span of the cycle. Relative
+  imports, packages (`__init__`), and `TYPE_CHECKING`-gated imports are
+  excluded.
+- Unknown modules are `PY-IMPORT-UNKNOWN` at the module path; a name a local
+  module does not define is `PY-NAME-UNKNOWN` at the imported name, both in
+  the importing file.
 - Stdlib surface (closed, each mapped in phase 3). Covered with what the
   backend and its std give today, nothing else:
   - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),

@@ -134,11 +134,36 @@ struct FuncDef
   body_names: List[NameOcc]
 end
 
+## One dotted module an import names: the exact dotted text and the span it
+## covers (the import's target, not the names it binds).
+struct ModulePath
+  text: String
+  span: Span
+end
+
+## One name an import binds: `member` is the name read from the target module
+## (`none` for a whole-module `import x`), `bound` is the local name it binds
+## (the alias when written, else the member or the path's head), and `span`
+## covers the bound occurrence.
+struct ImportName
+  member: Optional[String]
+  bound: String
+  span: Span
+end
+
+## One normalized import clause: `ModuleImport` is one `import a [as b]`
+## clause (a comma list yields one declaration per clause), and `FromImport`
+## is one whole `from a import ...` statement. `span` covers the statement.
+enum ImportDecl
+  ModuleImport(ModulePath, ImportName, Span)
+  FromImport(ModulePath, List[ImportName], Span)
+end
+
 ## One top-level non-`def` item, in source order: a statement with the names
-## it mentions, or an import with the names it binds.
+## it mentions, or an import with the clauses it holds.
 enum TopItem
   StmtItem(Stmt, List[NameOcc])
-  ImportItem(List[NameOcc])
+  ImportItem(List[ImportDecl])
 end
 
 ## A whole module: the `def`s and the top-level items, each in source order.
@@ -195,7 +220,7 @@ def build(tree: Tree.Node, source: String) -> Result[Program]
   for node in tree.children
     case node.rule
       "def_stmt" -> funcs = funcs.push(try build_def(node, source))
-      "import_stmt" -> top = top.push(TopItem.ImportItem(collect(node, source)))
+      "import_stmt" -> top = top.push(TopItem.ImportItem(try build_import(node, source)))
       _ -> top = top.push(try build_top_stmt(node, source))
     end
   end
@@ -207,6 +232,69 @@ def build_top_stmt(node: Tree.Node, source: String) -> Result[TopItem]
   case try build_stmt(node, source)
     some(stmt) -> ok(TopItem.StmtItem(stmt, collect(node, source)))
     none -> error("agc-py: unexpected top-level node #{node.rule}")
+  end
+end
+
+## Shapes one `import_stmt` into its clauses: a `from a import ...` statement
+## is one `FromImport`, while `import a, b` is one `ModuleImport` per comma
+## clause (they share the statement span). `import a.b` binds `a` unless an
+## alias names another binding (`SUBSET.md` section 5).
+def build_import(node: Tree.Node, source: String) -> Result[List[ImportDecl]]
+  span = span_of(node)
+  first = List.first(node.children)
+  if first.rule == "dotted"
+    path = ModulePath(text: Tree.text(first, source), span: span_of(first))
+    names: List[ImportName] = []
+    for child in node.children
+      if child.rule == "import_item"
+        names = names.push(try from_import_name(child, source))
+      end
+    end
+
+    return ok([ImportDecl.FromImport(path, names, span)])
+  end
+
+  decls: List[ImportDecl] = []
+  for child in node.children
+    if child.rule == "import_module"
+      decls = decls.push(try module_import(child, source, span))
+    end
+  end
+
+  ok(decls)
+end
+
+def module_import(node: Tree.Node, source: String, span: Span) -> Result[ImportDecl]
+  dotted = try Tree.first_child(node, "dotted").to_result("agc-py: import without a module path")
+  text = Tree.text(dotted, source)
+  path = ModulePath(text: text, span: span_of(dotted))
+  head = List.first(text.split("."))
+  head_span = Span(start: dotted.start, stop: dotted.start + head.length)
+  ok(ImportDecl.ModuleImport(path, import_binding(node, source, none, head, head_span), span))
+end
+
+def from_import_name(node: Tree.Node, source: String) -> Result[ImportName]
+  member_node = try Tree.first_child(node, "name").to_result("agc-py: from import without a name")
+  member = Tree.text(member_node, source)
+  ok(import_binding(node, source, some(member), member, span_of(member_node)))
+end
+
+# The alias when written, else the fallback (the member or the path head).
+def import_binding(
+  node: Tree.Node,
+  source: String,
+  member: Optional[String],
+  fallback: String,
+  fallback_span: Span,
+) -> ImportName
+  case Tree.first_child(node, "import_alias")
+    some(alias) ->
+      case Tree.first_child(alias, "name")
+        some(bound) -> ImportName(member: member, bound: Tree.text(bound, source), span: span_of(bound))
+        none -> ImportName(member: member, bound: fallback, span: fallback_span)
+      end
+
+    none -> ImportName(member: member, bound: fallback, span: fallback_span)
   end
 end
 
@@ -308,9 +396,37 @@ end
 def top_names(item: TopItem) -> List[NameOcc]
   case item
     TopItem.StmtItem(_, names) -> names
-    TopItem.ImportItem(names) -> names
+    TopItem.ImportItem(decls) -> decls.flat_map { |decl| decl_names(decl) }
   end
 end
+
+## The module path one import declaration names.
+def decl_path(decl: ImportDecl) -> ModulePath
+  case decl
+    ImportDecl.ModuleImport(path, _, _) -> path
+    ImportDecl.FromImport(path, _, _) -> path
+  end
+end
+
+## The local bindings one import declaration introduces.
+def decl_names(decl: ImportDecl) -> List[NameOcc]
+  case decl
+    ImportDecl.ModuleImport(_, name, _) -> [import_occ(name)]
+    ImportDecl.FromImport(_, names, _) -> names.map { |name| import_occ(name) }
+  end
+end
+
+## The span of the whole import statement the declaration came from.
+def decl_span(decl: ImportDecl) -> Span
+  case decl
+    ImportDecl.ModuleImport(_, _, span) -> span
+    ImportDecl.FromImport(_, _, span) -> span
+  end
+end
+
+# An imported name is declared at the occurrence that binds it (the alias
+# when written, else the member or path head).
+def import_occ(name: ImportName) -> NameOcc = NameOcc(name: name.bound, span: name.span, kind: "declare")
 
 # The module scope visible at a `def` at `at`: every `def` name plus the
 # top-level bindings (`declare`, `assign` and silent `reuse` targets) whose
@@ -962,8 +1078,6 @@ def collect(node: Tree.Node, source: String) -> List[NameOcc]
     "for_loop" -> collect_binding(node, source, "reuse")
     "kwarg" -> collect_rest(node, source)
     "except_handler" -> collect_handler(node, source)
-    "import_module" -> collect_import_name(node, source)
-    "import_item" -> collect_import_name(node, source)
     "raise_stmt" -> collect_raise(node, source)
     "name" -> [occ_of(node, source, "use")]
     _ -> collect_all(node.children, source)
@@ -1055,40 +1169,6 @@ def collect_non_names(node: Tree.Node, source: String) -> List[NameOcc]
   collect_all(rest, source)
 end
 
-# An import binds its alias, or the head of its dotted path (`import os.path`
-# binds `os`); the dotted segments themselves are `ident` nodes, not loads.
-def collect_import_name(node: Tree.Node, source: String) -> List[NameOcc]
-  alias = Tree.first_child(node, "import_alias")
-  case alias
-    some(found) -> first_name_occ(found, source)
-    none ->
-      if node.rule == "import_item"
-        first_name_occ(node, source)
-      else
-        [import_head_occ(node, source)]
-      end
-  end
-end
-
-def first_name_occ(node: Tree.Node, source: String) -> List[NameOcc]
-  found = Tree.first_child(node, "name")
-  case found
-    some(name_node) -> [occ_of(name_node, source, "declare")]
-    none -> []
-  end
-end
-
-def import_head_occ(node: Tree.Node, source: String) -> NameOcc
-  dotted = Tree.first_child(node, "dotted")
-  case dotted
-    some(found) ->
-      full = Tree.text(found, source)
-      head = List.first(full.split("."))
-      NameOcc(name: head, span: Span(start: found.start, stop: found.start + head.length), kind: "declare")
-    none -> NameOcc(name: "", span: span_of(node), kind: "declare")
-  end
-end
-
 # `raise E("msg")` lowers to the message alone: a class-like head (a leading
 # uppercase letter, so `ValueError` or a bare `E`) is skipped rather than
 # resolved, while the arguments still collect as loads. Any other head — a
@@ -1162,7 +1242,7 @@ def check_top_item(state: ScopeState, item: TopItem, aliases: Set[String]) -> Sc
   case item
     TopItem.StmtItem(stmt, names) ->
       check_top_names(ScopeState(scope: state.scope, diags: state.diags + stmt_ann_diags(stmt, aliases)), names)
-    TopItem.ImportItem(names) -> declare_all(state, names)
+    TopItem.ImportItem(_) -> declare_all(state, top_names(item))
   end
 end
 
