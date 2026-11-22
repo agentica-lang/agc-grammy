@@ -49,7 +49,7 @@ def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   target = EmitTry.raise_target(expr)
   if target.rule == "call" and EmitTry.single_message_arg?(target)
     raw = List.first(target.children.drop(1))
-    case EmitExpr.emit(raw, ctx.source, ctx.scope)
+    case EmitExpr.emit(raw, ctx.source, ctx.scope, ctx.sigs)
       error(err) -> EmitCtx.refusal_from_error(raw.start, raw.stop, err)
       ok(out) ->
         if out.type != "String"
@@ -101,7 +101,7 @@ end
 ## The condition preamble runs before the `if`; the message preamble runs
 ## only inside the failure branch.
 def emit_assert(ctx: EmitCtx.EmitCtx, cond: Tree.Node, msg: Optional[Tree.Node]) -> EmitCtx.StmtRes
-  case EmitExpr.emit(cond, ctx.source, ctx.scope)
+  case EmitExpr.emit(cond, ctx.source, ctx.scope, ctx.sigs)
     error(err) -> EmitCtx.refusal_from_error(cond.start, cond.stop, err)
     ok(found) ->
       if found.type != "Bool"
@@ -152,7 +152,7 @@ def emit_assert_msg(
   advanced: Int,
   node: Tree.Node,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(node, ctx.source, ctx.scope)
+  case EmitExpr.emit(node, ctx.source, ctx.scope, ctx.sigs)
     error(err) -> EmitCtx.refusal_from_error(node.start, node.stop, err)
     ok(out) ->
       if out.type != "String"

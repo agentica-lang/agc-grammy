@@ -149,7 +149,7 @@ def emit_for(
   body_code: List[String],
   assigned: Bool,
 ) -> EmitCtx.StmtRes
-  made = EmitExpr.emit(iterable, ctx.source, ctx.scope)
+  made = EmitExpr.emit(iterable, ctx.source, ctx.scope, ctx.sigs)
   case made
     error(e) -> refusal_from_emit(e.message, iterable)
     ok(out) ->
@@ -247,7 +247,7 @@ end
 # temp by the incoming supply. Failures are `CODE: message = help: hint`
 # strings; the caller renders them into spanned refusals.
 def emit_cond(ctx: EmitCtx.EmitCtx, node: Tree.Node, owner: String) -> Result[CondOut]
-  out = try EmitExpr.emit(node, ctx.source, ctx.scope)
+  out = try EmitExpr.emit(node, ctx.source, ctx.scope, ctx.sigs)
   if out.type != "Bool"
     return error(
       "PY-COND-NOT-BOOL: `#{owner}` condition must be bool, found #{out.type} = help: compare or convert to a bool first",

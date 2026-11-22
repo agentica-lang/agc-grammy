@@ -137,7 +137,13 @@ plain types only.
   bare `raise`.
 - `def` with full annotations, defaults allowed and re-evaluated per call
   (values are immutable, so sharing is unobservable — `def f(x: list = [])`
-  is fine), keyword calls allowed. One file is one module (§5).
+  is fine), keyword calls allowed. The call maps onto the signature: the
+  arguments evaluate left to right in source order even when keywords
+  reorder them into parameter order, and a default lowers at the call site
+  with the call's own argument values bound to the parameter names. A call
+  that does not fit — a required argument missing, too many positionals, a
+  repeated or unknown keyword, a repeated value for one parameter — refuses
+  spanned (§10). One file is one module (§5).
 
 ## 5. Imports and modules
 
@@ -282,6 +288,9 @@ inside an annotation is `PY-ANNOTATION-UNKNOWN`, not `PY-NAME-UNKNOWN`.
 | `PY-NAME-UNKNOWN` | unknown name | the name |
 | `PY-RESERVED-NAME` | keyword used as a name | the name |
 | `PY-DUPLICATE-BINDING` | second binding of one name in one scope | the name |
+| `PY-KWARG-DUPLICATE` | a keyword argument repeated, or a second value for one parameter | the statement |
+| `PY-KWARG-UNKNOWN` | a keyword argument the `def` has no parameter for | the statement |
+| `PY-CALL-ARITY` | a required argument missing, or too many positional arguments | the statement |
 | `PY-OUT-OF-SUBSET` | anything else from §9 (the list is complete), naming it | the construct |
 | `PY-OPERATOR` | operand combination the backend has no operator for | the operator |
 | `PY-TRY-CONTROL` | `return`/`break`/`next` inside a `try` body | the statement |

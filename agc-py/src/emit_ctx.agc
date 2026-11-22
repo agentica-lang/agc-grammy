@@ -17,8 +17,9 @@ import Tree from "../../src/tree"
 ## diagnostics, the visible names with their types, the enclosing `def`
 ## return annotation ("" at top level), whether the statement sits inside a
 ## `try` body, whether the statement sits inside a `for`/`while` body (the
-## spine sets it, so `break`/`next` refuse with a span outside a loop), and
-## the next free temp number.
+## spine sets it, so `break`/`next` refuse with a span outside a loop), the
+## next free temp number, and the call ABI signatures (one `Sig` per `def`,
+## so a user call checks its arguments and lowers defaults in place).
 struct EmitCtx
   source: String
   file: String
@@ -27,6 +28,18 @@ struct EmitCtx
   in_try: Bool
   in_loop: Bool = false
   next_temp: Int
+  sigs: Map[String, Sig] = {}
+end
+
+## One `def` signature for the call ABI: parameter names and their backend
+## types in order, each parameter's default-value expression node (`none`
+## when the parameter has none), and the mapped return type.
+struct Sig
+  name: String
+  params: List[String]
+  types: List[String]
+  defaults: List[Optional[Tree.Node]]
+  ret: String
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.

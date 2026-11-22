@@ -19,11 +19,18 @@
 ##
 ## The one-function-level rule (`SUBSET.md` section 2) has no backend form
 ## for module state: a `def` body that reads a top-level binding refuses
-## spanned (the value lives in `main`; passing it as a parameter is the full
-## call ABI, issue #23). Everything else the backend cannot place refuses
-## spanned too: imports (issues #25-#27), defaulted parameters and keyword
-## calls (issue #23), a def that can fall through without returning
-## (the backend demands a value on every path).
+## spanned (the value lives in `main`; passing it as a parameter is the
+## spelling). Everything else the backend cannot place refuses spanned too:
+## imports (issues #25-#27) and a def that can fall through without
+## returning (the backend demands a value on every path).
+##
+## The call ABI (issue #23) threads one `Sig` per `def` through every
+## emission context: parameters, backend types, default-value nodes and the
+## mapped return. Signatures build eagerly over all `def`s (annotations
+## mapped with the module's full alias set — `resolve` has already refused
+## an annotation naming an unknown or later-declared alias), so a `def` body
+## sees every signature (mutual recursion) while a `main` call is gated by
+## the scope marker, which joins at the def's own position, like resolve.
 ##
 ## Generated names are reserved (`main`, the runtime helpers, the
 ## `py_tN`-shaped counters): any user binding that collides refuses spanned,
@@ -82,12 +89,14 @@ end
 ## The source-order assembly state: the module scope (def markers, top-level
 ## bindings and aliases, in resolve's positional order), the main-body walk,
 ## the top-level value bindings (reads inside defs refuse), the aliases, the
-## def-flush index, the module-wide temp supply and the four text buckets.
+## call ABI signatures, the def-flush index, the module-wide temp supply and
+## the four text buckets.
 struct Asm
   scope: Map[String, String]
   walk: WalkState
   top_values: Map[String, String]
   aliases: Map[String, String]
+  sigs: Map[String, EmitCtx.Sig]
   defs_done: Int
   next_temp: Int
   alias_lines: List[String]
@@ -105,7 +114,8 @@ def emit_program(program: Frontend.Program, source: String, file: String) -> Mod
   case reserved_refusal(program)
     some(ref) -> ModuleRes.No(ref)
     none ->
-      case walk_top(asm_start(), program.top, program, source, file)
+      sigs = sig_table(program)
+      case walk_top(asm_start(sigs), program.top, program, source, file)
         StepRes.No(ref) -> ModuleRes.No(ref)
         StepRes.Ok(done) -> ModuleRes.Ok(ModuleOut(code: assemble(done)))
       end
@@ -114,12 +124,13 @@ end
 
 private
 
-def asm_start() -> Asm
+def asm_start(sigs: Map[String, EmitCtx.Sig]) -> Asm
   Asm(
     scope: {},
     walk: WalkState(bound: {}, bound_names: [], read_names: [], real_names: []),
     top_values: {},
     aliases: {},
+    sigs: sigs,
     defs_done: 0,
     next_temp: 0,
     alias_lines: [],
@@ -127,6 +138,75 @@ def asm_start() -> Asm
     helper_lines: [],
     main_lines: [],
   )
+end
+
+# One `Sig` per `def`, built over the whole program so a `def` body resolves
+# any other `def` (mutual recursion). Annotations map with every alias the
+# module declares: `resolve` has already refused an annotation naming an
+# unknown or later-declared alias, so the superset changes no verdict, and a
+# `def` whose mapping still fails here stays out of the table (its own flush
+# refuses with the real span before any call site can matter).
+def sig_table(program: Frontend.Program) -> Map[String, EmitCtx.Sig]
+  aliases = all_aliases(program)
+  sigs: Map[String, EmitCtx.Sig] = {}
+  for func_def in program.funcs
+    case build_sig(func_def, aliases)
+      some(sig) -> sigs = sigs.put(func_def.name, sig)
+      none -> sigs = sigs
+    end
+  end
+
+  sigs
+end
+
+# Every `type Alias = T` spelling of the module, mapped in source order (an
+# alias may spell another alias declared before it).
+def all_aliases(program: Frontend.Program) -> Map[String, String]
+  out: Map[String, String] = {}
+  for item in program.top
+    case item
+      Frontend.TopItem.StmtItem(stmt, _) ->
+        case stmt
+          Frontend.Stmt.AliasDef(occ, ann) ->
+            case EmitAssign.map_annotation(ann.text, out)
+              ok(want) -> out = out.put(occ.name, want)
+              error(_) -> out = out
+            end
+
+          _ -> out = out
+        end
+
+      _ -> out = out
+    end
+  end
+
+  out
+end
+
+# One `def` signature, or `none` when an annotation or the return type does
+# not map (the def's own flush refuses with the real span).
+def build_sig(func_def: Frontend.FuncDef, aliases: Map[String, String]) -> Optional[EmitCtx.Sig]
+  types: List[String] = []
+  for ann in func_def.param_anns
+    case EmitAssign.map_annotation(ann.text, aliases)
+      ok(ty) -> types = types.push(ty)
+      error(_) -> return none
+    end
+  end
+
+  case mapped_return(func_def, aliases)
+    ok(ret) ->
+      some(
+        EmitCtx.Sig(
+          name: func_def.name,
+          params: func_def.params.map { |param| param.name },
+          types: types,
+          defaults: func_def.param_default_nodes,
+          ret: ret,
+        ),
+      )
+    error(_) -> none
+  end
 end
 
 # Emits the top items in order, flushing each def whose span starts before
@@ -264,7 +344,15 @@ end
 # The `EmitCtx` one main-body statement emits under: the module scope as it
 # stands, no enclosing `def` (`main` cannot `return`) and the threaded temps.
 def item_ctx(asm: Asm, source: String, file: String) -> EmitCtx.EmitCtx
-  EmitCtx.EmitCtx(source: source, file: file, scope: asm.scope, func_ret: "", in_try: false, next_temp: asm.next_temp)
+  EmitCtx.EmitCtx(
+    source: source,
+    file: file,
+    scope: asm.scope,
+    func_ret: "",
+    in_try: false,
+    next_temp: asm.next_temp,
+    sigs: asm.sigs,
+  )
 end
 
 # Emits one `def`: typed parameters and return, the positional body scope,
@@ -280,11 +368,7 @@ def emit_def(asm: Asm, program: Frontend.Program, func_def: Frontend.FuncDef, so
 
   case mapped_return(func_def, asm.aliases)
     error(e) -> StepRes.No(split_at(func_def.return_span.start, func_def.return_span.stop, e))
-    ok(ret) ->
-      case def_refusals(program, func_def, ret)
-        some(ref) -> StepRes.No(ref)
-        none -> emit_def_body(asm, program, func_def, param_types, ret, source, file)
-      end
+    ok(ret) -> emit_def_body(asm, program, func_def, param_types, ret, source, file)
   end
 end
 
@@ -296,35 +380,6 @@ def mapped_return(func_def: Frontend.FuncDef, aliases: Map[String, String]) -> R
   else
     EmitAssign.map_annotation(func_def.return_type, aliases)
   end
-end
-
-# The def-level refusal that does not need the body emitted: a defaulted
-# parameter (issue #23). The fall-through check waits for the body so a
-# body-emission refusal (`PY-TRY-CONTROL` at a `return` inside a `try`)
-# names the real problem.
-def def_refusals(program: Frontend.Program, func_def: Frontend.FuncDef, ret: String) -> Optional[EmitCtx.Refusal]
-  index = 0
-  for slot in func_def.param_defaults
-    if slot.some?
-      span = slot.unwrap!
-      pname = List.first(func_def.params.drop(index)).name
-      return some(
-        EmitCtx.Refusal(
-          code: "PY-OUT-OF-SUBSET",
-          message: (
-            "parameter `#{pname}` has a default value; the full call ABI (defaults re-evaluated per call, keyword calls) is issue #23"
-          ),
-          help: some("make every argument explicit at each call site"),
-          start: span.start,
-          stop: span.stop,
-        ),
-      )
-    end
-
-    index += 1
-  end
-
-  none
 end
 
 def emit_def_body(
@@ -346,6 +401,7 @@ def emit_def_body(
         func_ret: ret,
         in_try: false,
         next_temp: asm.next_temp,
+        sigs: asm.sigs,
       )
 
       case EmitStmt.emit_block(ctx, func_def.body)

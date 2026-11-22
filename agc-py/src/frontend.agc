@@ -117,8 +117,9 @@ end
 ## bound before the body walks). Parameter and return annotations travel as
 ## `Ann` values so `resolve` can check the names inside them. Each entry of
 ## `param_defaults` is the span of that parameter's default value, or `none`
-## when the parameter has none: the emitter refuses defaults until the full
-## call ABI lowers them (`SUBSET.md` section 4).
+## when the parameter has none, parallel to `params`; `param_default_nodes`
+## carries the same default as its parsed expression node, so the call ABI
+## can lower it at every call site (`SUBSET.md` section 4).
 struct FuncDef
   name: String
   name_span: Span
@@ -126,6 +127,7 @@ struct FuncDef
   params: List[NameOcc]
   param_anns: List[Ann]
   param_defaults: List[Optional[Span]]
+  param_default_nodes: List[Optional[Tree.Node]]
   return_type: String
   return_span: Span
   body: List[Stmt]
@@ -702,6 +704,7 @@ def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
   params = try build_params(node, source)
   param_anns = try build_param_anns(node, source)
   param_defaults = try build_param_defaults(node)
+  param_default_nodes = try build_param_default_nodes(node)
   return_ann = try ann_of(node, "annotation", source)
 
   ok(
@@ -712,6 +715,7 @@ def build_def(node: Tree.Node, source: String) -> Result[FuncDef]
       params: params,
       param_anns: param_anns,
       param_defaults: param_defaults,
+      param_default_nodes: param_default_nodes,
       return_type: return_ann.text,
       return_span: return_ann.span,
       body: try build_body(node.children, source),
@@ -756,6 +760,22 @@ end
 
 # The default-value span of each parameter in order (`none` when absent),
 # parallel to `FuncDef.params`. A `param` without a default has no `expr`.
+# The default-value node of each parameter in order (`none` when absent),
+# parallel to `FuncDef.params`: the ABI lowers it at every call site.
+def build_param_default_nodes(node: Tree.Node) -> Result[List[Optional[Tree.Node]]]
+  found = Tree.first_child(node, "params")
+  case found
+    some(listing) ->
+      out: List[Optional[Tree.Node]] = []
+      for param in Tree.children_of(listing, "param")
+        out = out.push(Tree.first_child(param, "cond_expr"))
+      end
+
+      ok(out)
+    none -> ok([])
+  end
+end
+
 def build_param_defaults(node: Tree.Node) -> Result[List[Optional[Span]]]
   found = Tree.first_child(node, "params")
   case found
