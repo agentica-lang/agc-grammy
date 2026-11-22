@@ -504,14 +504,18 @@ def main() -> Void
         ran.lines,
         [
           "c: Bool = true",
-          "py_t0 = 2",
-          "if c",
-          "  py_t0 = 1",
+          "py_t0 = case c",
+          "  true ->",
+          "    1",
+          "  _ ->",
+          "    2",
           "end",
           "y: Int = py_t0",
-          "py_t1 = 4",
-          "if c",
-          "  py_t1 = 3",
+          "py_t1 = case c",
+          "  true ->",
+          "    3",
+          "  _ ->",
+          "    4",
           "end",
           "w: Int = py_t1",
         ],
@@ -550,7 +554,11 @@ def main() -> Void
     Test.test("quoted temps survive the supply") do
       first = "c: bool = True\nq: int = 1 if c else 2\n"
       ran = try run_all(compiled.unwrap!, first, top_ctx(first))
-      try Test.eq(ran.lines, ["c: Bool = true", "py_t0 = 2", "if c", "  py_t0 = 1", "end", "q: Int = py_t0"])
+      try Test.eq(
+        ran.lines,
+        ["c: Bool = true", "py_t0 = case c", "  true ->", "    1", "  _ ->", "    2", "end", "q: Int = py_t0"],
+      )
+
       try Test.eq(ran.ctx.next_temp, 1)
       second = "s: str = \"py_t0\"\n"
       ran2 = try run_all(compiled.unwrap!, second, ran.ctx)
@@ -558,7 +566,7 @@ def main() -> Void
       try Test.eq(ran2.ctx.next_temp, 1)
       third = "w: int = 3 if c else 4\n"
       ran3 = try run_all(compiled.unwrap!, third, ran2.ctx)
-      try Test.eq(ran3.lines, ["py_t1 = 4", "if c", "  py_t1 = 3", "end", "w: Int = py_t1"])
+      try Test.eq(ran3.lines, ["py_t1 = case c", "  true ->", "    3", "  _ ->", "    4", "end", "w: Int = py_t1"])
       try Test.eq(ran3.ctx.next_temp, 2)
       quoted = "c: bool = True\nq: int = 1 if c else 2\ns: str = \"py_t0\"\n"
       try add_func(compiled.unwrap!, "quoted", quoted, top_ctx(quoted), "None", ["c", "q", "s"])
@@ -576,7 +584,11 @@ def main() -> Void
       )
 
       ran = try run_all(compiled.unwrap!, src, ctx)
-      try Test.eq(ran.lines, ["py_t1 = 2", "if c", "  py_t1 = 1", "end", "t: String = \"" + interp("py_t1") + "\""])
+      try Test.eq(
+        ran.lines,
+        ["py_t1 = case c", "  true ->", "    1", "  _ ->", "    2", "end", "t: String = \"" + interp("py_t1") + "\""],
+      )
+
       try Test.eq(ran.ctx.next_temp, 2)
       interp_src = "c: bool = True\nt: str = f\"{1 if c else 2}\"\n"
       try add_func(compiled.unwrap!, "interp", interp_src, top_ctx(interp_src), "None", ["c", "t"])

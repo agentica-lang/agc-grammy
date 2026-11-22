@@ -659,13 +659,22 @@ def main() -> Void
         ],
       )
     end,
-    Test.test("the ternary lowers to a temp plus a statement if") do
+    Test.test("the ternary lowers to a temp assigned a case value") do
       scope = {"x": "Int", "y": "Int", "c": "Bool"}
       decls = ["x: Int = 1", "y: Int = 2", "c: Bool = true"]
       check_all(
         compiled.unwrap!,
         "ternary",
-        [cased_pre("x if c else y", scope, decls, "Int", "py_t0", ["py_t0 = y", "if c", "  py_t0 = x", "end"])],
+        [
+          cased_pre(
+            "x if c else y",
+            scope,
+            decls,
+            "Int",
+            "py_t0",
+            ["py_t0 = case c", "  true ->", "    x", "  _ ->", "    y", "end"],
+          ),
+        ],
         [
           errcased("x if y else z", {"x": "Int", "y": "Int", "z": "Int"}, "PY-COND-NOT-BOOL"),
           errcased("x if c else 1.5", {"x": "Int", "c": "Bool"}, "PY-TYPE-MISMATCH"),
@@ -684,7 +693,7 @@ def main() -> Void
             want_type: "Int",
             want_code: "py_t0",
             want_contains: [],
-            want_pre: ["py_t0 = y", "if c", "  py_t0 = h(x)", "end"],
+            want_pre: ["py_t0 = case c", "  true ->", "    h(x)", "  _ ->", "    y", "end"],
             as_type: "",
             skip_check: false,
             tops: ["def h(x: Int) -> Int\n  x\nend"],

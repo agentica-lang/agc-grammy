@@ -119,7 +119,7 @@ end
 ## only inside the failure branch. The condition is a strict expression, so
 ## it emits with the body's `try` unwrapping (`ctx.in_try`): inside an
 ## outlined `try` a `Result` in a strict sub-expression (a comparison
-## operand, say) unwraps and its error reaches the handler.
+## operand, say) unwraps inline in place and its error reaches the handler.
 def emit_assert(ctx: EmitCtx.EmitCtx, cond: Tree.Node, msg: Optional[Tree.Node]) -> EmitCtx.StmtRes
   case EmitExpr.emit_with(cond, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
     error(err) -> EmitCtx.refusal_from_error(cond.start, cond.stop, err)

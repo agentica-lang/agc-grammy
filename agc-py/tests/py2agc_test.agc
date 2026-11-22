@@ -302,20 +302,18 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
-    # Issue #24 cut: a `Result`-returning call inside a strict compound
-    # inside an outlined `try` hoists to `try` in order (single evaluation);
-    # the caught error reaches the handler, the uncaught shape refuses.
+    # Issue #24: a `Result`-returning call in a strict compound inside an
+    # outlined `try` unwraps inline (`(try ...)`), so it evaluates once, in
+    # source order; a caught error reaches the handler and the uncaught
+    # shape still refuses.
     Test.test("a Result call in a compound inside try checks and runs caught") do
       good = "try:\n    x: int = int(\"5\") + 1\n    print(x)\nexcept:\n    print(0)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
         error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
         ok(text) ->
-          # The unwrap temp precedes the compound line, so the conversion
-          # runs once and in source order.
-          try Test.assert(text.include?("py_t0 = try"), text)
-          first = text.index_of("py_t0 = try \"5\".to_i").unwrap!
-          second = text.index_of("x: Int = py_t0 + 1").unwrap!
-          try Test.assert(first < second, text)
+          # The unwrap sits in the compound itself: no temp line, so nothing
+          # can run before it and nothing runs twice.
+          try Test.assert(text.include?("x: Int = (try \"5\".to_i) + 1"), text)
           ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_ok.agc")
           try Test.assert(ran.include?("6"), ran)
       end
@@ -328,7 +326,7 @@ def main() -> Void
           Test.assert(ran.include?("0"), ran)
       end
     end,
-    Test.test("uncaught and lazy Result shapes refuse, assert propagates inside try") do
+    Test.test("an uncaught compound refuses, a lazy tail and assert unwrap inline") do
       uncaught = "x: int = int(\"5\") + 1\nprint(x)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", uncaught)
         error(e) ->
@@ -337,12 +335,15 @@ def main() -> Void
         ok(_) -> try Test.assert(false, "expected an error")
       end
 
+      # A lazy tail keeps its laziness: the unwrap lives inside the `and`
+      # text, so `False and ...` never runs the conversion.
       lazy = "try:\n    x: bool = False and int(\"bad\") == 5\n    print(x)\nexcept:\n    print(True)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", lazy)
-        error(e) ->
-          try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
-          try Test.assert(e.message.include?("tail with a Result"), e.message)
-        ok(_) -> try Test.assert(false, "expected an error")
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("false and (try \"bad\".to_i) == 5"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_lazy_tail.agc")
+          try Test.assert(ran.include?("false"), ran)
       end
 
       # `assert` is a strict expression: inside the outlined try its
@@ -351,7 +352,7 @@ def main() -> Void
       case Py2Agc.translate(compiled.unwrap!, "prog.py", cond)
         error(e) -> Test.assert(false, "expected a program, got #{e.message}")
         ok(text) ->
-          try Test.assert(text.include?("py_t0 = try \"5\".to_i"), text)
+          try Test.assert(text.include?("if !((try \"5\".to_i) == 5)"), text)
           ran = try check_and_run(text, "/tmp/agc_py2agc_result_assert.agc")
           Test.assert(ran.include?("1"), ran)
       end

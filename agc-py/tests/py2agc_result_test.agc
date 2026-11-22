@@ -1,15 +1,17 @@
-## Issue #24 cut regressions: `Result` values in eager and lazy expression
-## positions inside an outlined `try`. Both ternary branches evaluate
-## eagerly, so a branch that hoists a `Result` refuses spanned instead of
-## converting an untaken arm; an f-string hole unwraps before interpolation
-## so a failed conversion reaches the handler, and `print`/`str` refuse a
-## `Result` they would print as `ok(...)`. An `and`/`or` tail refuses at one
-## site, so nested leaves never get a misleading operator or f-string message.
+## Issue #24 regressions: `Result` values in strict and lazy expression
+## positions inside an outlined `try`. A directly `Result[T]`-typed operand
+## unwraps inline as `(try ...)`, so it evaluates once, in source order, and
+## Python's laziness survives: `g() + int(h())` runs `g` first, a chained
+## comparison never runs its tail once a link is false, and an `and`/`or`
+## tail or the untaken ternary arm stays unevaluated. The end-to-end cases
+## are differential: the same Python source runs under `python3` and the
+## emitted program's standard output must match it. The rest check the
+## emitter seam, where a fragment costs a parse instead of a translation.
 ##
-## The expression checks parse one expression and call the emitter seam
-## directly; the end-to-end tests translate and run. That mix keeps the file
-## inside the shared step budget: a `translate` costs about a million steps,
-## loading the grammar 1.8 million, and the budget is one million per test.
+## The mix keeps the file inside the shared step budget: a `translate` costs
+## over two million steps and loading the grammar 1.8 million, while one
+## expression parse costs half a million, and the file's budget is one
+## million per test.
 
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
@@ -33,6 +35,7 @@ def emit_expr(compiled: Grammar.Grammar, expr: String, in_try: Bool) -> Result[E
   EmitExpr.emit_with(node, "py_tmp = #{expr}\n", {"s": "String"}, {}, in_try)
 end
 
+# `emit_expr` inside the outlined `try` helper.
 def emit_in_try(compiled: Grammar.Grammar, expr: String) -> Result[EmitExpr.Out] = emit_expr(compiled, expr, true)
 
 # Checks the emitted text with the real backend, then runs it and answers
@@ -48,6 +51,30 @@ def check_and_run(text: String, path: String) -> Result[String]
   ok(ran.stdout)
 end
 
+# Translates `source` and runs it beside CPython's own run of the same
+# source, answering the backend's output once the two agree. Python prints
+# `True` and `False` where the backend prints `true`/`false`, so the
+# comparison ignores case; every fixture prints lowercase text otherwise.
+def agree(compiled: Grammar.Grammar, source: String, tag: String) -> Result[String]
+  py_path = "/tmp/agc_py2agc_diff_#{tag}.py"
+  try File.write_text(py_path, source)
+  runner = try Process.spawn_captured("python3", [py_path])
+  ran = try Process.output(runner, 30000)
+  text = try translate_text(compiled, source)
+  got = try check_and_run(text, "/tmp/agc_py2agc_diff_#{tag}.agc")
+  try Test.eq(got.strip().downcase, ran.stdout.strip().downcase)
+  ok(got)
+end
+
+# Spells `#{code}` without writing it in a literal (the compiler reads `"#{"`
+# as the start of an interpolation).
+def interp(code: String) -> String = "#" + "{" + code + "}"
+
+# The emitted program for `source`.
+def translate_text(compiled: Grammar.Grammar, source: String) -> Result[String]
+  Py2Agc.translate(compiled, "prog.py", source)
+end
+
 def main() -> Void
   # Agentica 0.35.0 gives discovery a separate, smaller step budget.
   compiled: Result[Grammar.Grammar] = error("grammar is not loaded during discovery")
@@ -56,37 +83,112 @@ def main() -> Void
   end
 
   Test.run([
-    # Both branches evaluate eagerly, so a direct `Result` arm would convert
-    # even when the guard picks the other one.
-    Test.test("a direct Result ternary arm refuses inside try") do
-      case emit_in_try(compiled.unwrap!, "int(s) if False else 0")
-        error(e) ->
-          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
-          Test.assert(e.message.include?("ternary branch with a Result"), e.message)
-        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
-      end
+    # The two bugs this slice fixes. `int(h())` used to hoist to a temp line
+    # before the sum (so `g()` ran after `h()`), and a chained comparison
+    # used to hoist its tail with the middle operand (so `int("bad")` ran
+    # even once `5 < 1` had already decided). Both are three operands with a
+    # middle call, which must evaluate exactly once.
+    Test.test("source order and chained laziness match CPython") do
+      source = (
+        "def g() -> int:\n    print(\"g\")\n    return 1\n\n" +
+        "def h() -> str:\n    print(\"h\")\n    return \"41\"\n\n" +
+        "try:\n    v: int = g() + int(h())\n    print(v)\n" +
+        "    w: bool = 5 < g() < int(\"bad\")\n    print(w)\nexcept:\n    print(0)\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "order")
+      Test.assert(got.strip() == "g\nh\n42\ng\nfalse", got)
     end,
-    # An arm whose outer type hides the `Result` hoist (`int(s) + 1` is
-    # `Int` and still appends `py_tK = try ...`) refuses the same way.
-    Test.test("a nested Result ternary arm refuses inside try") do
-      case emit_in_try(compiled.unwrap!, "(int(s) + 1) if False else 0")
-        error(e) ->
-          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
-          Test.assert(e.message.include?("ternary branch with a Result"), e.message)
-        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
-      end
+    # Only the selected ternary arm runs: the `then` arm unwraps when it is
+    # picked, and the `else` arm holding a bad conversion never runs when it
+    # is not (the lowering seeds no temp with it).
+    Test.test("both ternary arms stay lazy like CPython") do
+      source = (
+        "on: bool = True\ntry:\n    a: int = int(\"5\") if on else 0\n" +
+        "    b: int = 0 if on else int(\"bad\")\n    print(f\"{a}{b}\")\nexcept:\n    print(\"caught\")\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "ternary")
+      Test.assert(got.strip() == "50", got)
     end,
-    Test.test("a plain ternary still emits inside try") do
-      case emit_in_try(compiled.unwrap!, "1 if False else 0")
-        error(e) -> Test.assert(false, "expected an emission, got #{e.message}")
-        ok(out) ->
-          try Test.eq(out.type, "Int")
-          Test.assert(out.pre.include?("if false"), out.pre.join("\n"))
+    # A hole and an augmented assignment are both value bindings; CPython
+    # answers `5-6` and then raises on the conversion, which the handler
+    # catches, exactly like the emitted program.
+    Test.test("a hole and an augmented assignment match CPython") do
+      source = (
+        "a: str = \"5\"\ntry:\n    x: int = 1\n    x += int(a)\n" +
+        "    print(f\"{int(a)}-{x}\")\n    y: int = int(\"bad\")\n    print(y)\nexcept:\n    print(1)\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "holes")
+      Test.assert(got.strip() == "5-6\n1", got)
+    end,
+    # Every strict position keeps the unwrap in place: one test per position
+    # keeps each inside the file's shared step budget, and the emitted text
+    # is the whole assertion (a parse, not a translation, per case).
+    Test.test("a sum operand unwraps inline inside try") do
+      sum = try emit_in_try(compiled.unwrap!, "int(s) + 1")
+      try Test.eq(sum.code, "(try s.to_i) + 1")
+      try Test.eq(sum.type, "Int")
+      Test.assert(sum.pre.empty?, sum.pre.join("\n"))
+    end,
+    Test.test("a compare operand unwraps inline inside try") do
+      cmp = try emit_in_try(compiled.unwrap!, "int(s) == 5")
+      try Test.eq(cmp.code, "(try s.to_i) == 5")
+      Test.assert(cmp.pre.empty?, cmp.pre.join("\n"))
+    end,
+    Test.test("a list element unwraps inline inside try") do
+      xs = try emit_in_try(compiled.unwrap!, "[int(s), 2]")
+      try Test.eq(xs.code, "[(try s.to_i), 2]")
+      Test.assert(xs.pre.empty?, xs.pre.join("\n"))
+    end,
+    Test.test("a dict value unwraps inline inside try") do
+      d = try emit_in_try(compiled.unwrap!, "{\"k\": int(s)}")
+      try Test.eq(d.code, "{\"k\": (try s.to_i)}")
+      Test.assert(d.pre.empty?, d.pre.join("\n"))
+    end,
+    # Two holes in one f-string unwrap inline, in hole order, with no temp
+    # line that could reorder them.
+    Test.test("f-string holes unwrap inline in hole order") do
+      holes = try emit_in_try(compiled.unwrap!, "f\"{int(s)}-{int(s)}\"")
+      want = "\"" + interp("(try s.to_i)") + "-" + interp("(try s.to_i)") + "\""
+      try Test.eq(holes.code, want)
+      Test.assert(holes.pre.empty?, holes.pre.join("\n"))
+    end,
+    # A lazy tail keeps the unwrap inside its own text: no temp line runs it
+    # early, and the operand still unwraps where it sits.
+    Test.test("a lazy and or tail unwraps inline") do
+      tail = try emit_in_try(compiled.unwrap!, "True and int(s) > 0")
+      try Test.eq(tail.code, "true and (try s.to_i) > 0")
+      Test.assert(tail.pre.empty?, tail.pre.join("\n"))
+    end,
+    # `print` interpolates its argument, so the unwrap lives in the hole.
+    Test.test("print interpolates an inline unwrap inside try") do
+      printed = try emit_in_try(compiled.unwrap!, "print(int(s))")
+      try Test.eq(printed.code, "puts(\"" + interp("(try s.to_i)") + "\")")
+      Test.assert(printed.pre.empty?, printed.pre.join("\n"))
+    end,
+    # The ternary keeps one temp per arm inside a `case` value, so each arm
+    # runs only when the guard selects it and a `Result` arm is no longer a
+    # refusal.
+    Test.test("the ternary lowers to a case value with lazy arms") do
+      arm = try emit_in_try(compiled.unwrap!, "int(s) if True else 0")
+      try Test.eq(arm.code, "py_t0")
+      try Test.eq(arm.type, "Int")
+      Test.eq(arm.pre, ["py_t0 = case true", "  true ->", "    (try s.to_i)", "  _ ->", "    0", "end"])
+    end,
+    # Outside `try` the compound refuses: nothing would catch the operand's
+    # error, and `Result + Int` has no backend form.
+    Test.test("an uncaught compound refuses outside try") do
+      case emit_expr(compiled.unwrap!, "int(s) + 1", false)
+        error(e) ->
+          try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
+          Test.assert(e.message.include?("found Result[Int] and Int"), e.message)
+        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,
     # Outside `try` nothing catches the hole's error, so interpolating the
-    # `Result` (`ok(5)`) is refused instead; an `and`/`or` tail emits without
-    # `try` unwrapping, so the same refusal keeps a lazy tail honest.
+    # `Result` (`ok(5)`) is refused instead.
     Test.test("an uncaught f-string hole refuses outside try") do
       case emit_expr(compiled.unwrap!, "f\"{int(s)}\"", false)
         error(e) ->
@@ -95,108 +197,14 @@ def main() -> Void
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,
-    # A lazy tail cannot defer a `try`, so a `Result` anywhere inside it
-    # refuses with the tail's own message instead of a leaf's ordering,
-    # f-string or condition one.
-    Test.test("a lazy and tail with a Result refuses with one message") do
-      case emit_in_try(compiled.unwrap!, "True and (f\"{int(s)}\" == \"5\")")
-        error(e) ->
-          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
-          Test.assert(e.message.include?("tail with a Result"), e.message)
-        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
-      end
-    end,
-    Test.test("a direct Result lazy tail refuses") do
-      case emit_in_try(compiled.unwrap!, "False and int(\"bad\")")
-        error(e) ->
-          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
-          try Test.assert(e.message.include?("evaluated lazily"), e.message)
-          Test.assert(e.message.include?("bind it before the `and`"), e.message)
-        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
-      end
-    end,
-    # The refusal reaches the user as a spanned diagnostic at the arm.
-    Test.test("the ternary refusal renders with its span") do
-      direct = "s: str = \"bad\"\ntry:\n    x: int = int(s) if False else 0\n    print(x)\nexcept:\n    print(99)\n"
-
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", direct)
-        error(e) ->
-          try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
-          Test.assert(e.message.include?("x: int = int(s) if False else 0"), e.message)
-        ok(_) -> Test.assert(false, "expected an error")
-      end
-    end,
     # `print` and `str` interpolate too, so outside `try` they refuse the
     # same uncaught `Result` an f-string hole does.
-    Test.test("print and str refuse an uncaught Result argument") do
-      sources: List[String] = ["s: str = \"5\"\nprint(int(s))\n", "s: str = \"5\"\nprint(str(int(s)))\n"]
-      for source in sources
-        case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
-          error(e) ->
-            try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
-            try Test.assert(e.message.include?("uncaught Result[Int]"), e.message)
-            try Test.assert(e.message.include?("use it inside a `try` body"), e.message)
-          ok(_) -> try Test.assert(false, "expected an error")
-        end
-      end
-
-      ok()
-    end,
-    # Two holes in one f-string unwrap in hole order, so the second one is
-    # past the first one's temp.
-    Test.test("two Result holes in one f-string unwrap in hole order") do
-      source = (
-        "a: str = \"5\"\nb: str = \"6\"\ntry:\n    v: str = f\"{int(a)}-{int(b)}\"\n    print(v)\nexcept:\n    print(0)\n"
-      )
-
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
-        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
-        ok(text) ->
-          first = text.index_of("py_t0 = try a.to_i").unwrap!
-          second = text.index_of("py_t1 = try b.to_i").unwrap!
-          try Test.assert(first < second, text)
-          ran = try check_and_run(text, "/tmp/agc_py2agc_result_two_holes.agc")
-          Test.assert(ran.strip() == "5-6", ran)
-      end
-    end,
-    # An augmented assignment is a value binding too: a direct Result under
-    # `try` lowers to `x = x + (try ...)` and its error is caught.
-    Test.test("an augmented assignment unwraps a Result inside try") do
-      good = "s: str = \"5\"\ntry:\n    x: int = 1\n    x += int(s)\n    print(x)\nexcept:\n    print(0)\n"
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
-        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
-        ok(text) ->
-          try Test.assert(text.include?("x = x + (try s.to_i)"), text)
-          ran = try check_and_run(text, "/tmp/agc_py2agc_result_aug_ok.agc")
-          try Test.assert(ran.include?("6"), ran)
-      end
-
-      bad = "s: str = \"bad\"\ntry:\n    x: int = 1\n    x += int(s)\n    print(x)\nexcept:\n    print(0)\n"
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", bad)
-        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
-        ok(text) ->
-          ran = try check_and_run(text, "/tmp/agc_py2agc_result_aug_err.agc")
-          Test.assert(ran.include?("0"), ran)
-      end
-    end,
-    # Holes unwrap left to right before interpolation: the good hole prints
-    # `v=5`, the bad one reaches the handler instead of printing a `Result`.
-    Test.test("f-string holes inside try unwrap in order and fail caught") do
-      holes = (
-        "a: str = \"5\"\nb: str = \"bad\"\ntry:\n    v: str = f\"v={int(a)}\"\n" +
-        "    print(v)\n    q: str = f\"{int(b)}\"\n    print(q)\nexcept:\n    print(1)\n"
-      )
-
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", holes)
-        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
-        ok(text) ->
-          first = text.index_of("py_t0 = try a.to_i").unwrap!
-          second = text.index_of("py_t1 = try b.to_i").unwrap!
-          try Test.assert(first < second, text)
-          ran = try check_and_run(text, "/tmp/agc_py2agc_result_fstring.agc")
-          try Test.assert(ran.strip().start_with?("v=5"), ran)
-          try Test.eq(ran.strip().slice(ran.strip().length - 1, 1), "1")
-          Test.assert(!ran.include?("error(") and !ran.include?("ok("), ran)
+    Test.test("print refuses an uncaught Result argument") do
+      case emit_expr(compiled.unwrap!, "print(int(s))", false)
+        error(e) ->
+          try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
+          Test.assert(e.message.include?("`print` argument"), e.message)
+        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,
   ])

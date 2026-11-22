@@ -29,12 +29,10 @@
 ## method on an `Unknown` receiver also stays verbatim (a module path such as
 ## `math.sqrt`), so only value receivers with known types get mapped or
 ## refused. The helpers live in `helpers`: prepend it to any checked program.
-## Temps are `py_tN` lines in `Out.pre`, in evaluation order; the ternary
-## evaluates its guard first but both branches eagerly (no closures exist to
-## defer one), so a branch that would unwrap a `Result` inside a `try`
-## refuses instead, and a chained middle operand evaluates exactly once. The
-## ternary emits the `then` branch before the `else` branch, so `then`-side
-## temps precede `else`-side ones in `pre`.
+## Temps are `py_tN` lines in `Out.pre`, in evaluation order, and a chained
+## middle operand evaluates exactly once. The ternary keeps Python's
+## laziness: its guard runs first, then a `case` value whose arms hold each
+## branch's own temps, so only the selected branch evaluates.
 ## TODO(phase-3c): emitter errors are message-only strings; phase 3c will
 ## thread node spans into rendered `Diagnostic` values.
 
@@ -52,11 +50,10 @@ end
 ## Emits `node` (an expression rule) with `scope` naming every visible name
 ## and `sigs` carrying the call ABI signatures of the callable `def`s.
 ## `in_try` marks the outlined `try` helper: when true, a directly
-## `Result[T]`-typed child in a strict position hoists to `py_tK = try ...`
-## (single evaluation, source order); lazy `and`/`or` right-hand sides and
-## eager ternary branches with a `Result` refuse instead, and the outermost
-## value stays a `Result` for the statement lane to handle
-## (`x: Int = try ...`).
+## `Result[T]`-typed child in a strict position unwraps inline as
+## `(try <code>)`, so it evaluates once, in source order, and its error
+## returns from the helper; the outermost value stays a `Result` for the
+## statement lane to handle (`x: Int = try ...`).
 def emit(node: Tree.Node, source: String, scope: Map[String, String], sigs: Map[String, EmitCtx.Sig]) -> Result[Out]
   emit_with(node, source, scope, sigs, false)
 end
@@ -238,9 +235,9 @@ BUILTINS = [
 # Emission state: the visible names, the next temp number, the preamble,
 # the call ABI signatures, the parameter substitutions a default-value
 # emission binds (a callee parameter name spells its passed argument), and
-# how many `try` hoists `maybe_unwrap` made so far.
-# `in_try` marks the outlined `try` helper, where a `Result` child in a
-# strict position unwraps with `try` (lazy `and`/`or` tails refuse instead).
+# whether this code runs inside the outlined `try` helper.
+# `in_try` marks that helper, where a `Result` child in a strict position
+# unwraps inline with `(try ...)`.
 struct Cx
   scope: Map[String, String]
   next_temp: Int
@@ -248,7 +245,6 @@ struct Cx
   sigs: Map[String, EmitCtx.Sig]
   substs: Map[String, String]
   in_try: Bool = false
-  unwraps: Int = 0
 end
 
 # An emitted expression still carrying its state.
@@ -300,28 +296,20 @@ struct Bound
   own: Map[String, String]
 end
 
-# Hoists a directly `Result[T]`-typed child to `py_tK = try <code>` when
-# inside an outlined `try` body (strict positions only: the caller already
-# decided laziness is safe). The outermost value never routes here, so the
-# statement lane still sees the `Result` and spells `try`/`some(try ...)`
-# itself. Outside `try` the `Result` passes through for the lane's refusal.
-# `unwraps` counts every hoist, so a lazy context (`and`/`or` tail, ternary
-# branch) can compare the count and refuse instead of hoisting early.
+# Unwraps a directly `Result[T]`-typed child inline as `(try <code>)` when
+# inside an outlined `try` body. `try` binds like unary `not` and takes a
+# Result operand (probed on 0.35.0), so the parenthesized form is an
+# expression wherever one fits: no temp and no preamble line, which keeps
+# source order and laziness for free. The outermost value never routes here,
+# so the statement lane still sees the `Result` and spells `try`/
+# `some(try ...)` itself. Outside `try` the `Result` passes through for the
+# lane's refusal.
 def maybe_unwrap(done: Done) -> Result[Done]
   return ok(done) if !done.cx.in_try
   inner = result_inner(done.type)
   case inner
     none -> ok(done)
-    some(found) ->
-      temp = "py_t#{done.cx.next_temp}"
-      pre = done.cx.pre.push("#{temp} = try #{done.code}")
-      ok(
-        Done(
-          code: temp,
-          type: found,
-          cx: done.cx.with(next_temp: done.cx.next_temp + 1, pre: pre, unwraps: done.cx.unwraps + 1),
-        ),
-      )
+    some(found) -> ok(Done(code: "(try #{done.code})", type: found, cx: done.cx))
   end
 end
 
@@ -368,14 +356,11 @@ def emit_last_child(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   emit_in(cx, List.last(node.children), source)
 end
 
-# `a if c else b` lowers to a temp plus a statement `if`: the guard runs
-# first, the `else` value seeds the temp, and the `then` value replaces it.
-# Both branches evaluate eagerly; only the selected value survives. A branch
-# that hoists a `Result` inside a `try` body would unwrap eagerly, so it
-# refuses spanned instead (the guard always evaluates, so its hoist is fine).
-# The `unwraps` counter detects a hidden hoist too (`int(s) + 1` is `Int` yet
-# increments it), so a nested arm gets this one refusal, not an operator or
-# condition message from the leaf.
+# `a if c else b` lowers to a temp assigned a `case` value over the guard:
+# the guard runs first and only the selected arm runs, so an arm that
+# unwraps a `Result` inline (`(try ...)`) behaves like Python's branch. Each
+# arm carries its own preamble lines, which the case keeps inside the arm
+# body.
 def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return emit_in(cx, List.first(node.children), source) if node.children.size == 1
   return error("agc-py: cond without three parts") if node.children.size != 3
@@ -389,16 +374,6 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   then_done = try maybe_unwrap(raw_then)
   raw_else = try emit_in(then_done.cx, List.first(kids.drop(2)), source)
   else_done = try maybe_unwrap(raw_else)
-  # Both branches evaluate eagerly, so a branch that hoists a `Result` would
-  # unwrap even when the guard picks the other one (and a bad conversion would
-  # reach the handler). Refuse instead of widening the lowering to lazy arms;
-  # the guard itself always evaluates, so its hoist above stays.
-  if cx.in_try and (then_done.cx.unwraps > guard.cx.unwraps or else_done.cx.unwraps > then_done.cx.unwraps)
-    return error(
-      "PY-OUT-OF-SUBSET: a ternary branch with a Result is evaluated eagerly = help: bind it before the ternary, for example `v = f()`",
-    )
-  end
-
   unified = then_done.type
   if then_done.type != else_done.type
     if then_done.type == "Unknown"
@@ -415,7 +390,13 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   end
 
   temp = "py_t#{else_done.cx.next_temp}"
-  pre = else_done.cx.pre + ["#{temp} = #{else_done.code}", "if #{guard.code}", "  #{temp} = #{then_done.code}", "end"]
+  then_pre = then_done.cx.pre.drop(guard.cx.pre.size)
+  else_pre = else_done.cx.pre.drop(then_done.cx.pre.size)
+  pre = guard.cx.pre + ["#{temp} = case #{guard.code}", "  true ->"]
+  pre = pre + EmitCtx.indented(then_pre + [then_done.code], 2)
+  pre = pre + ["  _ ->"]
+  pre = pre + EmitCtx.indented(else_pre + [else_done.code], 2)
+  pre = pre.push("end")
   ok(Done(code: temp, type: unified, cx: else_done.cx.with(next_temp: else_done.cx.next_temp + 1, pre: pre)))
 end
 
@@ -433,21 +414,10 @@ def emit_logic(cx: Cx, node: Tree.Node, source: String, op: String) -> Result[Do
   code = first.code
   current = first.cx
   for child in node.children.drop(1)
-    # Right-hand tails evaluate only when the left decides, so an unwrap
-    # cannot live there: `try` is a statement and hoisting it would run the
-    # tail before the `and`/`or`. Emit the tail with the body's own
-    # unwrapping so a hoist anywhere inside it (a conversion, an operand, an
-    # f-string hole) bumps `unwraps`, then refuse at this one site. Nested
-    # leaves therefore never reach their operator, f-string or condition
-    # messages, which would misdescribe a lazy position.
-    base_unwraps = current.unwraps
-    next_done = try emit_in(current, child, source)
-    if current.in_try and (next_done.cx.unwraps > base_unwraps or is_result?(next_done.type))
-      return error(
-        "PY-OUT-OF-SUBSET: an `#{op}` tail with a Result is evaluated lazily = help: bind it before the `#{op}`, for example `v = f()`",
-      )
-    end
-
+    # A tail evaluates only when the left decides, and an inline `(try ...)`
+    # sits inside the `and`/`or` text, so the unwrap stays lazy with it.
+    raw_next = try emit_in(current, child, source)
+    next_done = try maybe_unwrap(raw_next)
     return logic_bool_error(next_done.type, op) if next_done.type != "Bool"
 
     code = "#{code} #{op} #{next_done.code}"
@@ -1265,9 +1235,9 @@ end
 # `r"..."` skips decoding; `f"..."` interpolates holes, `{{` / `}}` spell
 # braces, and a hole holding a `"` hoists to a temp (nested quotes do not
 # check inside interpolation). Inside an outlined `try` a hole that answers a
-# `Result` unwraps to `py_tK = try ...` in hole order, so a bad conversion
-# reaches the handler instead of interpolating the `Result`; outside `try`
-# such a hole refuses, since nothing would catch the error.
+# `Result` unwraps inline in hole order, so a bad conversion reaches the
+# handler instead of interpolating the `Result`; outside `try` such a hole
+# refuses, since nothing would catch the error.
 def emit_text(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   raw = Tree.text(node, source)
   info = string_info(raw)

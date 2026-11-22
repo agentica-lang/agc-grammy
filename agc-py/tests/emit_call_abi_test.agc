@@ -321,7 +321,7 @@ def default_order_flow(compiled: Grammar.Grammar) -> Result[Void]
   out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
   try Test.eq(out.type, "Int")
   try Test.eq(out.code, "g(py_t1, py_t0, py_t1 + py_t0)")
-  try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = 0", "if true", "  py_t0 = h()", "end"])
+  try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = case true", "  true ->", "    h()", "  _ ->", "    0", "end"])
   ok()
 end
 

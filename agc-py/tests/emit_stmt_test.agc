@@ -185,8 +185,8 @@ def main() -> Void
       source = "c: bool = True\ny: int = 1 if c else 2\nw: int = 3 if c else 4\n"
       stmts = try stmts_of(compiled.unwrap!, source)
       done = try acc_ok("temps", 0, EmitStmt.emit_block(stmt_ctx(source, {}, "", 0), stmts), [], ["y", "w"])
-      try Test.assert(done.code.join("\n").include?("py_t0 = 2"), done.code.join("\n"))
-      try Test.assert(done.code.join("\n").include?("py_t1 = 4"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("py_t0 = case c"), done.code.join("\n"))
+      try Test.assert(done.code.join("\n").include?("py_t1 = case c"), done.code.join("\n"))
       try Test.eq(done.next_temp, 2)
       try Test.eq(done.scope.get("y", ""), "Int")
       try Test.eq(done.scope.get("w", ""), "Int")

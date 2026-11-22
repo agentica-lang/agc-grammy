@@ -245,11 +245,12 @@ end
 
 # Emits one branch guard and insists on `Bool`, shifting every preamble
 # temp by the incoming supply. Failures are `CODE: message = help: hint`
-# strings; the caller renders them into spanned refusals. A directly
-# `Result[Bool]` guard would hoist to `try` here (it always evaluates, so
-# laziness is safe) once a `Bool` `Result` producer exists; this slice has
-# none (`int`/`float` give `Result[Int]`/`Result[Float]`), so a `Result`
-# guard refuses instead and names the inner type when there is one.
+# strings; the caller renders them into spanned refusals. A condition's own
+# operands unwrap inline (`int(s) > 0` is `(try s.to_i) > 0`); a directly
+# `Result[Bool]` guard stays a refusal because this slice has no `Bool`
+# `Result` producer (`int`/`float` give `Result[Int]`/`Result[Float]`), so
+# the shape is unreachable, and the refusal names the inner type when there
+# is one.
 def emit_cond(ctx: EmitCtx.EmitCtx, node: Tree.Node, owner: String) -> Result[CondOut]
   out = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
   inner = EmitExpr.result_inner(out.type)
