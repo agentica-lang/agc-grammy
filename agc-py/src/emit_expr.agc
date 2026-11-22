@@ -2023,6 +2023,15 @@ def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source
   ok(Done(code: "#{name}(#{parts.join(", ")})", type: sig.ret, cx: current.with(substs: caller_substs)))
 end
 
+# An earlier inline value that would otherwise run after a later preamble:
+# only a call still spelled inline (a `(`) can run out of order; a plain
+# temp, variable or literal stays inline.
+def inline_effectful?(code: String) -> Bool
+  return false if is_abi_temp?(code)
+
+  code.include?("(")
+end
+
 # Maps the call's arguments onto the signature in parameter order. Keyword
 # calls hoist every explicit argument to a temp in source order (the grammar
 # keeps positionals ahead of every keyword, so source order is the
@@ -2035,7 +2044,128 @@ def prepare_slots(cx: Cx, sig: EmitCtx.Sig, args: CallArgs) -> Result[Prepared]
   pos_values: List[Done] = []
   kw_values: Map[String, Done] = {}
   if args.kw.empty?
-    pos_values = args.pos
+    if args.pos.empty?
+      pos_values = []
+    else
+      # Positional user calls keep source order: a later argument's preamble
+      # (a chained middle, a ternary) would otherwise run before an earlier
+      # inline call (`h(tag(10), 1<tag(20)<3)` ran `tag(20)` first). Only an
+      # earlier inline call hoists, and only when a later preamble exists,
+      # so pure values stay inline and every value still evaluates once. A
+      # `Void` argument into an `Optional` parameter spells its statement
+      # line where the argument sat instead of appending it after the whole
+      # preamble.
+      ordered_codes: List[String] = args.pos.map { |done| done.code }
+      ordered_pres: List[List[String]] = args.pos.map { |done| done.cx.pre }
+      void_flags: List[Bool] = []
+      probe_index = 0
+      for done in args.pos
+        want_probe = ""
+        if probe_index < sig.params.size
+          want_probe = base_of(List.first(sig.types.drop(probe_index)))
+        end
+
+        is_void = false
+        case none_result_line(done, want_probe)
+          some(_) -> is_void = true
+          none -> is_void = false
+        end
+
+        void_flags = void_flags.push(is_void)
+        probe_index += 1
+      end
+
+      later_flags: List[Bool] = []
+      later_index = 0
+      for _ in args.pos
+        has_later = false
+        check = later_index + 1
+        while check < args.pos.size
+          prev_pre = List.first(ordered_pres.drop(check - 1))
+          cur_pre = List.first(ordered_pres.drop(check))
+          if cur_pre.size > prev_pre.size
+            has_later = true
+          end
+
+          check += 1
+        end
+
+        later_flags = later_flags.push(has_later)
+        later_index += 1
+      end
+
+      need_flags: List[Bool] = []
+      need_index = 0
+      for code in ordered_codes
+        needs = false
+        if !List.first(void_flags.drop(need_index)) and List.first(later_flags.drop(need_index))
+          if inline_effectful?(code)
+            needs = true
+          end
+        end
+
+        need_flags = need_flags.push(needs)
+        need_index += 1
+      end
+
+      hoist_names: List[String] = []
+      next_temp = current.next_temp
+      for flag in need_flags
+        if flag
+          hoist_names = hoist_names.push("py_t#{next_temp}")
+          next_temp += 1
+        else
+          hoist_names = hoist_names.push("")
+        end
+      end
+
+      rebuilt_pos: List[String] = List.first(ordered_pres)
+      if List.first(void_flags)
+        rebuilt_pos = rebuilt_pos.push(List.first(ordered_codes))
+      else
+        if List.first(need_flags)
+          rebuilt_pos = rebuilt_pos.push("#{List.first(hoist_names)} = #{List.first(ordered_codes)}")
+        end
+      end
+
+      prefixes_pos: List[List[String]] = [rebuilt_pos]
+      build_index = 1
+      for _ in ordered_pres.drop(1)
+        prev_pre = List.first(ordered_pres.drop(build_index - 1))
+        cur_pre = List.first(ordered_pres.drop(build_index))
+        rebuilt_pos = rebuilt_pos + cur_pre.drop(prev_pre.size)
+        if List.first(void_flags.drop(build_index))
+          rebuilt_pos = rebuilt_pos.push(List.first(ordered_codes.drop(build_index)))
+        else
+          if List.first(need_flags.drop(build_index))
+            rebuilt_pos = rebuilt_pos.push(
+              "#{List.first(hoist_names.drop(build_index))} = #{List.first(ordered_codes.drop(build_index))}",
+            )
+          end
+        end
+
+        prefixes_pos = prefixes_pos.push(rebuilt_pos)
+        build_index += 1
+      end
+
+      current = current.with(next_temp: next_temp, pre: rebuilt_pos)
+      pos_index = 0
+      for done in args.pos
+        prefix = List.first(prefixes_pos.drop(pos_index))
+        prefix_cx = current.with(pre: prefix)
+        if List.first(void_flags.drop(pos_index))
+          pos_values = pos_values.push(done.with(code: "none", type: "none", cx: prefix_cx))
+        else
+          if List.first(need_flags.drop(pos_index))
+            pos_values = pos_values.push(done.with(code: List.first(hoist_names.drop(pos_index)), cx: prefix_cx))
+          else
+            pos_values = pos_values.push(done.with(cx: prefix_cx))
+          end
+        end
+
+        pos_index += 1
+      end
+    end
   else
     ordered_codes: List[String] = []
     ordered_pres: List[List[String]] = []

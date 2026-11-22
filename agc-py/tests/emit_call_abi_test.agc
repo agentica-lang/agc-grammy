@@ -15,6 +15,7 @@
 ## emission slices its text out of it (`Tree.text` spans into the source).
 
 import EmitCtx from "../src/emit_ctx"
+import {Sig} from "../src/emit_ctx"
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
@@ -42,13 +43,15 @@ def main() -> Void
     Test.test("a self-referential default refuses") do self_ref_flow(compiled.unwrap!) end,
     Test.test("keyword hoists stay in source order before a later preamble") do kw_preamble_flow(compiled.unwrap!) end,
     Test.test("a default capture runs where its argument sat") do default_order_flow(compiled.unwrap!) end,
+    Test.test("a positional call keeps source order before a later preamble") do pos_order_flow(compiled.unwrap!) end,
+    Test.test("a void argument runs where it sat before a later preamble") do void_order_flow(compiled.unwrap!) end,
   ])
 end
 
 def keyword_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["add(1, 2)", "add(y=2, x=1)"])
   nodes = try parse_values(compiled, full)
-  add_sig = EmitCtx.Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
+  add_sig = Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
   sigs = {"add": add_sig}
   scope = {"add": EmitCtx.def_marker()}
 
@@ -69,7 +72,7 @@ end
 def missing_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["add(1)"])
   nodes = try parse_values(compiled, full)
-  add_sig = EmitCtx.Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
+  add_sig = Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
   sigs = {"add": add_sig}
   scope = {"add": EmitCtx.def_marker()}
 
@@ -82,7 +85,7 @@ def kw_error_flow(compiled: Grammar.Grammar) -> Result[Void]
   batch = ["add(x=1, x=2)", "add(z=1)", "add(1, x=2)", "add(1, 2, 3)"]
   full = wrap_all(batch)
   nodes = try parse_values(compiled, full)
-  add_sig = EmitCtx.Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
+  add_sig = Sig(name: "add", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
   sigs = {"add": add_sig}
   scope = {"add": EmitCtx.def_marker()}
 
@@ -101,7 +104,7 @@ def default_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["f(1)", "5"])
   nodes = try parse_values(compiled, full)
   five = List.first(nodes.drop(1))
-  def_sig = EmitCtx.Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(five)], ret: "Int")
+  def_sig = Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(five)], ret: "Int")
   sigs = {"f": def_sig}
   scope = {"f": EmitCtx.def_marker()}
 
@@ -119,7 +122,7 @@ def default_error_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["f(\"s\", 2)", "f()", "5"])
   nodes = try parse_values(compiled, full)
   five = List.first(nodes.drop(2))
-  def_sig = EmitCtx.Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(five)], ret: "Int")
+  def_sig = Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(five)], ret: "Int")
   sigs = {"f": def_sig}
   scope = {"f": EmitCtx.def_marker()}
 
@@ -134,7 +137,7 @@ def subst_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["g(3)", "a * 2"])
   nodes = try parse_values(compiled, full)
   a_times_two = List.first(nodes.drop(1))
-  subst_sig = EmitCtx.Sig(
+  subst_sig = Sig(
     name: "g",
     params: ["a", "b"],
     types: ["Int", "Int"],
@@ -157,7 +160,7 @@ end
 def optional_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["h(5)"])
   nodes = try parse_values(compiled, full)
-  opt_sig = EmitCtx.Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [none], ret: "Int")
+  opt_sig = Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [none], ret: "Int")
   sigs = {"h": opt_sig}
   scope = {"h": EmitCtx.def_marker()}
 
@@ -173,7 +176,7 @@ def caller_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["g(3) + a", "a * 2"])
   nodes = try parse_values(compiled, full)
   a_times_two = List.first(nodes.drop(1))
-  subst_sig = EmitCtx.Sig(
+  subst_sig = Sig(
     name: "g",
     params: ["a", "b"],
     types: ["Int", "Int"],
@@ -197,15 +200,9 @@ def sibling_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["h(g(3), a)", "a * 2"])
   nodes = try parse_values(compiled, full)
   a_times_two = List.first(nodes.drop(1))
-  g_sig = EmitCtx.Sig(
-    name: "g",
-    params: ["a", "b"],
-    types: ["Int", "Int"],
-    defaults: [none, some(a_times_two)],
-    ret: "Int",
-  )
+  g_sig = Sig(name: "g", params: ["a", "b"], types: ["Int", "Int"], defaults: [none, some(a_times_two)], ret: "Int")
 
-  h_sig = EmitCtx.Sig(name: "h", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
+  h_sig = Sig(name: "h", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
   sigs = {"g": g_sig, "h": h_sig}
   scope = {"g": EmitCtx.def_marker(), "h": EmitCtx.def_marker(), "a": "Int"}
 
@@ -222,15 +219,9 @@ def temp_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["g(py_tmp + f())", "a + a"])
   nodes = try parse_values(compiled, full)
   a_plus_a = List.first(nodes.drop(1))
-  g_sig = EmitCtx.Sig(
-    name: "g",
-    params: ["a", "b"],
-    types: ["Int", "Int"],
-    defaults: [none, some(a_plus_a)],
-    ret: "Int",
-  )
+  g_sig = Sig(name: "g", params: ["a", "b"], types: ["Int", "Int"], defaults: [none, some(a_plus_a)], ret: "Int")
 
-  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  f_sig = Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
   sigs = {"g": g_sig, "f": f_sig}
   scope = {"g": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "py_tmp": "Int"}
 
@@ -247,7 +238,7 @@ def default_fit_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["h()", "5"])
   nodes = try parse_values(compiled, full)
   five = List.first(nodes.drop(1))
-  h_sig = EmitCtx.Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [some(five)], ret: "Int")
+  h_sig = Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [some(five)], ret: "Int")
   sigs = {"h": h_sig}
   scope = {"h": EmitCtx.def_marker()}
 
@@ -263,7 +254,7 @@ def default_fit_flow(compiled: Grammar.Grammar) -> Result[Void]
   bad_full = wrap_all(["f(1)", "\"s\""])
   bad_nodes = try parse_values(compiled, bad_full)
   s_lit = List.first(bad_nodes.drop(1))
-  f_sig = EmitCtx.Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(s_lit)], ret: "Int")
+  f_sig = Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(s_lit)], ret: "Int")
   bad = EmitExpr.emit(List.first(bad_nodes), bad_full, {"f": EmitCtx.def_marker()}, {"f": f_sig})
   try assert_err(bad, "PY-TYPE-MISMATCH")
   ok()
@@ -273,7 +264,7 @@ def self_ref_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["g(1)", "b"])
   nodes = try parse_values(compiled, full)
   b_only = List.first(nodes.drop(1))
-  g_sig = EmitCtx.Sig(name: "g", params: ["a", "b"], types: ["Int", "Int"], defaults: [none, some(b_only)], ret: "Int")
+  g_sig = Sig(name: "g", params: ["a", "b"], types: ["Int", "Int"], defaults: [none, some(b_only)], ret: "Int")
 
   sigs = {"g": g_sig}
   scope = {"g": EmitCtx.def_marker()}
@@ -288,9 +279,9 @@ end
 def kw_preamble_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["h(a=f(), b=1 < g() < 3)"])
   nodes = try parse_values(compiled, full)
-  h_sig = EmitCtx.Sig(name: "h", params: ["a", "b"], types: ["Int", "Bool"], defaults: [none, none], ret: "Int")
-  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
-  g_sig = EmitCtx.Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
+  h_sig = Sig(name: "h", params: ["a", "b"], types: ["Int", "Bool"], defaults: [none, none], ret: "Int")
+  f_sig = Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  g_sig = Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
   sigs = {"h": h_sig, "f": f_sig, "g": g_sig}
   scope = {"h": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "g": EmitCtx.def_marker()}
 
@@ -307,7 +298,7 @@ def default_order_flow(compiled: Grammar.Grammar) -> Result[Void]
   full = wrap_all(["g(f(), h() if True else 0)", "a + b"])
   nodes = try parse_values(compiled, full)
   dflt = List.first(nodes.drop(1))
-  g_sig = EmitCtx.Sig(
+  g_sig = Sig(
     name: "g",
     params: ["a", "b", "c"],
     types: ["Int", "Int", "Int"],
@@ -315,8 +306,8 @@ def default_order_flow(compiled: Grammar.Grammar) -> Result[Void]
     ret: "Int",
   )
 
-  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
-  h_sig = EmitCtx.Sig(name: "h", params: [], types: [], defaults: [], ret: "Int")
+  f_sig = Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  h_sig = Sig(name: "h", params: [], types: [], defaults: [], ret: "Int")
   sigs = {"g": g_sig, "f": f_sig, "h": h_sig}
   scope = {"g": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "h": EmitCtx.def_marker()}
 
@@ -326,6 +317,47 @@ def default_order_flow(compiled: Grammar.Grammar) -> Result[Void]
   try Test.eq(out.type, "Int")
   try Test.eq(out.code, "g(py_t1, py_t0, py_t1 + py_t0)")
   try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = 0", "if true", "  py_t0 = h()", "end"])
+  ok()
+end
+
+def pos_order_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(f(), 1 < g() < 3)", "h(1, 1 < g() < 3)"])
+  nodes = try parse_values(compiled, full)
+  h_sig = Sig(name: "h", params: ["a", "b"], types: ["Int", "Bool"], defaults: [none, none], ret: "Int")
+  f_sig = Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  g_sig = Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"h": h_sig, "f": f_sig, "g": g_sig}
+  scope = {"h": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "g": EmitCtx.def_marker()}
+
+  # A later chained middle would run before an earlier inline call, so only
+  # that call hoists to where it sat; a pure earlier value stays inline.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(py_t1, 1 < py_t0 and py_t0 < 3)")
+  try Test.eq(out.pre, ["py_t1 = f()", "py_t0 = g()"])
+  out = try EmitExpr.emit(List.first(nodes.drop(1)), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(1, 1 < py_t0 and py_t0 < 3)")
+  try Test.eq(out.pre, ["py_t0 = g()"])
+  ok()
+end
+
+def void_order_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(v(), 1 < g() < 3)"])
+  nodes = try parse_values(compiled, full)
+  h_sig = Sig(name: "h", params: ["x", "y"], types: ["Optional[Int]", "Bool"], defaults: [none, none], ret: "Int")
+
+  v_sig = Sig(name: "v", params: [], types: [], defaults: [], ret: "Void")
+  g_sig = Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"h": h_sig, "v": v_sig, "g": g_sig}
+  scope = {"h": EmitCtx.def_marker(), "v": EmitCtx.def_marker(), "g": EmitCtx.def_marker()}
+
+  # A `Void` argument into an `Optional` parameter spells its statement line
+  # where the argument sat, before a later chained preamble.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(none, 1 < py_t0 and py_t0 < 3)")
+  try Test.eq(out.pre, ["v()", "py_t0 = g()"])
   ok()
 end
 
