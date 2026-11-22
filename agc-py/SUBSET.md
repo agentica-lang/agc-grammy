@@ -143,7 +143,8 @@ plain types only.
   with the call's own argument values bound to the parameter names. A lowered
   default fits exactly like an explicit argument (a plain value into an
   `Optional` parameter wraps in `some`, a wrong type is `PY-TYPE-MISMATCH`);
-  a default naming its own parameter refuses (`PY-OUT-OF-SUBSET`). This is a
+  a default naming its own parameter refuses (`PY-OUT-OF-SUBSET`), as does a
+  default reading another parameter the call does not pass. This is a
   deliberate divergence from CPython, where a default evaluates once at `def`
   time and can never name a parameter — the subset re-evaluates it at every
   call that needs it instead. A call

@@ -45,6 +45,10 @@ def main() -> Void
     Test.test("a default capture runs where its argument sat") do default_order_flow(compiled.unwrap!) end,
     Test.test("a positional call keeps source order before a later preamble") do pos_order_flow(compiled.unwrap!) end,
     Test.test("a void argument runs where it sat before a later preamble") do void_order_flow(compiled.unwrap!) end,
+    Test.test("a void keyword passes none through an effect line") do kw_void_flow(compiled.unwrap!) end,
+    Test.test("a mixed void keyword keeps source order before a later preamble") do
+      kw_void_order_flow(compiled.unwrap!)
+    end,
   ])
 end
 
@@ -358,6 +362,64 @@ def void_order_flow(compiled: Grammar.Grammar) -> Result[Void]
   try Test.eq(out.type, "Int")
   try Test.eq(out.code, "h(none, 1 < py_t0 and py_t0 < 3)")
   try Test.eq(out.pre, ["v()", "py_t0 = g()"])
+  ok()
+end
+
+def kw_void_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(x=v())"])
+  nodes = try parse_values(compiled, full)
+  h_sig = Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [none], ret: "Int")
+  v_sig = Sig(name: "v", params: [], types: [], defaults: [], ret: "Void")
+  sigs = {"h": h_sig, "v": v_sig}
+  scope = {"h": EmitCtx.def_marker(), "v": EmitCtx.def_marker()}
+
+  # A `Void` keyword into an `Optional` parameter runs as its own statement
+  # line and passes `none`: no temp hoists a `Void` value the backend
+  # refuses, and no stray bare temp follows it.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(none)")
+  try Test.eq(out.pre, ["v()"])
+
+  # Into a concrete parameter the same shape still refuses spanned.
+  bad_full = wrap_all(["j(x=v())"])
+  bad_nodes = try parse_values(compiled, bad_full)
+  j_sig = Sig(name: "j", params: ["x"], types: ["Int"], defaults: [none], ret: "Int")
+  bad = EmitExpr.emit(
+    List.first(bad_nodes),
+    bad_full,
+    {"j": EmitCtx.def_marker(), "v": EmitCtx.def_marker()},
+    {"j": j_sig, "v": v_sig},
+  )
+
+  try assert_err(bad, "PY-TYPE-MISMATCH")
+  ok()
+end
+
+def kw_void_order_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(f(), x=v(), y=1 < g() < 3)"])
+  nodes = try parse_values(compiled, full)
+  h_sig = Sig(
+    name: "h",
+    params: ["a", "x", "y"],
+    types: ["Int", "Optional[Int]", "Bool"],
+    defaults: [none, none, none],
+    ret: "Int",
+  )
+
+  f_sig = Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  v_sig = Sig(name: "v", params: [], types: [], defaults: [], ret: "Void")
+  g_sig = Sig(name: "g", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"h": h_sig, "f": f_sig, "v": v_sig, "g": g_sig}
+  scope = {"h": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "v": EmitCtx.def_marker(), "g": EmitCtx.def_marker()}
+
+  # Mixed positionals and keywords keep source order: each non-void hoists
+  # once where it sat, the void keyword spells its statement line there,
+  # and a later chained preamble never jumps ahead of either.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(py_t1, none, py_t2)")
+  try Test.eq(out.pre, ["py_t1 = f()", "v()", "py_t0 = g()", "py_t2 = 1 < py_t0 and py_t0 < 3"])
   ok()
 end
 

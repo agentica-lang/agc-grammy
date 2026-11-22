@@ -231,13 +231,10 @@ struct Decoded
   next: Int
 end
 
-# A keyword argument: its name, emitted value, and the nodes the call
-# diagnostics span (the keyword name and the value it carries).
+# A keyword argument: its name and emitted value.
 struct Kw
   name: String
   value: Done
-  name_node: Tree.Node
-  value_node: Tree.Node
 end
 
 struct CallArgs
@@ -1758,7 +1755,7 @@ def emit_kwarg(cx: Cx, node: Tree.Node, source: String) -> Result[Kw]
     some(found) ->
       value_node = List.last(node.children)
       value = try emit_in(cx, value_node, source)
-      ok(Kw(name: Tree.text(found, source), value: value, name_node: found, value_node: value_node))
+      ok(Kw(name: Tree.text(found, source), value: value))
     none -> error("agc-py: kwarg without a name")
   end
 end
@@ -2181,37 +2178,104 @@ def prepare_slots(cx: Cx, sig: EmitCtx.Sig, args: CallArgs) -> Result[Prepared]
 
     # Keyword hoists stay in source order, interleaved with each argument's
     # own preamble: capturing an earlier argument after a later preamble
-    # would run the later effects first.
+    # would run the later effects first. A `Void` argument into an
+    # `Optional` parameter spells its statement line where it sat (like the
+    # positional path) instead of hoisting to a temp the backend refuses.
+    ordered_dones: List[Done] = []
+    for done in args.pos
+      ordered_dones = ordered_dones.push(done)
+    end
+
+    for kw in args.kw
+      ordered_dones = ordered_dones.push(kw.value)
+    end
+
+    ordered_wants: List[String] = []
+    want_pos = 0
+    for _ in args.pos
+      want = ""
+      if want_pos < sig.params.size
+        want = base_of(List.first(sig.types.drop(want_pos)))
+      end
+
+      ordered_wants = ordered_wants.push(want)
+      want_pos += 1
+    end
+
+    for kw in args.kw
+      ordered_wants = ordered_wants.push(base_of(List.first(sig.types.drop(param_index(sig, kw.name)))))
+    end
+
+    void_flags: List[Bool] = []
+    flag_at = 0
+    for done in ordered_dones
+      is_void = false
+      case none_result_line(done, List.first(ordered_wants.drop(flag_at)))
+        some(_) -> is_void = true
+        none -> is_void = false
+      end
+
+      void_flags = void_flags.push(is_void)
+      flag_at += 1
+    end
+
     temps: List[String] = []
     next_temp = current.next_temp
-    for _ in ordered_codes
-      temps = temps.push("py_t#{next_temp}")
-      next_temp += 1
+    for flag in void_flags
+      if flag
+        temps = temps.push("")
+      else
+        temps = temps.push("py_t#{next_temp}")
+        next_temp += 1
+      end
     end
 
     rebuilt: List[String] = List.first(ordered_pres)
-    rebuilt = rebuilt.push("#{List.first(temps)} = #{List.first(ordered_codes)}")
+    if List.first(void_flags)
+      rebuilt = rebuilt.push(List.first(ordered_codes))
+    else
+      rebuilt = rebuilt.push("#{List.first(temps)} = #{List.first(ordered_codes)}")
+    end
+
     hoist_index = 1
     for _ in ordered_pres.drop(1)
       prev = List.first(ordered_pres.drop(hoist_index - 1))
       cur_pre = List.first(ordered_pres.drop(hoist_index))
       rebuilt = rebuilt + cur_pre.drop(prev.size)
-      rebuilt = rebuilt.push("#{List.first(temps.drop(hoist_index))} = #{List.first(ordered_codes.drop(hoist_index))}")
+      if List.first(void_flags.drop(hoist_index))
+        rebuilt = rebuilt.push(List.first(ordered_codes.drop(hoist_index)))
+      else
+        rebuilt = rebuilt.push(
+          "#{List.first(temps.drop(hoist_index))} = #{List.first(ordered_codes.drop(hoist_index))}",
+        )
+      end
+
       hoist_index += 1
     end
 
     current = current.with(next_temp: next_temp, pre: rebuilt)
     pos_index = 0
     for done in args.pos
-      temp = List.first(temps.drop(pos_index))
-      pos_values = pos_values.push(done.with(code: temp, cx: current))
+      if List.first(void_flags.drop(pos_index))
+        pos_values = pos_values.push(done.with(code: "none", type: "none", cx: current))
+      else
+        temp = List.first(temps.drop(pos_index))
+        pos_values = pos_values.push(done.with(code: temp, cx: current))
+      end
+
       pos_index += 1
     end
 
     kw_index = 0
     for kw in args.kw
-      temp = List.first(temps.drop(args.pos.size + kw_index))
-      kw_values = kw_values.put(kw.name, kw.value.with(code: temp, cx: current))
+      ordered_at = args.pos.size + kw_index
+      if List.first(void_flags.drop(ordered_at))
+        kw_values = kw_values.put(kw.name, kw.value.with(code: "none", type: "none", cx: current))
+      else
+        temp = List.first(temps.drop(ordered_at))
+        kw_values = kw_values.put(kw.name, kw.value.with(code: temp, cx: current))
+      end
+
       kw_index += 1
     end
   end

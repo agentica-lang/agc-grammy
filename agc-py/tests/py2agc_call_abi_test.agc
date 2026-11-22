@@ -131,5 +131,17 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    Test.test("a void keyword into an optional runs and passes none") do
+      source = "def v() -> None:\n    print(1)\ndef h(x: int | None) -> int:\n" + "    return 1\nprint(h(x=v()))\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("v()"), text)
+          try Test.assert(text.include?("h(none)"), text)
+          try Test.assert(!text.include?("py_t0 = v()"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_kw_void.agc")
+          Test.eq(ran, "1\n1\n")
+      end
+    end,
   ])
 end
