@@ -59,6 +59,18 @@ def main() -> Void
           Test.eq(ran, "5\n")
       end
     end,
+    Test.test("a caller's variable survives beside a defaulted call") do
+      source = "def g(a: int, b: int = a * 2) -> int:\n    return a + b\na: int = 100\nprint(g(3) + a)\n"
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          # `g(3)` lowers to `g(py_t0, py_t0 * 2)` with `py_t0 = 3`, and the
+          # trailing `a` still reads the caller's 100: 9 + 100.
+          ran = try check_and_run(text, "/tmp/agc_py2agc_caller_survives.agc")
+          Test.eq(ran, "109\n")
+      end
+    end,
     Test.test("recursion reaches its own signature") do
       source = "def r(n: int) -> int:\n    if n <= 0:\n        return 0\n    return n + r(n - 1)\nprint(r(5))\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", source)

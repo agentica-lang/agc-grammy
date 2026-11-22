@@ -35,6 +35,11 @@ def main() -> Void
     Test.test("a bad call to a defaulted function refuses") do default_error_flow(compiled.unwrap!) end,
     Test.test("a default reads its parameter") do subst_flow(compiled.unwrap!) end,
     Test.test("an optional parameter wraps a plain value") do optional_flow(compiled.unwrap!) end,
+    Test.test("a caller's binding survives beside a defaulted call") do caller_flow(compiled.unwrap!) end,
+    Test.test("a sibling argument keeps the caller's binding") do sibling_flow(compiled.unwrap!) end,
+    Test.test("a repeated parameter read evaluates its argument once") do temp_flow(compiled.unwrap!) end,
+    Test.test("a lowered default wraps and checks like an argument") do default_fit_flow(compiled.unwrap!) end,
+    Test.test("a self-referential default refuses") do self_ref_flow(compiled.unwrap!) end,
   ])
 end
 
@@ -138,10 +143,11 @@ def subst_flow(compiled: Grammar.Grammar) -> Result[Void]
   sigs = {"g": subst_sig}
   scope = {"g": EmitCtx.def_marker()}
 
-  # A default reading a parameter lowers with that call's value.
+  # A default reading a parameter lowers with that call's value, spelled
+  # through the hoisted temp so the argument evaluates once.
   out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
   try Test.eq(out.type, "Int")
-  try Test.eq(out.code, "g(3, py_t0 * 2)")
+  try Test.eq(out.code, "g(py_t0, py_t0 * 2)")
   try Test.eq(out.pre, ["py_t0 = 3"])
   ok()
 end
@@ -158,6 +164,122 @@ def optional_flow(compiled: Grammar.Grammar) -> Result[Void]
   try Test.eq(out.type, "Int")
   try Test.eq(out.code, "h(some(5))")
   try Test.eq(out.pre, [])
+  ok()
+end
+
+def caller_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["g(3) + a", "a * 2"])
+  nodes = try parse_values(compiled, full)
+  a_times_two = List.first(nodes.drop(1))
+  subst_sig = EmitCtx.Sig(
+    name: "g",
+    params: ["a", "b"],
+    types: ["Int", "Int"],
+    defaults: [none, some(a_times_two)],
+    ret: "Int",
+  )
+
+  sigs = {"g": subst_sig}
+  scope = {"g": EmitCtx.def_marker(), "a": "Int"}
+
+  # The trailing `a` is the caller's binding (100 at run time), not the
+  # callee temp: the call must restore the caller substitutions on return.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "g(py_t0, py_t0 * 2) + a")
+  try Test.eq(out.pre, ["py_t0 = 3"])
+  ok()
+end
+
+def sibling_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h(g(3), a)", "a * 2"])
+  nodes = try parse_values(compiled, full)
+  a_times_two = List.first(nodes.drop(1))
+  g_sig = EmitCtx.Sig(
+    name: "g",
+    params: ["a", "b"],
+    types: ["Int", "Int"],
+    defaults: [none, some(a_times_two)],
+    ret: "Int",
+  )
+
+  h_sig = EmitCtx.Sig(name: "h", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, none], ret: "Int")
+  sigs = {"g": g_sig, "h": h_sig}
+  scope = {"g": EmitCtx.def_marker(), "h": EmitCtx.def_marker(), "a": "Int"}
+
+  # The sibling `a` reads the caller binding even though the first argument
+  # bound the same name as a callee temp while it lowered.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(g(py_t0, py_t0 * 2), a)")
+  try Test.eq(out.pre, ["py_t0 = 3"])
+  ok()
+end
+
+def temp_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["g(py_tmp + f())", "a + a"])
+  nodes = try parse_values(compiled, full)
+  a_plus_a = List.first(nodes.drop(1))
+  g_sig = EmitCtx.Sig(
+    name: "g",
+    params: ["a", "b"],
+    types: ["Int", "Int"],
+    defaults: [none, some(a_plus_a)],
+    ret: "Int",
+  )
+
+  f_sig = EmitCtx.Sig(name: "f", params: [], types: [], defaults: [], ret: "Int")
+  sigs = {"g": g_sig, "f": f_sig}
+  scope = {"g": EmitCtx.def_marker(), "f": EmitCtx.def_marker(), "py_tmp": "Int"}
+
+  # `py_tmp + f()` is not a generated temp, so the parameter hoists to one:
+  # the default reads it twice but `f()` evaluates once.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "g(py_t0, py_t0 + py_t0)")
+  try Test.eq(out.pre, ["py_t0 = py_tmp + f()"])
+  ok()
+end
+
+def default_fit_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["h()", "5"])
+  nodes = try parse_values(compiled, full)
+  five = List.first(nodes.drop(1))
+  h_sig = EmitCtx.Sig(name: "h", params: ["x"], types: ["Optional[Int]"], defaults: [some(five)], ret: "Int")
+  sigs = {"h": h_sig}
+  scope = {"h": EmitCtx.def_marker()}
+
+  # A plain default into an `Optional` parameter wraps in `some`, exactly
+  # like a plain explicit argument does.
+  out = try EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try Test.eq(out.type, "Int")
+  try Test.eq(out.code, "h(some(5))")
+  try Test.eq(out.pre, [])
+
+  # A default of the wrong type refuses with the same code an explicit
+  # argument would carry, instead of reaching the backend unspanned.
+  bad_full = wrap_all(["f(1)", "\"s\""])
+  bad_nodes = try parse_values(compiled, bad_full)
+  s_lit = List.first(bad_nodes.drop(1))
+  f_sig = EmitCtx.Sig(name: "f", params: ["x", "y"], types: ["Int", "Int"], defaults: [none, some(s_lit)], ret: "Int")
+  bad = EmitExpr.emit(List.first(bad_nodes), bad_full, {"f": EmitCtx.def_marker()}, {"f": f_sig})
+  try assert_err(bad, "PY-TYPE-MISMATCH")
+  ok()
+end
+
+def self_ref_flow(compiled: Grammar.Grammar) -> Result[Void]
+  full = wrap_all(["g(1)", "b"])
+  nodes = try parse_values(compiled, full)
+  b_only = List.first(nodes.drop(1))
+  g_sig = EmitCtx.Sig(name: "g", params: ["a", "b"], types: ["Int", "Int"], defaults: [none, some(b_only)], ret: "Int")
+
+  sigs = {"g": g_sig}
+  scope = {"g": EmitCtx.def_marker()}
+
+  # `b`'s default reads `b` itself: no call can satisfy that by passing,
+  # so it refuses instead of reading a like-named caller local.
+  emitted = EmitExpr.emit(List.first(nodes), full, scope, sigs)
+  try assert_err(emitted, "PY-OUT-OF-SUBSET")
   ok()
 end
 

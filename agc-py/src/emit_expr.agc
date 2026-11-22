@@ -262,6 +262,14 @@ enum ArgSlot
   Default(Tree.Node)
 end
 
+# One `bind_substs` answer: the advanced state plus exactly the bindings
+# this call installed, so a default lowers with only its own call's
+# parameters bound (nested defaults never inherit an outer call's temps).
+struct Bound
+  cx: Cx
+  own: Map[String, String]
+end
+
 def emit_in(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   case node.rule
     "cond_expr" -> emit_cond(cx, node, source)
@@ -1959,19 +1967,29 @@ end
 
 # The full call ABI (`SUBSET.md` sections 3-4): arguments map onto the
 # signature in parameter order, defaults lower at the call site after every
-# explicit argument, and the shapes that cannot fit refuse spanned.
+# explicit argument, and the shapes that cannot fit refuse spanned. The
+# callee parameter substitutions live only for this call: the answer
+# restores the caller's own, keeping the preamble and the temp supply, so a
+# sibling (`g(3) + a`) or a later argument still reads the caller binding.
+# A default lowers with exactly this call's bound parameters in scope: a
+# nested call inside a default still evaluates its own explicit arguments
+# against them, but its own defaults never inherit them (each default level
+# sees only the parameters of its own call).
 def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source: String) -> Result[Done]
+  caller_substs = cx.substs
   prepared = try prepare_slots(cx, sig, args)
   slots = prepared.slots
   current = prepared.cx
 
   # Parameters a default reads lower as that call's argument values: each
-  # one hoists to a temp (a reused one when the keyword path hoisted it
-  # already) and the default emission binds the name to it.
-  needed = subst_params(sig, slots, source)
+  # one hoists to a temp (a reused one when the value already spells exactly
+  # one generated temp) and the default emission binds the name to it.
+  needed = try subst_params(sig, slots, source)
+  own: Map[String, String] = {}
   if !needed.empty?
     bounded = try bind_substs(current, sig, slots, needed)
-    current = bounded
+    current = bounded.cx
+    own = bounded.own
   end
 
   parts: List[String] = []
@@ -1979,17 +1997,30 @@ def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source
   for _ in sig.params
     slot = List.first(slots.drop(index))
     case slot
-      ArgSlot.Value(done) -> parts = parts.push(try fit_arg(sig, index, done, name))
+      ArgSlot.Value(done) ->
+        # A parameter a default reads was hoisted to a temp: the call spells
+        # that temp, so the argument evaluates once even when the default
+        # reads it repeatedly (`g(f())` with `b = a + a` runs `f()` a single
+        # time, in the hoist line).
+        use = done
+        hit = own.get(List.first(sig.params.drop(index)))
+        case hit
+          some(temp) -> use = done.with(code: temp)
+          none -> use = use
+        end
+
+        parts = parts.push(try fit_arg(sig, index, use, name))
       ArgSlot.Default(node) ->
-        default = try emit_default(current, sig, index, node, needed, source)
-        current = default.cx
-        parts = parts.push(default.code)
+        default = try emit_default(current, sig, index, node, needed, own, source)
+        fitted = try fit_default(sig, index, default, name)
+        current = fitted.cx
+        parts = parts.push(fitted.code)
     end
 
     index += 1
   end
 
-  ok(Done(code: "#{name}(#{parts.join(", ")})", type: sig.ret, cx: current))
+  ok(Done(code: "#{name}(#{parts.join(", ")})", type: sig.ret, cx: current.with(substs: caller_substs)))
 end
 
 # Maps the call's arguments onto the signature in parameter order. Keyword
@@ -2063,8 +2094,11 @@ def none_result_line(done: Done, want: String) -> Optional[String]
 end
 
 # The parameters whose names any default of this call reads: those lower
-# with the call's own argument values bound to the parameter names.
-def subst_params(sig: EmitCtx.Sig, slots: List[ArgSlot], source: String) -> List[String]
+# with the call's own argument values bound to the parameter names. A
+# default reading its own parameter refuses: no call could satisfy that by
+# passing (passing it skips the default), so lowering it would only read a
+# like-named caller local by accident.
+def subst_params(sig: EmitCtx.Sig, slots: List[ArgSlot], source: String) -> Result[List[String]]
   out: List[String] = []
   index = 0
   for slot in slots
@@ -2072,7 +2106,13 @@ def subst_params(sig: EmitCtx.Sig, slots: List[ArgSlot], source: String) -> List
       ArgSlot.Default(node) ->
         param = List.first(sig.params.drop(index))
         for used in default_names(node, source)
-          if used != param and sig.params.include?(used) and !out.include?(used)
+          if used == param
+            return error(
+              "PY-OUT-OF-SUBSET: a default of `#{sig.name}` reads its own parameter `#{param}` = help: pass `#{param}` explicitly or rewrite the default",
+            )
+          end
+
+          if sig.params.include?(used) and !out.include?(used)
             out = out.push(used)
           end
         end
@@ -2083,7 +2123,7 @@ def subst_params(sig: EmitCtx.Sig, slots: List[ArgSlot], source: String) -> List
     index += 1
   end
 
-  out
+  ok(out)
 end
 
 # Every `name` occurrence in a default-value expression, skipping keyword
@@ -2111,24 +2151,30 @@ def default_names(node: Tree.Node, source: String) -> List[String]
 end
 
 # Hoists every explicitly-passed parameter a default reads to a temp and
-# binds its parameter name to that temp for the default emission. A needed
+# binds its parameter name to that temp for the default emission. Only a
+# value spelling exactly one generated temp is reused as is (`py_tmp + f()`
+# merely starts with those letters, so it hoists: a default reading the
+# parameter twice must still evaluate the argument once). A needed
 # parameter the call does not pass explicitly would evaluate nothing here,
 # so it refuses instead of silently binding the caller's like-named value.
-def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[String]) -> Result[Cx]
+def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[String]) -> Result[Bound]
   current = cx
   substs = cx.substs
+  own: Map[String, String] = {}
   index = 0
   for param in sig.params
     slot = List.first(slots.drop(index))
     if needed.include?(param)
       case slot
         ArgSlot.Value(done) ->
-          if done.code.start_with?("py_t")
+          if is_abi_temp?(done.code)
             substs = substs.put(param, done.code)
+            own = own.put(param, done.code)
           else
             temp = "py_t#{current.next_temp}"
             current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{done.code}"))
             substs = substs.put(param, temp)
+            own = own.put(param, temp)
           end
 
         ArgSlot.Default(_) ->
@@ -2141,13 +2187,34 @@ def bind_substs(cx: Cx, sig: EmitCtx.Sig, slots: List[ArgSlot], needed: List[Str
     index += 1
   end
 
-  ok(current.with(substs: substs))
+  ok(Bound(cx: current.with(substs: substs), own: own))
+end
+
+# Whether `code` spells exactly one generated temp (`py_t` plus digits, and
+# nothing else): only then may a repeated parameter read reuse it as is.
+def is_abi_temp?(code: String) -> Bool
+  return false if !code.start_with?("py_t")
+
+  rest = code.slice(4, code.length - 4)
+  return false if rest.empty?
+
+  temp_digits?(rest)
+end
+
+def temp_digits?(text: String) -> Bool
+  for ch in text.split("")
+    code = ch.code
+    return false if code < 48 or code > 57
+  end
+
+  true
 end
 
 # Emits one parameter's default value at the call site: the caller's scope
 # (the defaults see the caller's bindings — a module value read was refused
 # when the `def` emitted), the parameter types a default reads bound in
-# `scope`, and the parameter names bound to their passed temps in `substs`.
+# `scope`, and exactly this call's bound parameters in `substs` (no outer
+# call's temps leak into a nested default through a shared name).
 # The default node spans into the module source the call was parsed from,
 # so `Tree.text` slices its header text with the same string.
 def emit_default(
@@ -2156,6 +2223,7 @@ def emit_default(
   at: Int,
   node: Tree.Node,
   needed: List[String],
+  own: Map[String, String],
   source: String,
 ) -> Result[Done]
   scope = cx.scope
@@ -2168,7 +2236,24 @@ def emit_default(
     index += 1
   end
 
-  emit_in(cx.with(scope: scope, substs: cx.substs), node, source)
+  emit_in(cx.with(scope: scope, substs: own), node, source)
+end
+
+# Fits one lowered default exactly like an explicit argument: a `-> None`
+# call into an `Optional` parameter evaluates as its own statement line and
+# binds `none`, a plain value into an `Optional` parameter wraps in `some`,
+# and a known type against a known parameter type checks here (the backend
+# would only fail later, unspanned).
+def fit_default(sig: EmitCtx.Sig, at: Int, done: Done, callee: String) -> Result[Done]
+  want = base_of(List.first(sig.types.drop(at)))
+  case none_result_line(done, want)
+    some(line) ->
+      current = done.cx.with(pre: done.cx.pre.push(line))
+      ok(Done(code: "none", type: "none", cx: current))
+    none ->
+      code = try fit_arg(sig, at, done, callee)
+      ok(Done(code: code, type: done.type, cx: done.cx))
+  end
 end
 
 # The spelled argument for one parameter: an argument type the emitter knows
@@ -2184,7 +2269,7 @@ def fit_arg(sig: EmitCtx.Sig, at: Int, done: Done, callee: String) -> Result[Str
     inner = elem_of(want)
     return ok(done.code) if got == want
     return ok("some(#{done.code})") if got == inner
-    return ok("none") if got == "none"
+    return ok(done.code) if got == "none"
 
     return arg_mismatch(callee, want, param, got)
   end

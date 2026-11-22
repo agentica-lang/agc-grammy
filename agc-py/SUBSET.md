@@ -140,7 +140,13 @@ plain types only.
   is fine), keyword calls allowed. The call maps onto the signature: the
   arguments evaluate left to right in source order even when keywords
   reorder them into parameter order, and a default lowers at the call site
-  with the call's own argument values bound to the parameter names. A call
+  with the call's own argument values bound to the parameter names. A lowered
+  default fits exactly like an explicit argument (a plain value into an
+  `Optional` parameter wraps in `some`, a wrong type is `PY-TYPE-MISMATCH`);
+  a default naming its own parameter refuses (`PY-OUT-OF-SUBSET`). This is a
+  deliberate divergence from CPython, where a default evaluates once at `def`
+  time and can never name a parameter — the subset re-evaluates it at every
+  call that needs it instead. A call
   that does not fit — a required argument missing, too many positionals, a
   repeated or unknown keyword, a repeated value for one parameter — refuses
   spanned (§10). One file is one module (§5).
