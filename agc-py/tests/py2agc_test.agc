@@ -302,6 +302,61 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    # Issue #24: a `Result`-returning call in a strict compound inside an
+    # outlined `try` unwraps inline (`(try ...)`), so it evaluates once, in
+    # source order; a caught error reaches the handler and the uncaught
+    # shape still refuses.
+    Test.test("a Result call in a compound inside try checks and runs caught") do
+      good = "try:\n    x: int = int(\"5\") + 1\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          # The unwrap sits in the compound itself: no temp line, so nothing
+          # can run before it and nothing runs twice.
+          try Test.assert(text.include?("x: Int = (try \"5\".to_i) + 1"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_ok.agc")
+          try Test.assert(ran.include?("6"), ran)
+      end
+
+      bad = "try:\n    x: int = int(\"bad\") + 1\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", bad)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_err.agc")
+          Test.assert(ran.include?("0"), ran)
+      end
+    end,
+    Test.test("an uncaught compound refuses, a lazy tail and assert unwrap inline") do
+      uncaught = "x: int = int(\"5\") + 1\nprint(x)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", uncaught)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
+          try Test.assert(e.message.include?("1 | x: int"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      # A lazy tail keeps its laziness: the unwrap lives inside the `and`
+      # text, so `False and ...` never runs the conversion.
+      lazy = "try:\n    x: bool = False and int(\"bad\") == 5\n    print(x)\nexcept:\n    print(True)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", lazy)
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("false and (try \"bad\".to_i) == 5"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_lazy_tail.agc")
+          try Test.assert(ran.include?("false"), ran)
+      end
+
+      # `assert` is a strict expression: inside the outlined try its
+      # condition unwraps, so a good conversion reaches the assertion.
+      cond = "try:\n    assert int(\"5\") == 5\n    print(1)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", cond)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("if !((try \"5\".to_i) == 5)"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_assert.agc")
+          Test.assert(ran.include?("1"), ran)
+      end
+    end,
     Test.test("parameterized list and dict annotations still check and run") do
       source = (
         "def total(xs: list[int]) -> int:\n    acc: int = 0\n    for x in xs:\n        acc += x\n    return acc\nd: dict[str, int] = {\"a\": 7}\nprint(total([1, -2, 3]))\nprint(d[\"a\"])\n"

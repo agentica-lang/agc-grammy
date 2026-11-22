@@ -253,7 +253,10 @@ def main() -> Void
       ctx = checks_ctx(source, {"y": "String", "c": "Bool"}, "Result[Int]", 2)
       res = EmitChecks.emit_raise(ctx, expr)
       done = try assert_ok(res)
-      try assert_lines(done.code, ["py_t2 = \"d\"", "if c", "  py_t2 = y", "end", "return error(py_t2)"])
+      try assert_lines(
+        done.code,
+        ["py_t2 = case c", "  true ->", "    y", "  _ ->", "    \"d\"", "end", "return error(py_t2)"],
+      )
 
       try Test.eq(done.next_temp, 3)
       try accumulate("raisetemp", 0, ["y: String = \"hi\"", "c: Bool = true"], done.code, "Result[Int]")
@@ -323,9 +326,11 @@ def main() -> Void
         done.code,
         [
           "if !(x > 0)",
-          "  py_t0 = \"d\"",
-          "  if c",
-          "    py_t0 = y",
+          "  py_t0 = case c",
+          "    true ->",
+          "      y",
+          "    _ ->",
+          "      \"d\"",
           "  end",
           "  IO.warn(py_t0)",
           "  System.exit(1)",
@@ -334,7 +339,7 @@ def main() -> Void
       )
 
       try Test.eq(done.next_temp, 1)
-      try Test.assert(!done.code.include?("py_t0 = \"d\"\nif"), "message preamble stays inside the branch")
+      try Test.assert(!done.code.include?("py_t0 = case c\nif"), "message preamble stays inside the branch")
       try accumulate("assertfail", 0, ["x: Int = 1", "y: String = \"hi\"", "c: Bool = true"], done.code, "Void")
       ok()
     end,

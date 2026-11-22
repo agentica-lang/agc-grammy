@@ -74,8 +74,9 @@ plain types only.
   on two strings via `a.compare(b) < 0` (probed). Chained comparisons
   evaluate each operand once (temp + `and`).
 - `and`/`or` short-circuit over `bool`; `not x` needs `bool`.
-- Conditional expression `a if c else b`: the backend `if` is
-  statement-only, so it lowers to a temp plus a statement `if`/`else`.
+- Conditional expression `a if c else b` lowers to a temp assigned a `case`
+  value over the guard, so only the selected arm evaluates (a ternary arm
+  that unwraps a `Result` included).
 - Slices `xs[a:b]`: static negative bounds or a step are `PY-SLICE`; dynamic
   bounds clamp to `[0, len]` at run time (`a > b` and out-of-range `b` give
   empty, they never halt). Lowered to a `slice` helper over `take`/`drop`.
@@ -135,6 +136,19 @@ plain types only.
   `return error(...)`); halts (out-of-range, overflow, failed assert) are
   never catchable. No `finally`, no `try`/`else`, no `raise ... from`, no
   bare `raise`.
+- Inside a `try` body a directly `Result[T]`-typed value unwraps inline as
+  `(try e)` wherever an expression fits, so its error reaches the handler
+  and it evaluates exactly once, where it sits: an assignment value, an
+  augmented-assignment operand, an `assert` condition, a compound operand, a
+  call argument, a collection element, an f-string hole, an `and`/`or` tail,
+  either ternary arm and a `print`/`str` interpolation. Source order and
+  laziness stay Python's: an earlier operand runs first, and a tail or the
+  untaken ternary arm never runs. The value of a `return` is emitted the
+  same way, but a `return` inside the body is `PY-TRY-CONTROL` first.
+  Outside `try` nothing catches the error, so that value refuses
+  (`PY-TYPE-MISMATCH`, at the operand or the interpolation) instead of
+  reaching the output as `ok(...)`; a bare `Result` a statement lane can
+  spell as `try` is the only shape that passes through.
 - `def` with full annotations, defaults allowed and re-evaluated per call
   (values are immutable, so sharing is unobservable — `def f(x: list = [])`
   is fine), keyword calls allowed. The call maps onto the signature: the

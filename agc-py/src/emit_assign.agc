@@ -94,8 +94,10 @@ end
 
 ## Emits `x OP= e` as the sugar `x = x OP e`: the right side goes through
 ## `EmitExpr.emit` with the same operator rules, then the result must keep
-## `x`'s type (`PY-TYPE-MISMATCH` otherwise). `//=` and `**=` have no
-## spelling and refuse with `PY-OUT-OF-SUBSET`.
+## `x`'s type (`PY-TYPE-MISMATCH` otherwise). Inside a `try` body a directly
+## `Result[Inner]` operand unwraps like a value binding (`x = x + (try e)`)
+## when `Inner` keeps `x`'s type. `//=` and `**=` have no spelling and
+## refuse with `PY-OUT-OF-SUBSET`.
 def emit_augassigned(
   ctx: EmitCtx.EmitCtx,
   occ: Frontend.NameOcc,
@@ -134,12 +136,12 @@ end
 ## consumed `Result[T]` unwraps with `try` so the error reaches the
 ## handler; outside `try` it stays a type error (no handler to catch it).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
       if ctx.in_try
-        inner = unwrap_result(out.type)
+        inner = EmitExpr.result_inner(out.type)
         case inner
           some(_) ->
             return EmitCtx.StmtRes.Ok(
@@ -242,11 +244,25 @@ def emit_augassigned_value(
   expr: Tree.Node,
   source: String,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
-      case aug_combine(name, want, op, shifted.code, out.type)
+      # Inside a `try` body a directly consumed `Result[Inner]` unwraps with
+      # `try` when `Inner` keeps the target type, like `emit_value_binding`:
+      # `x += e` lowers to `x = x OP (try e)`. Outside `try` the `Result`
+      # stays and `aug_combine` refuses the operand combination.
+      rcode = shifted.code
+      rtype = out.type
+      if ctx.in_try
+        inner = EmitExpr.result_inner(out.type)
+        if inner.some? and bind_fit(want, inner.unwrap!) == OptFit.Bare
+          rcode = "try #{shifted.code}"
+          rtype = inner.unwrap!
+        end
+      end
+
+      case aug_combine(name, want, op, rcode, rtype)
         error(e) -> refuse_split(expr.start, expr.stop, e)
         ok(pair) -> emit_augassigned_line(ctx, name, want, op, expr, shifted, pair)
       end
@@ -342,7 +358,7 @@ def emit_value_binding(
   source: String,
   decl: Bool,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -354,7 +370,7 @@ def emit_value_binding(
           # `try value` when `T` keeps the declared type, `some(try value)`
           # when `T` lands in an `Optional[T]`.
           if ctx.in_try
-            inner = unwrap_result(out.type)
+            inner = EmitExpr.result_inner(out.type)
             case inner
               some(found) ->
                 case bind_fit(want, found)
@@ -421,14 +437,6 @@ def bind_fit(want: String, got: String) -> OptFit
   OptFit.No
 end
 
-# The inner type of `Result[T]`, or none when not a `Result`.
-def unwrap_result(found: String) -> Optional[String]
-  return none if !found.start_with?("Result[")
-  return none if !found.end_with?("]")
-
-  some(found.slice(7, found.length - 8))
-end
-
 # A bare `return` only checks under a `Void` return; anything else is
 # `PY-TYPE-MISMATCH`.
 def emit_bare_return(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
@@ -461,7 +469,10 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span
       case map_ann_scoped(ctx.func_ret, ctx.scope)
         error(e) -> refuse_split(span.start, span.stop, e)
         ok(want) ->
-          case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+          # `emit_return` already refused inside a `try` body, so this is
+          # false today; thread it anyway so the strict value expression
+          # keeps unwrapping if that control refusal ever moves.
+          case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
             error(e) -> refuse_split(expr.start, expr.stop, e)
             ok(out) -> emit_return_line(ctx, expr, want, out)
           end

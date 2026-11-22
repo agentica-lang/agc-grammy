@@ -29,11 +29,10 @@
 ## method on an `Unknown` receiver also stays verbatim (a module path such as
 ## `math.sqrt`), so only value receivers with known types get mapped or
 ## refused. The helpers live in `helpers`: prepend it to any checked program.
-## Temps are `py_tN` lines in `Out.pre`, in evaluation order; the ternary
-## evaluates its guard first but both branches eagerly (no closures exist to
-## defer one), and a chained middle operand exactly once. The ternary emits
-## the `then` branch before the `else` branch, so `then`-side temps precede
-## `else`-side ones in `pre`.
+## Temps are `py_tN` lines in `Out.pre`, in evaluation order, and a chained
+## middle operand evaluates exactly once. The ternary keeps Python's
+## laziness: its guard runs first, then a `case` value whose arms hold each
+## branch's own temps, so only the selected branch evaluates.
 ## TODO(phase-3c): emitter errors are message-only strings; phase 3c will
 ## thread node spans into rendered `Diagnostic` values.
 
@@ -50,7 +49,23 @@ end
 
 ## Emits `node` (an expression rule) with `scope` naming every visible name
 ## and `sigs` carrying the call ABI signatures of the callable `def`s.
+## `in_try` marks the outlined `try` helper: when true, a directly
+## `Result[T]`-typed child in a strict position unwraps inline as
+## `(try <code>)`, so it evaluates once, in source order, and its error
+## returns from the helper; the outermost value stays a `Result` for the
+## statement lane to handle (`x: Int = try ...`).
 def emit(node: Tree.Node, source: String, scope: Map[String, String], sigs: Map[String, EmitCtx.Sig]) -> Result[Out]
+  emit_with(node, source, scope, sigs, false)
+end
+
+## `emit` inside (`in_try`) or outside (`!in_try`) an outlined `try` body.
+def emit_with(
+  node: Tree.Node,
+  source: String,
+  scope: Map[String, String],
+  sigs: Map[String, EmitCtx.Sig],
+  in_try: Bool,
+) -> Result[Out]
   bare = bare_builtin_name(node, source)
   case bare
     some(name) ->
@@ -58,7 +73,7 @@ def emit(node: Tree.Node, source: String, scope: Map[String, String], sigs: Map[
     none -> bare = bare
   end
 
-  done = try emit_in(Cx(scope: scope, next_temp: 0, pre: [], sigs: sigs, substs: {}), node, source)
+  done = try emit_in(Cx(scope: scope, next_temp: 0, pre: [], sigs: sigs, substs: {}, in_try: in_try), node, source)
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
 end
 
@@ -179,6 +194,16 @@ def helpers() -> String
   )
 end
 
+## Whether `found` is a `Result[T]` spelling.
+def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
+
+## The `T` of `Result[T]`, or none when `found` is not a `Result`.
+def result_inner(found: String) -> Optional[String]
+  return none if !is_result?(found)
+
+  some(found.slice(7, found.length - 8))
+end
+
 private
 
 MUTATORS = ["append", "extend", "insert", "remove", "pop", "clear", "update", "setdefault", "popitem"]
@@ -208,14 +233,18 @@ BUILTINS = [
 ]
 
 # Emission state: the visible names, the next temp number, the preamble,
-# the call ABI signatures, and the parameter substitutions a default-value
-# emission binds (a callee parameter name spells its passed argument).
+# the call ABI signatures, the parameter substitutions a default-value
+# emission binds (a callee parameter name spells its passed argument), and
+# whether this code runs inside the outlined `try` helper.
+# `in_try` marks that helper, where a `Result` child in a strict position
+# unwraps inline with `(try ...)`.
 struct Cx
   scope: Map[String, String]
   next_temp: Int
   pre: List[String]
   sigs: Map[String, EmitCtx.Sig]
   substs: Map[String, String]
+  in_try: Bool = false
 end
 
 # An emitted expression still carrying its state.
@@ -267,6 +296,23 @@ struct Bound
   own: Map[String, String]
 end
 
+# Unwraps a directly `Result[T]`-typed child inline as `(try <code>)` when
+# inside an outlined `try` body. `try` binds like unary `not` and takes a
+# Result operand (probed on 0.35.0), so the parenthesized form is an
+# expression wherever one fits: no temp and no preamble line, which keeps
+# source order and laziness for free. The outermost value never routes here,
+# so the statement lane still sees the `Result` and spells `try`/
+# `some(try ...)` itself. Outside `try` the `Result` passes through for the
+# lane's refusal.
+def maybe_unwrap(done: Done) -> Result[Done]
+  return ok(done) if !done.cx.in_try
+  inner = result_inner(done.type)
+  case inner
+    none -> ok(done)
+    some(found) -> ok(Done(code: "(try #{done.code})", type: found, cx: done.cx))
+  end
+end
+
 def emit_in(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   case node.rule
     "cond_expr" -> emit_cond(cx, node, source)
@@ -310,19 +356,24 @@ def emit_last_child(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   emit_in(cx, List.last(node.children), source)
 end
 
-# `a if c else b` lowers to a temp plus a statement `if`: the guard runs
-# first, the `else` value seeds the temp, and the `then` value replaces it.
-# Both branches evaluate eagerly; only the selected value survives.
+# `a if c else b` lowers to a temp assigned a `case` value over the guard:
+# the guard runs first and only the selected arm runs, so an arm that
+# unwraps a `Result` inline (`(try ...)`) behaves like Python's branch. Each
+# arm carries its own preamble lines, which the case keeps inside the arm
+# body.
 def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return emit_in(cx, List.first(node.children), source) if node.children.size == 1
   return error("agc-py: cond without three parts") if node.children.size != 3
 
   kids = node.children
-  guard = try emit_in(cx, List.first(kids.drop(1)), source)
+  raw_guard = try emit_in(cx, List.first(kids.drop(1)), source)
+  guard = try maybe_unwrap(raw_guard)
   return cond_bool_error(guard.type) if guard.type != "Bool"
 
-  then_done = try emit_in(guard.cx, List.first(kids), source)
-  else_done = try emit_in(then_done.cx, List.first(kids.drop(2)), source)
+  raw_then = try emit_in(guard.cx, List.first(kids), source)
+  then_done = try maybe_unwrap(raw_then)
+  raw_else = try emit_in(then_done.cx, List.first(kids.drop(2)), source)
+  else_done = try maybe_unwrap(raw_else)
   unified = then_done.type
   if then_done.type != else_done.type
     if then_done.type == "Unknown"
@@ -339,7 +390,13 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   end
 
   temp = "py_t#{else_done.cx.next_temp}"
-  pre = else_done.cx.pre + ["#{temp} = #{else_done.code}", "if #{guard.code}", "  #{temp} = #{then_done.code}", "end"]
+  then_pre = then_done.cx.pre.drop(guard.cx.pre.size)
+  else_pre = else_done.cx.pre.drop(then_done.cx.pre.size)
+  pre = guard.cx.pre + ["#{temp} = case #{guard.code}", "  true ->"]
+  pre = pre + EmitCtx.indented(then_pre + [then_done.code], 2)
+  pre = pre + ["  _ ->"]
+  pre = pre + EmitCtx.indented(else_pre + [else_done.code], 2)
+  pre = pre.push("end")
   ok(Done(code: temp, type: unified, cx: else_done.cx.with(next_temp: else_done.cx.next_temp + 1, pre: pre)))
 end
 
@@ -350,13 +407,17 @@ end
 def emit_logic(cx: Cx, node: Tree.Node, source: String, op: String) -> Result[Done]
   return emit_in(cx, List.first(node.children), source) if node.children.size == 1
 
-  first = try emit_in(cx, List.first(node.children), source)
+  raw_first = try emit_in(cx, List.first(node.children), source)
+  first = try maybe_unwrap(raw_first)
   return logic_bool_error(first.type, op) if first.type != "Bool"
 
   code = first.code
   current = first.cx
   for child in node.children.drop(1)
-    next_done = try emit_in(current, child, source)
+    # A tail evaluates only when the left decides, and an inline `(try ...)`
+    # sits inside the `and`/`or` text, so the unwrap stays lazy with it.
+    raw_next = try emit_in(current, child, source)
+    next_done = try maybe_unwrap(raw_next)
     return logic_bool_error(next_done.type, op) if next_done.type != "Bool"
 
     code = "#{code} #{op} #{next_done.code}"
@@ -373,7 +434,8 @@ end
 def emit_not(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return error("agc-py: not without an operand") if node.children.empty?
 
-  inner = try emit_in(cx, List.first(node.children), source)
+  raw_inner = try emit_in(cx, List.first(node.children), source)
+  inner = try maybe_unwrap(raw_inner)
   if inner.type != "Bool"
     return error(
       "PY-COND-NOT-BOOL: `not` needs a bool, found #{inner.type} = help: compare or convert to a bool first",
@@ -409,7 +471,8 @@ end
 # A chained comparison evaluates each middle operand once into a temp and
 # joins the pairwise links with `and`.
 def emit_chained(cx: Cx, operands: List[Tree.Node], ops: List[String], source: String) -> Result[Done]
-  left = try emit_in(cx, List.first(operands), source)
+  raw_left = try emit_in(cx, List.first(operands), source)
+  left = try maybe_unwrap(raw_left)
   current = left.cx
   prev_code = left.code
   prev_type = left.type
@@ -417,7 +480,8 @@ def emit_chained(cx: Cx, operands: List[Tree.Node], ops: List[String], source: S
   middle = operands.drop(1).take(operands.size - 2)
   op_index = 0
   for operand in middle
-    next_done = try emit_in(current, operand, source)
+    raw_next = try emit_in(current, operand, source)
+    next_done = try maybe_unwrap(raw_next)
     temp = "py_t#{next_done.cx.next_temp}"
     current = next_done.cx.with(
       next_temp: next_done.cx.next_temp + 1,
@@ -430,19 +494,31 @@ def emit_chained(cx: Cx, operands: List[Tree.Node], ops: List[String], source: S
     op_index += 1
   end
 
-  right = try emit_in(current, List.last(operands), source)
+  raw_right = try emit_in(current, List.last(operands), source)
+  right = try maybe_unwrap(raw_right)
   links = links.push(try emit_link(prev_code, prev_type, right.code, right.type, List.first(ops.drop(op_index))))
   ok(Done(code: links.join(" and "), type: "Bool", cx: right.cx))
 end
 
 def emit_binary(cx: Cx, left_node: Tree.Node, op: String, right_node: Tree.Node, source: String) -> Result[Done]
-  left = try emit_in(cx, left_node, source)
-  right = try emit_in(left.cx, right_node, source)
+  raw_left = try emit_in(cx, left_node, source)
+  left = try maybe_unwrap(raw_left)
+  raw_right = try emit_in(left.cx, right_node, source)
+  right = try maybe_unwrap(raw_right)
   code = try emit_link(left.code, left.type, right.code, right.type, op)
   ok(Done(code: code, type: "Bool", cx: right.cx))
 end
 
+# One `Result` guard for every comparison: a `Result` operand never links
+# (the backend has no comparison on it) and the fix is always the same, so
+# the operator functions below assume non-`Result` operands.
 def emit_link(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
+  if is_result?(ltype) or is_result?(rtype)
+    return error(
+      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
+    )
+  end
+
   case op
     "==" -> emit_eq(lcode, ltype, rcode, rtype, true)
     "!=" -> emit_eq(lcode, ltype, rcode, rtype, false)
@@ -563,7 +639,7 @@ def emit_membership(lcode: String, ltype: String, rcode: String, rtype: String, 
     if base == "Map"
       test = "#{rcode}.key?(#{lcode})"
     else
-      return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{rtype}")
+      return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{ltype} and #{rtype}")
     end
   end
 
@@ -600,10 +676,17 @@ end
 
 def emit_sum(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   groups = split_operands(node.children, "add_op")
-  acc = try emit_group_nodes(cx, List.first(groups), source)
+  # A lone operand stays as is for the statement lane (`x = f()` keeps its
+  # `Result` so the lane spells `try` itself); only operands joined by an
+  # operator unwrap in place.
+  return emit_group_nodes(cx, List.first(groups), source) if split_operators(node.children, "add_op").empty?
+
+  raw_acc = try emit_group_nodes(cx, List.first(groups), source)
+  acc = try maybe_unwrap(raw_acc)
   index = 0
   for op_node in split_operators(node.children, "add_op")
-    right = try emit_group_nodes(acc.cx, List.first(groups.drop(index + 1)), source)
+    raw_right = try emit_group_nodes(acc.cx, List.first(groups.drop(index + 1)), source)
+    right = try maybe_unwrap(raw_right)
     op = Tree.text(op_node, source)
     folded = try fold_add(acc.code, acc.type, op, right.code, right.type)
     acc = Done(code: List.first(folded), type: List.first(folded.drop(1)), cx: right.cx)
@@ -615,10 +698,14 @@ end
 
 def emit_term(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   groups = split_operands(node.children, "mul_op")
-  acc = try emit_group_nodes(cx, List.first(groups), source)
+  return emit_group_nodes(cx, List.first(groups), source) if split_operators(node.children, "mul_op").empty?
+
+  raw_acc = try emit_group_nodes(cx, List.first(groups), source)
+  acc = try maybe_unwrap(raw_acc)
   index = 0
   for op_node in split_operators(node.children, "mul_op")
-    right = try emit_group_nodes(acc.cx, List.first(groups.drop(index + 1)), source)
+    raw_right = try emit_group_nodes(acc.cx, List.first(groups.drop(index + 1)), source)
+    right = try maybe_unwrap(raw_right)
     op = Tree.text(op_node, source)
     folded = try fold_mul(acc.code, acc.type, op, right.code, right.type)
     acc = Done(code: List.first(folded), type: List.first(folded.drop(1)), cx: right.cx)
@@ -742,7 +829,8 @@ end
 
 def emit_minus(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   parts = unary_parts(node)
-  inner = try emit_group_nodes(cx, parts["base"], source)
+  raw_inner = try emit_group_nodes(cx, parts["base"], source)
+  inner = try maybe_unwrap(raw_inner)
   if !parts["power"].empty?
     powered = try emit_pow_base(inner, List.first(parts["power"]), source, inner.cx)
     return ok(Done(code: "-(#{powered.code})", type: powered.type, cx: powered.cx))
@@ -757,7 +845,8 @@ end
 
 def emit_plus(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   parts = unary_parts(node)
-  inner = try emit_group_nodes(cx, parts["base"], source)
+  raw_inner = try emit_group_nodes(cx, parts["base"], source)
+  inner = try maybe_unwrap(raw_inner)
   if !parts["power"].empty?
     powered = try emit_pow_base(inner, List.first(parts["power"]), source, inner.cx)
     return ok(Done(code: powered.code, type: powered.type, cx: powered.cx))
@@ -801,7 +890,8 @@ def emit_group_nodes(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[D
 end
 
 def emit_chain(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Done]
-  head = try emit_in(cx, List.first(nodes), source)
+  raw_head = try emit_in(cx, List.first(nodes), source)
+  head = try maybe_unwrap(raw_head)
   recv = head
   attrs: List[String] = []
   current = head.cx
@@ -874,7 +964,9 @@ end
 # power (`2**3**4` is `2**(3**4)`). Only `Int ** Int` exists; a statically
 # negative exponent is `PY-OPERATOR` (it would be a float in Python).
 def emit_pow_base(base: Done, power: Tree.Node, source: String, cx: Cx) -> Result[Done]
-  exp = try emit_pow_exp(base.cx, power.children, source)
+  base = try maybe_unwrap(base)
+  raw_exp = try emit_pow_exp(base.cx, power.children, source)
+  exp = try maybe_unwrap(raw_exp)
   if base.type != "Int" or exp.type != "Int"
     return error("PY-OPERATOR: `**` needs an int base and an int exponent, found #{base.type} and #{exp.type}")
   end
@@ -1077,7 +1169,8 @@ def emit_list(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   items: List[Done] = []
   current = cx
   for child in node.children
-    next_done = try emit_in(current, child, source)
+    raw_next = try emit_in(current, child, source)
+    next_done = try maybe_unwrap(raw_next)
     items = items.push(next_done)
     current = next_done.cx
   end
@@ -1129,8 +1222,10 @@ end
 def emit_dict_entry(cx: Cx, node: Tree.Node, source: String) -> Result[List[Done]]
   return error("agc-py: dict entry without key and value") if node.children.size != 2
 
-  key = try emit_in(cx, List.first(node.children), source)
-  value = try emit_in(key.cx, List.first(node.children.drop(1)), source)
+  raw_key = try emit_in(cx, List.first(node.children), source)
+  key = try maybe_unwrap(raw_key)
+  raw_value = try emit_in(key.cx, List.first(node.children.drop(1)), source)
+  value = try maybe_unwrap(raw_value)
   ok([key, value])
 end
 
@@ -1139,7 +1234,10 @@ end
 # every other character (including `'`) stays raw in the UTF-8 source.
 # `r"..."` skips decoding; `f"..."` interpolates holes, `{{` / `}}` spell
 # braces, and a hole holding a `"` hoists to a temp (nested quotes do not
-# check inside interpolation).
+# check inside interpolation). Inside an outlined `try` a hole that answers a
+# `Result` unwraps inline in hole order, so a bad conversion reaches the
+# handler instead of interpolating the `Result`; outside `try` such a hole
+# refuses, since nothing would catch the error.
 def emit_text(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   raw = Tree.text(node, source)
   info = string_info(raw)
@@ -1219,7 +1317,16 @@ def emit_f_string(
   for hole in holes
     gap = inner.slice(cursor, hole.start - inner_start - cursor)
     parts = parts.push(encode_cooked(try decode_f_gap(gap)))
-    hole_done = try emit_only_child(current, hole, source)
+    raw_hole = try emit_only_child(current, hole, source)
+    # Outside the outlined `try` there is no handler for a hole that answers a
+    # `Result`, and interpolating it would print `ok(...)`/`error(...)`.
+    if is_result?(raw_hole.type) and !current.in_try
+      return error(
+        "PY-TYPE-MISMATCH: an f-string hole holds an uncaught #{raw_hole.type} = help: use it inside a `try` body so the error is handled",
+      )
+    end
+
+    hole_done = try maybe_unwrap(raw_hole)
     current = hole_done.cx
     if hole_done.code.include?("\"")
       temp = "py_t#{current.next_temp}"
@@ -1386,12 +1493,14 @@ def emit_index(cx: Cx, recv: Done, index: Tree.Node, source: String) -> Result[D
     case neg
       some(inner) -> emit_neg_list_index(cx, recv, inner, source)
       none ->
-        bound = try emit_in(cx, bound_node, source)
+        raw_bound = try emit_in(cx, bound_node, source)
+        bound = try maybe_unwrap(raw_bound)
         ok(Done(code: "#{recv.code}[#{bound.code}]", type: elem_of(recv.type), cx: bound.cx))
     end
   else
     if base == "Map" or base == "Unknown"
-      bound = try emit_in(cx, bound_node, source)
+      raw_bound = try emit_in(cx, bound_node, source)
+      bound = try maybe_unwrap(raw_bound)
       return ok(Done(code: "#{recv.code}[#{bound.code}]", type: elem_of(recv.type), cx: bound.cx))
     end
 
@@ -1412,10 +1521,12 @@ def emit_string_index(
     some(inner) ->
       temp = "py_t#{cx.next_temp}"
       bound_cx = cx.with(next_temp: cx.next_temp + 1, pre: cx.pre.push("#{temp} = #{recv.code}"))
-      key = try emit_group_nodes(bound_cx, inner, source)
+      raw_key = try emit_group_nodes(bound_cx, inner, source)
+      key = try maybe_unwrap(raw_key)
       ok(Done(code: "#{temp}.at(#{temp}.length - (#{key.code}))", type: "String", cx: key.cx))
     none ->
-      bound = try emit_in(cx, bound_node, source)
+      raw_bound = try emit_in(cx, bound_node, source)
+      bound = try maybe_unwrap(raw_bound)
       ok(Done(code: "#{recv.code}.at(#{bound.code})", type: "String", cx: bound.cx))
   end
 end
@@ -1423,7 +1534,8 @@ end
 def emit_neg_list_index(cx: Cx, recv: Done, inner: List[Tree.Node], source: String) -> Result[Done]
   temp = "py_t#{cx.next_temp}"
   bound_cx = cx.with(next_temp: cx.next_temp + 1, pre: cx.pre.push("#{temp} = #{recv.code}"))
-  key = try emit_group_nodes(bound_cx, inner, source)
+  raw_key = try emit_group_nodes(bound_cx, inner, source)
+  key = try maybe_unwrap(raw_key)
   code = "#{temp}[#{temp}.size - (#{key.code})]"
   ok(Done(code: code, type: elem_of(recv.type), cx: key.cx))
 end
@@ -1462,13 +1574,15 @@ def emit_full_slice(
   lower = slice_lower(index)
   case lower
     some(lo_node) ->
-      lo = try emit_in(current, lo_node, source)
+      raw_lo = try emit_in(current, lo_node, source)
+      lo = try maybe_unwrap(raw_lo)
       lo_code = lo.code
       current = lo.cx
     none -> current = cx
   end
 
-  hi = try emit_in(current, hi_node, source)
+  raw_hi = try emit_in(current, hi_node, source)
+  hi = try maybe_unwrap(raw_hi)
   ok(Done(code: "#{helper}(#{recv.code}, #{lo_code}, #{hi.code})", type: slice_type(recv, helper), cx: hi.cx))
 end
 
@@ -1481,7 +1595,8 @@ def emit_open_slice(cx: Cx, recv: Done, index: Tree.Node, helper: String, source
   lower = slice_lower(index)
   case lower
     some(lo_node) ->
-      lo = try emit_in(current, lo_node, source)
+      raw_lo = try emit_in(current, lo_node, source)
+      lo = try maybe_unwrap(raw_lo)
       lo_code = lo.code
       current = lo.cx
     none -> current = current
@@ -1737,7 +1852,8 @@ def emit_call_args(cx: Cx, nodes: List[Tree.Node], func_slot: Optional[String], 
             pos = pos.push(Done(code: fname, type: EmitCtx.def_marker(), cx: current))
             raws = raws.push(child)
           none ->
-            value = try emit_in(current, arg_expr(child), source)
+            raw_value = try emit_in(current, arg_expr(child), source)
+            value = try maybe_unwrap(raw_value)
             pos = pos.push(value)
             raws = raws.push(child)
             current = value.cx
@@ -1754,7 +1870,8 @@ def emit_kwarg(cx: Cx, node: Tree.Node, source: String) -> Result[Kw]
   case name_node
     some(found) ->
       value_node = List.last(node.children)
-      value = try emit_in(cx, value_node, source)
+      raw_value = try emit_in(cx, value_node, source)
+      value = try maybe_unwrap(raw_value)
       ok(Kw(name: Tree.text(found, source), value: value))
     none -> error("agc-py: kwarg without a name")
   end
@@ -2008,7 +2125,8 @@ def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source
 
         parts = parts.push(try fit_arg(sig, index, use, name))
       ArgSlot.Default(node) ->
-        default = try emit_default(current, sig, index, node, needed, own, source)
+        raw_default = try emit_default(current, sig, index, node, needed, own, source)
+        default = try maybe_unwrap(raw_default)
         fitted = try fit_default(sig, index, default, name)
         current = fitted.cx
         parts = parts.push(fitted.code)
@@ -2632,6 +2750,14 @@ def emit_print(args: CallArgs) -> Result[Done]
   parts: List[String] = []
   current = args.cx
   for arg in args.pos
+    # `print` interpolates every argument, so a `Result` would reach the
+    # output as `ok(...)`/`error(...)` when nothing catches its error.
+    if is_result?(arg.type) and !current.in_try
+      return error(
+        "PY-TYPE-MISMATCH: a `print` argument holds an uncaught #{arg.type} = help: use it inside a `try` body so the error is handled",
+      )
+    end
+
     if arg.code.include?("\"")
       temp = "py_t#{current.next_temp}"
       current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{arg.code}"))
@@ -2732,6 +2858,14 @@ def emit_str(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `str` takes at most 1 arg") if args.pos.size > 1
 
   item = List.first(args.pos)
+  # `str(x)` interpolates, so a `Result` would print as `ok(...)`/`error(...)`
+  # when nothing catches its error; refuse the uncaught shape like a hole.
+  if is_result?(item.type) and !args.cx.in_try
+    return error(
+      "PY-TYPE-MISMATCH: a `str` argument holds an uncaught #{item.type} = help: use it inside a `try` body so the error is handled",
+    )
+  end
+
   if item.code.include?("\"")
     temp = "py_t#{args.cx.next_temp}"
     current = args.cx.with(next_temp: args.cx.next_temp + 1, pre: args.cx.pre.push("#{temp} = #{item.code}"))

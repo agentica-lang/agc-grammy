@@ -28,7 +28,8 @@ import Tree from "../../src/tree"
 ## `expr` is the `cond_expr` of a `Frontend.Stmt.RaiseStmt`. A bare name, a
 ## call with anything but exactly one positional argument, or any other
 ## shape is `PY-OUT-OF-SUBSET` at the expression span; a non-`String`
-## message is `PY-TYPE-MISMATCH` at the message span. The `return
+## message is `PY-TYPE-MISMATCH` at the message span, naming the inner type
+## of a `Result` message (`raise E(int(s))` reports `Int`). The `return
 ## error(...)` form needs a backend-valid `Result` context: the top level
 ## (`func_ret == ""`, where `main` cannot return) halts instead, a def
 ## returning `Result[T]` (including an outlined `try` helper, which returns
@@ -49,9 +50,25 @@ def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   target = EmitTry.raise_target(expr)
   if target.rule == "call" and EmitTry.single_message_arg?(target)
     raw = List.first(target.children.drop(1))
-    case EmitExpr.emit(raw, ctx.source, ctx.scope, ctx.sigs)
+    case EmitExpr.emit_with(raw, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
       error(err) -> EmitCtx.refusal_from_error(raw.start, raw.stop, err)
-      ok(out) ->
+      ok(raw_out) ->
+        out = raw_out
+        # A directly `Result[String]` message would hoist to `try` the way a
+        # value binding does once a `String` `Result` producer exists; this
+        # slice has none, so it refuses below, naming the inner type when the
+        # message answers a different `Result` (for example `Result[Int]`).
+        inner = EmitExpr.result_inner(out.type)
+        if inner.some? and inner.unwrap! != "String"
+          return EmitCtx.refuse_at(
+            "PY-TYPE-MISMATCH",
+            "raise message must be str, found #{inner.unwrap!}",
+            some("pass a string message"),
+            raw.start,
+            raw.stop,
+          )
+        end
+
         if out.type != "String"
           EmitCtx.refuse_at(
             "PY-TYPE-MISMATCH",
@@ -99,9 +116,12 @@ end
 ## and the message, when present, must be `String` (`PY-TYPE-MISMATCH` at
 ## its span otherwise). A missing message falls back to `"assert failed"`.
 ## The condition preamble runs before the `if`; the message preamble runs
-## only inside the failure branch.
+## only inside the failure branch. The condition is a strict expression, so
+## it emits with the body's `try` unwrapping (`ctx.in_try`): inside an
+## outlined `try` a `Result` in a strict sub-expression (a comparison
+## operand, say) unwraps inline in place and its error reaches the handler.
 def emit_assert(ctx: EmitCtx.EmitCtx, cond: Tree.Node, msg: Optional[Tree.Node]) -> EmitCtx.StmtRes
-  case EmitExpr.emit(cond, ctx.source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(cond, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
     error(err) -> EmitCtx.refusal_from_error(cond.start, cond.stop, err)
     ok(found) ->
       if found.type != "Bool"
