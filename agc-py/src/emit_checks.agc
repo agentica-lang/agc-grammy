@@ -28,8 +28,24 @@ import Tree from "../../src/tree"
 ## `expr` is the `cond_expr` of a `Frontend.Stmt.RaiseStmt`. A bare name, a
 ## call with anything but exactly one positional argument, or any other
 ## shape is `PY-OUT-OF-SUBSET` at the expression span; a non-`String`
-## message is `PY-TYPE-MISMATCH` at the message span.
+## message is `PY-TYPE-MISMATCH` at the message span. The `return
+## error(...)` form needs a backend-valid `Result` context: the top level
+## (`func_ret == ""`, where `main` cannot return) halts instead, a def
+## returning `Result[T]` (including an outlined `try` helper, which returns
+## `Result[Void]`) returns the error, and anything else is refused spanned
+## — the explicit caller ripple of a raising def lands in phase 3d
+## (`agc-py/roadmap.md` PR 3d, issue #24).
 def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
+  if !result_context?(ctx.func_ret)
+    return EmitCtx.refuse_at(
+      "PY-OUT-OF-SUBSET",
+      "raise inside a def returning #{ctx.func_ret} has no backend form",
+      some("make the enclosing def return Result[T]; the caller ripple is phase 3d"),
+      expr.start,
+      expr.stop,
+    )
+  end
+
   target = EmitTry.raise_target(expr)
   if target.rule == "call" and EmitTry.single_message_arg?(target)
     raw = List.first(target.children.drop(1))
@@ -116,6 +132,16 @@ def emit_assert(ctx: EmitCtx.EmitCtx, cond: Tree.Node, msg: Optional[Tree.Node])
 end
 
 private
+
+# Whether `func_ret` accepts the raise lowering: the empty top level halts
+# with `IO.warn` plus `System.exit(1)` and any `Result[T]` return takes
+# `return error(...)`, so both pass; the outlined `try` helper counts, the
+# spine threads its `Result[Void]` through.
+def result_context?(func_ret: String) -> Bool
+  return true if func_ret.empty?
+
+  func_ret.start_with?("Result[")
+end
 
 # Emits the message side of an `assert` once the condition already checked.
 # The message preamble joins the failure branch, never the fall-through.

@@ -16,13 +16,16 @@ import Tree from "../../src/tree"
 ## What an emitter threads: the source being sliced, the file name for
 ## diagnostics, the visible names with their types, the enclosing `def`
 ## return annotation ("" at top level), whether the statement sits inside a
-## `try` body, and the next free temp number.
+## `try` body, whether the statement sits inside a `for`/`while` body (the
+## spine sets it, so `break`/`next` refuse with a span outside a loop), and
+## the next free temp number.
 struct EmitCtx
   source: String
   file: String
   scope: Map[String, String]
   func_ret: String
   in_try: Bool
+  in_loop: Bool = false
   next_temp: Int
 end
 
