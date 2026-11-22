@@ -135,6 +135,16 @@ plain types only.
   `return error(...)`); halts (out-of-range, overflow, failed assert) are
   never catchable. No `finally`, no `try`/`else`, no `raise ... from`, no
   bare `raise`.
+- Inside a `try` body a directly `Result[T]`-typed value in a strict
+  position unwraps with `try`, so its error reaches the handler: an
+  assignment value, an augmented-assignment operand, an `assert`
+  condition's operands, a compound operand, a call argument, a collection
+  element and an f-string hole. The value of a `return` is emitted the same way, but a `return`
+  inside the body is `PY-TRY-CONTROL` first. Lazy positions cannot defer the
+  unwrap in this backend, so an `and`/`or` tail or a ternary branch that
+  needs one is `PY-OUT-OF-SUBSET` (bind the value before the operator).
+  `print` and `str` interpolate their argument, so outside `try` they refuse
+  the same uncaught `Result` an f-string hole does.
 - `def` with full annotations, defaults allowed and re-evaluated per call
   (values are immutable, so sharing is unobservable — `def f(x: list = [])`
   is fine), keyword calls allowed. The call maps onto the signature: the

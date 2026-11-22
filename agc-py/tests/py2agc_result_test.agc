@@ -1,10 +1,12 @@
-## Issue #24 cut regressions: `Result` values in eager expression positions
-## inside an outlined `try`. Both ternary branches evaluate eagerly, so a
-## branch that hoists a `Result` refuses spanned instead of converting an
-## untaken arm; an f-string hole unwraps before interpolation so a failed
-## conversion reaches the handler.
+## Issue #24 cut regressions: `Result` values in eager and lazy expression
+## positions inside an outlined `try`. Both ternary branches evaluate
+## eagerly, so a branch that hoists a `Result` refuses spanned instead of
+## converting an untaken arm; an f-string hole unwraps before interpolation
+## so a failed conversion reaches the handler, and `print`/`str` refuse a
+## `Result` they would print as `ok(...)`. An `and`/`or` tail refuses at one
+## site, so nested leaves never get a misleading operator or f-string message.
 ##
-## The ternary checks parse one expression and call the emitter seam
+## The expression checks parse one expression and call the emitter seam
 ## directly; the end-to-end tests translate and run. That mix keeps the file
 ## inside the shared step budget: a `translate` costs about a million steps,
 ## loading the grammar 1.8 million, and the budget is one million per test.
@@ -93,11 +95,23 @@ def main() -> Void
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,
-    Test.test("a short-circuit tail cannot hide an uncaught f-string Result") do
+    # A lazy tail cannot defer a `try`, so a `Result` anywhere inside it
+    # refuses with the tail's own message instead of a leaf's ordering,
+    # f-string or condition one.
+    Test.test("a lazy and tail with a Result refuses with one message") do
       case emit_in_try(compiled.unwrap!, "True and (f\"{int(s)}\" == \"5\")")
         error(e) ->
-          try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
-          Test.assert(e.message.include?("f-string hole"), e.message)
+          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
+          Test.assert(e.message.include?("tail with a Result"), e.message)
+        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
+      end
+    end,
+    Test.test("a direct Result lazy tail refuses") do
+      case emit_in_try(compiled.unwrap!, "False and int(\"bad\")")
+        error(e) ->
+          try Test.assert(e.message.include?("PY-OUT-OF-SUBSET"), e.message)
+          try Test.assert(e.message.include?("evaluated lazily"), e.message)
+          Test.assert(e.message.include?("bind it before the `and`"), e.message)
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,
@@ -110,6 +124,59 @@ def main() -> Void
           try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
           Test.assert(e.message.include?("x: int = int(s) if False else 0"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
+    # `print` and `str` interpolate too, so outside `try` they refuse the
+    # same uncaught `Result` an f-string hole does.
+    Test.test("print and str refuse an uncaught Result argument") do
+      sources: List[String] = ["s: str = \"5\"\nprint(int(s))\n", "s: str = \"5\"\nprint(str(int(s)))\n"]
+      for source in sources
+        case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+          error(e) ->
+            try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
+            try Test.assert(e.message.include?("uncaught Result[Int]"), e.message)
+            try Test.assert(e.message.include?("use it inside a `try` body"), e.message)
+          ok(_) -> try Test.assert(false, "expected an error")
+        end
+      end
+
+      ok()
+    end,
+    # Two holes in one f-string unwrap in hole order, so the second one is
+    # past the first one's temp.
+    Test.test("two Result holes in one f-string unwrap in hole order") do
+      source = (
+        "a: str = \"5\"\nb: str = \"6\"\ntry:\n    v: str = f\"{int(a)}-{int(b)}\"\n    print(v)\nexcept:\n    print(0)\n"
+      )
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          first = text.index_of("py_t0 = try a.to_i").unwrap!
+          second = text.index_of("py_t1 = try b.to_i").unwrap!
+          try Test.assert(first < second, text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_two_holes.agc")
+          Test.assert(ran.strip() == "5-6", ran)
+      end
+    end,
+    # An augmented assignment is a value binding too: a direct Result under
+    # `try` lowers to `x = x + (try ...)` and its error is caught.
+    Test.test("an augmented assignment unwraps a Result inside try") do
+      good = "s: str = \"5\"\ntry:\n    x: int = 1\n    x += int(s)\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("x = x + (try s.to_i)"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_aug_ok.agc")
+          try Test.assert(ran.include?("6"), ran)
+      end
+
+      bad = "s: str = \"bad\"\ntry:\n    x: int = 1\n    x += int(s)\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", bad)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_aug_err.agc")
+          Test.assert(ran.include?("0"), ran)
       end
     end,
     # Holes unwrap left to right before interpolation: the good hole prints

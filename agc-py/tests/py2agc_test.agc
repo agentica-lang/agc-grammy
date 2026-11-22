@@ -310,7 +310,12 @@ def main() -> Void
       case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
         error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
         ok(text) ->
+          # The unwrap temp precedes the compound line, so the conversion
+          # runs once and in source order.
           try Test.assert(text.include?("py_t0 = try"), text)
+          first = text.index_of("py_t0 = try \"5\".to_i").unwrap!
+          second = text.index_of("x: Int = py_t0 + 1").unwrap!
+          try Test.assert(first < second, text)
           ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_ok.agc")
           try Test.assert(ran.include?("6"), ran)
       end
@@ -323,7 +328,7 @@ def main() -> Void
           Test.assert(ran.include?("0"), ran)
       end
     end,
-    Test.test("uncaught, lazy and assert Result shapes refuse spanned") do
+    Test.test("uncaught and lazy Result shapes refuse, assert propagates inside try") do
       uncaught = "x: int = int(\"5\") + 1\nprint(x)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", uncaught)
         error(e) ->
@@ -335,17 +340,20 @@ def main() -> Void
       lazy = "try:\n    x: bool = False and int(\"bad\") == 5\n    print(x)\nexcept:\n    print(True)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", lazy)
         error(e) ->
-          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
-          try Test.assert(e.message.include?("Result[Int]"), e.message)
+          try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
+          try Test.assert(e.message.include?("tail with a Result"), e.message)
         ok(_) -> try Test.assert(false, "expected an error")
       end
 
+      # `assert` is a strict expression: inside the outlined try its
+      # condition unwraps, so a good conversion reaches the assertion.
       cond = "try:\n    assert int(\"5\") == 5\n    print(1)\nexcept:\n    print(0)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", cond)
-        error(e) ->
-          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
-          Test.assert(e.message.include?("Result[Int]"), e.message)
-        ok(_) -> Test.assert(false, "expected an error")
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("py_t0 = try \"5\".to_i"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_assert.agc")
+          Test.assert(ran.include?("1"), ran)
       end
     end,
     Test.test("parameterized list and dict annotations still check and run") do

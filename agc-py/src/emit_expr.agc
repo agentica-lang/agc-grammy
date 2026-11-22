@@ -197,6 +197,16 @@ def helpers() -> String
   )
 end
 
+## Whether `found` is a `Result[T]` spelling.
+def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
+
+## The `T` of `Result[T]`, or none when `found` is not a `Result`.
+def result_inner(found: String) -> Optional[String]
+  return none if !is_result?(found)
+
+  some(found.slice(7, found.length - 8))
+end
+
 private
 
 MUTATORS = ["append", "extend", "insert", "remove", "pop", "clear", "update", "setdefault", "popitem"]
@@ -226,8 +236,9 @@ BUILTINS = [
 ]
 
 # Emission state: the visible names, the next temp number, the preamble,
-# the call ABI signatures, and the parameter substitutions a default-value
-# emission binds (a callee parameter name spells its passed argument).
+# the call ABI signatures, the parameter substitutions a default-value
+# emission binds (a callee parameter name spells its passed argument), and
+# how many `try` hoists `maybe_unwrap` made so far.
 # `in_try` marks the outlined `try` helper, where a `Result` child in a
 # strict position unwraps with `try` (lazy `and`/`or` tails refuse instead).
 struct Cx
@@ -237,6 +248,7 @@ struct Cx
   sigs: Map[String, EmitCtx.Sig]
   substs: Map[String, String]
   in_try: Bool = false
+  unwraps: Int = 0
 end
 
 # An emitted expression still carrying its state.
@@ -288,37 +300,29 @@ struct Bound
   own: Map[String, String]
 end
 
-# Whether `found` is a `Result[T]` spelling.
-def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
-
-# The `T` of `Result[T]`.
-def result_inner(found: String) -> String = found.slice(7, found.length - 8)
-
 # Hoists a directly `Result[T]`-typed child to `py_tK = try <code>` when
 # inside an outlined `try` body (strict positions only: the caller already
 # decided laziness is safe). The outermost value never routes here, so the
 # statement lane still sees the `Result` and spells `try`/`some(try ...)`
 # itself. Outside `try` the `Result` passes through for the lane's refusal.
+# `unwraps` counts every hoist, so a lazy context (`and`/`or` tail, ternary
+# branch) can compare the count and refuse instead of hoisting early.
 def maybe_unwrap(done: Done) -> Result[Done]
   return ok(done) if !done.cx.in_try
-  return ok(done) if !is_result?(done.type)
-  temp = "py_t#{done.cx.next_temp}"
-  pre = done.cx.pre.push("#{temp} = try #{done.code}")
-  ok(Done(code: temp, type: result_inner(done.type), cx: done.cx.with(next_temp: done.cx.next_temp + 1, pre: pre)))
-end
-
-# Whether `done` appended a `Result` unwrap to the preamble after `base`
-# lines. The outer type can hide one (`int(s) + 1` is `Int` and still emits
-# `py_tK = try ...`), so a lazy context checks the preamble, not just the type.
-def hoists_result?(base: Int, done: Done) -> Bool
-  found = false
-  for line in done.cx.pre.drop(base)
-    if line.include?(" = try ")
-      found = true
-    end
+  inner = result_inner(done.type)
+  case inner
+    none -> ok(done)
+    some(found) ->
+      temp = "py_t#{done.cx.next_temp}"
+      pre = done.cx.pre.push("#{temp} = try #{done.code}")
+      ok(
+        Done(
+          code: temp,
+          type: found,
+          cx: done.cx.with(next_temp: done.cx.next_temp + 1, pre: pre, unwraps: done.cx.unwraps + 1),
+        ),
+      )
   end
-
-  found
 end
 
 def emit_in(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
@@ -369,6 +373,9 @@ end
 # Both branches evaluate eagerly; only the selected value survives. A branch
 # that hoists a `Result` inside a `try` body would unwrap eagerly, so it
 # refuses spanned instead (the guard always evaluates, so its hoist is fine).
+# The `unwraps` counter detects a hidden hoist too (`int(s) + 1` is `Int` yet
+# increments it), so a nested arm gets this one refusal, not an operator or
+# condition message from the leaf.
 def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return emit_in(cx, List.first(node.children), source) if node.children.size == 1
   return error("agc-py: cond without three parts") if node.children.size != 3
@@ -386,7 +393,7 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   # unwrap even when the guard picks the other one (and a bad conversion would
   # reach the handler). Refuse instead of widening the lowering to lazy arms;
   # the guard itself always evaluates, so its hoist above stays.
-  if cx.in_try and (hoists_result?(guard.cx.pre.size, then_done) or hoists_result?(then_done.cx.pre.size, else_done))
+  if cx.in_try and (then_done.cx.unwraps > guard.cx.unwraps or else_done.cx.unwraps > then_done.cx.unwraps)
     return error(
       "PY-OUT-OF-SUBSET: a ternary branch with a Result is evaluated eagerly = help: bind it before the ternary, for example `v = f()`",
     )
@@ -426,21 +433,25 @@ def emit_logic(cx: Cx, node: Tree.Node, source: String, op: String) -> Result[Do
   code = first.code
   current = first.cx
   for child in node.children.drop(1)
-    # Right-hand tails evaluate only when the left decides: emit without
-    # `try` unwrapping so a `Result` inside never hoists before the `and`/`or`.
-    # A `Result` tail refuses below instead of evaluating eagerly.
-    rhs_cx = current.with(in_try: false)
-    next_done = try emit_in(rhs_cx, child, source)
-    if is_result?(next_done.type) and current.in_try
+    # Right-hand tails evaluate only when the left decides, so an unwrap
+    # cannot live there: `try` is a statement and hoisting it would run the
+    # tail before the `and`/`or`. Emit the tail with the body's own
+    # unwrapping so a hoist anywhere inside it (a conversion, an operand, an
+    # f-string hole) bumps `unwraps`, then refuse at this one site. Nested
+    # leaves therefore never reach their operator, f-string or condition
+    # messages, which would misdescribe a lazy position.
+    base_unwraps = current.unwraps
+    next_done = try emit_in(current, child, source)
+    if current.in_try and (next_done.cx.unwraps > base_unwraps or is_result?(next_done.type))
       return error(
-        "PY-OUT-OF-SUBSET: `#{op}` with a Result needs a bound name = help: bind it before the `#{op}`, for example `v = f()`",
+        "PY-OUT-OF-SUBSET: an `#{op}` tail with a Result is evaluated lazily = help: bind it before the `#{op}`, for example `v = f()`",
       )
     end
 
     return logic_bool_error(next_done.type, op) if next_done.type != "Bool"
 
     code = "#{code} #{op} #{next_done.code}"
-    current = next_done.cx.with(in_try: current.in_try)
+    current = next_done.cx
   end
 
   ok(Done(code: code, type: "Bool", cx: current))
@@ -528,7 +539,16 @@ def emit_binary(cx: Cx, left_node: Tree.Node, op: String, right_node: Tree.Node,
   ok(Done(code: code, type: "Bool", cx: right.cx))
 end
 
+# One `Result` guard for every comparison: a `Result` operand never links
+# (the backend has no comparison on it) and the fix is always the same, so
+# the operator functions below assume non-`Result` operands.
 def emit_link(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
+  if is_result?(ltype) or is_result?(rtype)
+    return error(
+      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
+    )
+  end
+
   case op
     "==" -> emit_eq(lcode, ltype, rcode, rtype, true)
     "!=" -> emit_eq(lcode, ltype, rcode, rtype, false)
@@ -545,12 +565,6 @@ def emit_link(lcode: String, ltype: String, rcode: String, rtype: String, op: St
 end
 
 def emit_eq(lcode: String, ltype: String, rcode: String, rtype: String, equal: Bool) -> Result[String]
-  if is_result?(ltype) or is_result?(rtype)
-    return error(
-      "PY-TYPE-MISMATCH: `==` needs two same-type operands, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
-    )
-  end
-
   return emit_none_eq(lcode, ltype, rcode, rtype, equal) if ltype == "none" or rtype == "none"
 
   if is_num?(ltype) and is_num?(rtype)
@@ -575,7 +589,6 @@ end
 # folds: `Int`/`Float` vs `Bool` is `PY-TYPE-MISMATCH`, other `Bool` mixes
 # stay verbal instead of guessing through the numeric tower.
 def comparable_fold?(ltype: String, rtype: String) -> Bool
-  return false if is_result?(ltype) or is_result?(rtype)
   return false if ltype == "Unknown" or rtype == "Unknown"
 
   return false if base_of(ltype) == "Optional" or base_of(rtype) == "Optional"
@@ -598,12 +611,6 @@ end
 # `None` only meets `Optional` (or another `None`): against a concrete type
 # the answer is already known, so `1 == None` is `false`, never a guess.
 def emit_none_eq(lcode: String, ltype: String, rcode: String, rtype: String, equal: Bool) -> Result[String]
-  if is_result?(ltype) or is_result?(rtype)
-    return error(
-      "PY-TYPE-MISMATCH: `==` needs two same-type operands, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
-    )
-  end
-
   return ok(eq_answer(equal, true)) if ltype == "none" and rtype == "none"
 
   other_code = lcode
@@ -634,10 +641,6 @@ def eq_answer(equal: Bool, same: Bool) -> String
 end
 
 def emit_order(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
-  if is_result?(ltype) or is_result?(rtype)
-    return error("PY-TYPE-MISMATCH: ordering needs two numbers or two strings, found #{ltype} and #{rtype}")
-  end
-
   return ok("#{lcode}.compare(#{rcode}) #{op} 0") if ltype == "String" and rtype == "String"
 
   if is_num?(ltype) and is_num?(rtype)
@@ -658,10 +661,6 @@ def numeric_pair(lcode: String, ltype: String, rcode: String, rtype: String) -> 
 end
 
 def emit_membership(lcode: String, ltype: String, rcode: String, rtype: String, negate: Bool) -> Result[String]
-  if is_result?(ltype) or is_result?(rtype)
-    return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{rtype}")
-  end
-
   base = base_of(rtype)
   test: String = ""
   if base == "List" or base == "String"
@@ -670,7 +669,7 @@ def emit_membership(lcode: String, ltype: String, rcode: String, rtype: String, 
     if base == "Map"
       test = "#{rcode}.key?(#{lcode})"
     else
-      return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{rtype}")
+      return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{ltype} and #{rtype}")
     end
   end
 
@@ -683,10 +682,6 @@ end
 # non-optional `x is None` folds like `== None` (`false`, `true` for
 # `is not`); only `Optional`/`Unknown` read through `.none?`.
 def emit_identity(lcode: String, ltype: String, rcode: String, rtype: String, negate: Bool) -> Result[String]
-  if is_result?(ltype) or is_result?(rtype)
-    return error("PY-TYPE-MISMATCH: `is` needs None against Optional, found #{ltype} and #{rtype}")
-  end
-
   return ok(eq_answer(!negate, true)) if ltype == "none" and rtype == "none"
 
   if ltype == "none" or rtype == "none"
@@ -999,8 +994,7 @@ end
 # power (`2**3**4` is `2**(3**4)`). Only `Int ** Int` exists; a statically
 # negative exponent is `PY-OPERATOR` (it would be a float in Python).
 def emit_pow_base(base: Done, power: Tree.Node, source: String, cx: Cx) -> Result[Done]
-  raw_base = base
-  base = try maybe_unwrap(raw_base)
+  base = try maybe_unwrap(base)
   raw_exp = try emit_pow_exp(base.cx, power.children, source)
   exp = try maybe_unwrap(raw_exp)
   if base.type != "Int" or exp.type != "Int"
@@ -2786,6 +2780,14 @@ def emit_print(args: CallArgs) -> Result[Done]
   parts: List[String] = []
   current = args.cx
   for arg in args.pos
+    # `print` interpolates every argument, so a `Result` would reach the
+    # output as `ok(...)`/`error(...)` when nothing catches its error.
+    if is_result?(arg.type) and !current.in_try
+      return error(
+        "PY-TYPE-MISMATCH: a `print` argument holds an uncaught #{arg.type} = help: use it inside a `try` body so the error is handled",
+      )
+    end
+
     if arg.code.include?("\"")
       temp = "py_t#{current.next_temp}"
       current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{arg.code}"))
@@ -2886,6 +2888,14 @@ def emit_str(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `str` takes at most 1 arg") if args.pos.size > 1
 
   item = List.first(args.pos)
+  # `str(x)` interpolates, so a `Result` would print as `ok(...)`/`error(...)`
+  # when nothing catches its error; refuse the uncaught shape like a hole.
+  if is_result?(item.type) and !args.cx.in_try
+    return error(
+      "PY-TYPE-MISMATCH: a `str` argument holds an uncaught #{item.type} = help: use it inside a `try` body so the error is handled",
+    )
+  end
+
   if item.code.include?("\"")
     temp = "py_t#{args.cx.next_temp}"
     current = args.cx.with(next_temp: args.cx.next_temp + 1, pre: args.cx.pre.push("#{temp} = #{item.code}"))
