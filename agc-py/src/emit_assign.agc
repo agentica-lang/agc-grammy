@@ -23,7 +23,9 @@
 ## `none` and an already-`Optional` value stay bare. Annotations resolve
 ## capitalized aliases structurally through the scope: at the top level,
 ## inside `list[..]`/`dict[..]`, inside `Optional[..]`, inside a union arm
-## and inside a quoted forward reference.
+## and inside a quoted forward reference. Built-ins never take that
+## shortcut: `None` maps to `none`, `Any`/`object` refuse `PY-ANY`, a bare
+## `Optional` and any `none`-typed position refuse spanned (probed).
 ## Probed on agentica 0.35.0: a bare scalar, string, list or map under
 ## `Optional[T]` is `CHECK-TYPE-MISMATCH`, `some(try e)` checks with no
 ## extra grouping, `type Alias = Int` checks at the top level and
@@ -161,7 +163,8 @@ end
 ## return, a bare `return` only under `None`/`Void`, else
 ## `PY-TYPE-MISMATCH`. An explicit `return None` under `-> None` folds to a
 ## bare `return`, the only shape the backend checks there. A `return`
-## outside a `def` is `PY-OUT-OF-SUBSET`.
+## inside a `try` body is `PY-TRY-CONTROL` first: the outlined handler
+## cannot be crossed. A `return` outside a `def` is `PY-OUT-OF-SUBSET`.
 def emit_return(
   ctx: EmitCtx.EmitCtx,
   value: Optional[Tree.Node],
@@ -173,6 +176,16 @@ def emit_return(
       "PY-OUT-OF-SUBSET",
       "return outside a `def`",
       some("move it into a `def`"),
+      span.start,
+      span.stop,
+    )
+  end
+
+  if ctx.in_try
+    return EmitCtx.refuse_at(
+      "PY-TRY-CONTROL",
+      "return inside a try body cannot cross the handler",
+      some("return from outside the try body"),
       span.start,
       span.stop,
     )
@@ -668,17 +681,22 @@ def ann_elem(type: String) -> String
   end
 end
 
-# Maps an annotation to its Agentica spelling, resolving capitalized names
-# (aliases) through the scope; anything else refuses.
+# Maps an annotation to its Agentica spelling with the scope in hand: a
+# bare capitalized name answers its scope mapping (a real alias reads the
+# same wherever it stands), built-ins take the normal mapping and its
+# refusals, and a `none` result refuses spanned at the caller's span — the
+# backend has no type spelling for `none` (probed PARSE-UNEXPECTED-TOKEN).
 def map_ann_scoped(text: String, scope: Map[String, String]) -> Result[String]
-  if bare_capitalized?(text.strip)
-    found = scope.get(text.strip, "")
-    return ok(found) if found != ""
-
-    return ok(text.strip)
+  stripped = text.strip
+  if bare_capitalized?(stripped)
+    found = scope.get(stripped, "")
+    return ok(found) if found != "" and found != "none"
   end
 
-  map_ann(text.strip, scope)
+  mapped = try map_ann(stripped, scope)
+  return error("PY-ANNOTATION-UNKNOWN: `#{stripped}` maps to `none` = help: write `Optional[X]`") if mapped == "none"
+
+  ok(mapped)
 end
 
 # Maps an annotation to its Agentica spelling with the scope in hand, so a
@@ -770,6 +788,7 @@ def map_bare(text: String, scope: Map[String, String]) -> Result[String]
     "Void" -> ok("Void")
     "List" -> ok("List")
     "Map" -> ok("Map")
+    "Optional" -> error("PY-ANNOTATION-UNKNOWN: annotation `Optional` needs one parameter = help: write `Optional[X]`")
     "Any" ->
       error("PY-ANY: annotation `Any` is excluded; annotate with a concrete type = help: write int, str, or list[int]")
     "object" ->

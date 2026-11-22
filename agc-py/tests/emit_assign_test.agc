@@ -221,6 +221,8 @@ def add_alias(compiled: Grammar.Grammar, src: String, ctx: EmitCtx.EmitCtx) -> R
   ok(ran.ctx.scope)
 end
 
+def ref_text(source: String, ref: EmitCtx.Refusal) -> String = source.slice(ref.start, ref.stop - ref.start)
+
 # Spells `#{code}` without writing `#{` in a literal (which the test file
 # itself would interpolate).
 def interp(code: String) -> String = "#" + "{" + code + "}"
@@ -326,6 +328,29 @@ def main() -> Void
       seeded = func_ctx(str_src, "None", {"d": "Map[String, Int]"})
       ref4 = try run_no(compiled.unwrap!, "w: Optional[int] = d\n", seeded)
       try Test.eq(ref4.code, "PY-TYPE-MISMATCH")
+      ok()
+    end,
+    Test.test("None, Any and bare Optional annotations refuse spanned") do
+      ref = try run_no(compiled.unwrap!, "x: None = None\n", top_ctx(""))
+      try Test.eq(ref.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("x: None = None\n", ref), "None")
+      ref2 = try run_no(compiled.unwrap!, "x: None\n", top_ctx(""))
+      try Test.eq(ref2.code, "PY-ANNOTATION-UNKNOWN")
+      ref3 = try run_no(compiled.unwrap!, "x: Any = 1\n", top_ctx(""))
+      try Test.eq(ref3.code, "PY-ANY")
+      try Test.eq(ref_text("x: Any = 1\n", ref3), "Any")
+      ref4 = try run_no(compiled.unwrap!, "x: Optional = none\n", top_ctx(""))
+      try Test.eq(ref4.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("x: Optional = none\n", ref4), "Optional")
+      # Aliases land in the same refusal: a `none` target, a bare
+      # `Optional` target, a seeded alias resolving to `none` at a return.
+      ref5 = try run_no(compiled.unwrap!, "type PyNoneA = None\n", top_ctx(""))
+      try Test.eq(ref5.code, "PY-ANNOTATION-UNKNOWN")
+      try Test.eq(ref_text("type PyNoneA = None\n", ref5), "None")
+      ref6 = try run_no(compiled.unwrap!, "type PyOptA = Optional\n", top_ctx(""))
+      try Test.eq(ref6.code, "PY-ANNOTATION-UNKNOWN")
+      seeded = try run_no(compiled.unwrap!, "return 5\n", func_ctx("return 5\n", "PyNoneB", {"PyNoneB": "none"}))
+      try Test.eq(seeded.code, "PY-ANNOTATION-UNKNOWN")
       ok()
     end,
     Test.test("duplicate binding refuses") do
@@ -570,24 +595,13 @@ def main() -> Void
       try add_lines("opt_wraps", ran2.lines, ["x", "xs", "m", "d", "og", "u", "v"], "")
       ok()
     end,
-    Test.test("unwrapped result and optional return wrap inside try lanes") do
+    Test.test("unwrapped Result bindings wrap inside try lanes") do
       src = "x: Optional[int] = int(s)\n"
       ran = try run_all(compiled.unwrap!, src, try_ctx(src, "Result[int]", {"s": "String"}))
       try Test.eq(ran.lines, ["x: Optional[Int] = some(try s.to_i)"])
       plain = "x: int = int(s)\n"
       ran2 = try run_all(compiled.unwrap!, plain, try_ctx(plain, "Result[int]", {"s": "String"}))
       try Test.eq(ran2.lines, ["x: Int = try s.to_i"])
-      ret = "return 5\n"
-      ran3 = try run_all(compiled.unwrap!, ret, func_ctx(ret, "Optional[int]", {}))
-      try Test.eq(ran3.lines, ["return some(5)"])
-      try add_lines("ret_opt", ran3.lines, [], "Optional[Int]")
-      none_src = "return None\n"
-      ran4 = try run_all(compiled.unwrap!, none_src, func_ctx(none_src, "Optional[int]", {}))
-      try Test.eq(ran4.lines, ["return none"])
-      try add_lines("ret_opt_none", ran4.lines, [], "Optional[Int]")
-      wrong = "return \"a\"\n"
-      ref = try run_no(compiled.unwrap!, wrong, func_ctx(wrong, "Optional[int]", {}))
-      try Test.eq(ref.code, "PY-TYPE-MISMATCH")
       # `try` only checks inside a `Result` function, so those fragments
       # carry their own wrapper and fold the unwrapped value; no call in
       # `main`, a discarded `Result` would be `CHECK-UNUSED-RESULT`.
@@ -601,6 +615,25 @@ def main() -> Void
 
       blocks = try File.read_text("/tmp/agc_emit_assign_blocks.txt")
       try File.write_text("/tmp/agc_emit_assign_blocks.txt", "#{blocks}#{opt_text}#{plain_text}")
+      ok()
+    end,
+    Test.test("optional return wraps outside try and refuses inside") do
+      ret = "return 5\n"
+      ran = try run_all(compiled.unwrap!, ret, func_ctx(ret, "Optional[int]", {}))
+      try Test.eq(ran.lines, ["return some(5)"])
+      try add_lines("ret_opt", ran.lines, [], "Optional[Int]")
+      ran2 = try run_all(compiled.unwrap!, "return None\n", func_ctx("return None\n", "Optional[int]", {}))
+      try Test.eq(ran2.lines, ["return none"])
+      try add_lines("ret_opt_none", ran2.lines, [], "Optional[Int]")
+      ref = try run_no(compiled.unwrap!, "return \"a\"\n", func_ctx("return \"a\"\n", "Optional[int]", {}))
+      try Test.eq(ref.code, "PY-TYPE-MISMATCH")
+      # Inside a try body both shapes refuse at the return span first.
+      ref2 = try run_no(compiled.unwrap!, ret, try_ctx(ret, "Optional[int]", {}))
+      try Test.eq(ref2.code, "PY-TRY-CONTROL")
+      try Test.eq(ref_text(ret, ref2), "return 5")
+      ref3 = try run_no(compiled.unwrap!, "return\n", try_ctx("return\n", "None", {}))
+      try Test.eq(ref3.code, "PY-TRY-CONTROL")
+      try Test.eq(ref_text("return\n", ref3), "return")
       ok()
     end,
     Test.test("grouped and quoted shapes run") do
