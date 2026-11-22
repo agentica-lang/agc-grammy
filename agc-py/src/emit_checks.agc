@@ -49,9 +49,27 @@ def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   target = EmitTry.raise_target(expr)
   if target.rule == "call" and EmitTry.single_message_arg?(target)
     raw = List.first(target.children.drop(1))
-    case EmitExpr.emit(raw, ctx.source, ctx.scope, ctx.sigs)
+    case EmitExpr.emit_with(raw, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
       error(err) -> EmitCtx.refusal_from_error(raw.start, raw.stop, err)
-      ok(out) ->
+      ok(raw_out) ->
+        out = raw_out
+        if ctx.in_try and raw_out.type.start_with?("Result[") and raw_out.type.end_with?("]")
+          inner = raw_out.type.slice(7, raw_out.type.length - 8)
+          if inner != "String"
+            return EmitCtx.refuse_at(
+              "PY-TYPE-MISMATCH",
+              "raise message must be str, found #{inner}",
+              some("pass a string message"),
+              raw.start,
+              raw.stop,
+            )
+          end
+
+          top = EmitCtx.max_temp_index(raw_out.pre + [raw_out.code])
+          temp = "py_t#{top + 1}"
+          out = EmitExpr.Out(code: temp, type: "String", pre: raw_out.pre.push("#{temp} = try #{raw_out.code}"))
+        end
+
         if out.type != "String"
           EmitCtx.refuse_at(
             "PY-TYPE-MISMATCH",

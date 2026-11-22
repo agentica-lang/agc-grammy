@@ -149,7 +149,7 @@ def emit_for(
   body_code: List[String],
   assigned: Bool,
 ) -> EmitCtx.StmtRes
-  made = EmitExpr.emit(iterable, ctx.source, ctx.scope, ctx.sigs)
+  made = EmitExpr.emit_with(iterable, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
   case made
     error(e) -> refusal_from_emit(e.message, iterable)
     ok(out) ->
@@ -245,9 +245,27 @@ end
 
 # Emits one branch guard and insists on `Bool`, shifting every preamble
 # temp by the incoming supply. Failures are `CODE: message = help: hint`
-# strings; the caller renders them into spanned refusals.
+# strings; the caller renders them into spanned refusals. Inside an outlined
+# `try` body a directly `Result[Bool]` guard hoists to `try` (it always
+# evaluates, so laziness is safe); `and`/`or` tails still refuse to keep
+# short-circuit order.
 def emit_cond(ctx: EmitCtx.EmitCtx, node: Tree.Node, owner: String) -> Result[CondOut]
-  out = try EmitExpr.emit(node, ctx.source, ctx.scope, ctx.sigs)
+  raw = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  out = raw
+  if ctx.in_try and raw.type.start_with?("Result[") and raw.type.end_with?("]")
+    inner = raw.type.slice(7, raw.type.length - 8)
+    if inner != "Bool"
+      return error(
+        "PY-COND-NOT-BOOL: `#{owner}` condition must be bool, found #{inner} = help: compare or convert to a bool first",
+      )
+    end
+
+    # Fresh past any preamble temps; shifted below with the incoming supply.
+    top = max_temp_index(raw.pre + [raw.code])
+    temp = "py_t#{top + 1}"
+    out = EmitExpr.Out(code: temp, type: "Bool", pre: raw.pre.push("#{temp} = try #{raw.code}"))
+  end
+
   if out.type != "Bool"
     return error(
       "PY-COND-NOT-BOOL: `#{owner}` condition must be bool, found #{out.type} = help: compare or convert to a bool first",

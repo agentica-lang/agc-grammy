@@ -134,7 +134,7 @@ end
 ## consumed `Result[T]` unwraps with `try` so the error reaches the
 ## handler; outside `try` it stays a type error (no handler to catch it).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -242,7 +242,7 @@ def emit_augassigned_value(
   expr: Tree.Node,
   source: String,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -342,7 +342,7 @@ def emit_value_binding(
   source: String,
   decl: Bool,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit(expr, source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)

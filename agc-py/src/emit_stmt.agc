@@ -318,7 +318,7 @@ end
 
 # The static type of `node`.
 def emit_expr_type(ctx: EmitCtx.EmitCtx, node: Tree.Node) -> Result[String]
-  case EmitExpr.emit(node, ctx.source, ctx.scope, ctx.sigs)
+  case EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
     error(e) -> error(e.message)
     ok(out) -> ok(out.type)
   end

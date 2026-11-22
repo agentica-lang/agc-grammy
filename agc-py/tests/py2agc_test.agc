@@ -302,6 +302,48 @@ def main() -> Void
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,
+    # Issue #24 cut: a `Result`-returning call inside a strict compound
+    # inside an outlined `try` hoists to `try` in order (single evaluation);
+    # the caught error reaches the handler, the uncaught shape refuses.
+    Test.test("a Result call in a compound inside try checks and runs caught") do
+      good = "try:\n    x: int = int(\"5\") + 1\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", good)
+        error(e) -> try Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          try Test.assert(text.include?("py_t0 = try"), text)
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_ok.agc")
+          try Test.assert(ran.include?("6"), ran)
+      end
+
+      bad = "try:\n    x: int = int(\"bad\") + 1\n    print(x)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", bad)
+        error(e) -> Test.assert(false, "expected a program, got #{e.message}")
+        ok(text) ->
+          ran = try check_and_run(text, "/tmp/agc_py2agc_result_compound_err.agc")
+          Test.assert(ran.include?("0"), ran)
+      end
+    end,
+    Test.test("uncaught, lazy and assert Result shapes refuse spanned") do
+      uncaught = "x: int = int(\"5\") + 1\nprint(x)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", uncaught)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
+          try Test.assert(e.message.include?("1 | x: int"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      lazy = "try:\n    x: bool = False and int(\"bad\") == 5\n    print(x)\nexcept:\n    print(True)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", lazy)
+        error(e) -> try Test.assert(e.message.include?("error[PY-"), e.message)
+        ok(_) -> try Test.assert(false, "expected an error")
+      end
+
+      cond = "try:\n    assert int(\"5\") == 5\n    print(1)\nexcept:\n    print(0)\n"
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", cond)
+        error(e) -> Test.assert(e.message.include?("error[PY-"), e.message)
+        ok(_) -> Test.assert(false, "expected an error")
+      end
+    end,
     Test.test("parameterized list and dict annotations still check and run") do
       source = (
         "def total(xs: list[int]) -> int:\n    acc: int = 0\n    for x in xs:\n        acc += x\n    return acc\nd: dict[str, int] = {\"a\": 7}\nprint(total([1, -2, 3]))\nprint(d[\"a\"])\n"
