@@ -334,13 +334,17 @@ def main() -> Void
 
       lazy = "try:\n    x: bool = False and int(\"bad\") == 5\n    print(x)\nexcept:\n    print(True)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", lazy)
-        error(e) -> try Test.assert(e.message.include?("error[PY-"), e.message)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
+          try Test.assert(e.message.include?("Result[Int]"), e.message)
         ok(_) -> try Test.assert(false, "expected an error")
       end
 
       cond = "try:\n    assert int(\"5\") == 5\n    print(1)\nexcept:\n    print(0)\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", cond)
-        error(e) -> Test.assert(e.message.include?("error[PY-"), e.message)
+        error(e) ->
+          try Test.assert(e.message.include?("error[PY-TYPE-MISMATCH]"), e.message)
+          Test.assert(e.message.include?("Result[Int]"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
     end,

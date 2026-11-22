@@ -31,9 +31,10 @@
 ## refused. The helpers live in `helpers`: prepend it to any checked program.
 ## Temps are `py_tN` lines in `Out.pre`, in evaluation order; the ternary
 ## evaluates its guard first but both branches eagerly (no closures exist to
-## defer one), and a chained middle operand exactly once. The ternary emits
-## the `then` branch before the `else` branch, so `then`-side temps precede
-## `else`-side ones in `pre`.
+## defer one), so a branch that would unwrap a `Result` inside a `try`
+## refuses instead, and a chained middle operand evaluates exactly once. The
+## ternary emits the `then` branch before the `else` branch, so `then`-side
+## temps precede `else`-side ones in `pre`.
 ## TODO(phase-3c): emitter errors are message-only strings; phase 3c will
 ## thread node spans into rendered `Diagnostic` values.
 
@@ -52,9 +53,10 @@ end
 ## and `sigs` carrying the call ABI signatures of the callable `def`s.
 ## `in_try` marks the outlined `try` helper: when true, a directly
 ## `Result[T]`-typed child in a strict position hoists to `py_tK = try ...`
-## (single evaluation, source order); lazy `and`/`or` right-hand sides
-## refuse instead of evaluating eagerly, and the outermost value stays a
-## `Result` for the statement lane to handle (`x: Int = try ...`).
+## (single evaluation, source order); lazy `and`/`or` right-hand sides and
+## eager ternary branches with a `Result` refuse instead, and the outermost
+## value stays a `Result` for the statement lane to handle
+## (`x: Int = try ...`).
 def emit(node: Tree.Node, source: String, scope: Map[String, String], sigs: Map[String, EmitCtx.Sig]) -> Result[Out]
   emit_with(node, source, scope, sigs, false)
 end
@@ -305,6 +307,20 @@ def maybe_unwrap(done: Done) -> Result[Done]
   ok(Done(code: temp, type: result_inner(done.type), cx: done.cx.with(next_temp: done.cx.next_temp + 1, pre: pre)))
 end
 
+# Whether `done` appended a `Result` unwrap to the preamble after `base`
+# lines. The outer type can hide one (`int(s) + 1` is `Int` and still emits
+# `py_tK = try ...`), so a lazy context checks the preamble, not just the type.
+def hoists_result?(base: Int, done: Done) -> Bool
+  found = false
+  for line in done.cx.pre.drop(base)
+    if line.include?(" = try ")
+      found = true
+    end
+  end
+
+  found
+end
+
 def emit_in(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   case node.rule
     "cond_expr" -> emit_cond(cx, node, source)
@@ -350,7 +366,9 @@ end
 
 # `a if c else b` lowers to a temp plus a statement `if`: the guard runs
 # first, the `else` value seeds the temp, and the `then` value replaces it.
-# Both branches evaluate eagerly; only the selected value survives.
+# Both branches evaluate eagerly; only the selected value survives. A branch
+# that hoists a `Result` inside a `try` body would unwrap eagerly, so it
+# refuses spanned instead (the guard always evaluates, so its hoist is fine).
 def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   return emit_in(cx, List.first(node.children), source) if node.children.size == 1
   return error("agc-py: cond without three parts") if node.children.size != 3
@@ -364,6 +382,16 @@ def emit_cond(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   then_done = try maybe_unwrap(raw_then)
   raw_else = try emit_in(then_done.cx, List.first(kids.drop(2)), source)
   else_done = try maybe_unwrap(raw_else)
+  # Both branches evaluate eagerly, so a branch that hoists a `Result` would
+  # unwrap even when the guard picks the other one (and a bad conversion would
+  # reach the handler). Refuse instead of widening the lowering to lazy arms;
+  # the guard itself always evaluates, so its hoist above stays.
+  if cx.in_try and (hoists_result?(guard.cx.pre.size, then_done) or hoists_result?(then_done.cx.pre.size, else_done))
+    return error(
+      "PY-OUT-OF-SUBSET: a ternary branch with a Result is evaluated eagerly = help: bind it before the ternary, for example `v = f()`",
+    )
+  end
+
   unified = then_done.type
   if then_done.type != else_done.type
     if then_done.type == "Unknown"
@@ -1242,7 +1270,10 @@ end
 # every other character (including `'`) stays raw in the UTF-8 source.
 # `r"..."` skips decoding; `f"..."` interpolates holes, `{{` / `}}` spell
 # braces, and a hole holding a `"` hoists to a temp (nested quotes do not
-# check inside interpolation).
+# check inside interpolation). Inside an outlined `try` a hole that answers a
+# `Result` unwraps to `py_tK = try ...` in hole order, so a bad conversion
+# reaches the handler instead of interpolating the `Result`; outside `try`
+# such a hole refuses, since nothing would catch the error.
 def emit_text(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   raw = Tree.text(node, source)
   info = string_info(raw)
@@ -1322,7 +1353,16 @@ def emit_f_string(
   for hole in holes
     gap = inner.slice(cursor, hole.start - inner_start - cursor)
     parts = parts.push(encode_cooked(try decode_f_gap(gap)))
-    hole_done = try emit_only_child(current, hole, source)
+    raw_hole = try emit_only_child(current, hole, source)
+    # Outside the outlined `try` there is no handler for a hole that answers a
+    # `Result`, and interpolating it would print `ok(...)`/`error(...)`.
+    if is_result?(raw_hole.type) and !current.in_try
+      return error(
+        "PY-TYPE-MISMATCH: an f-string hole holds an uncaught #{raw_hole.type} = help: use it inside a `try` body so the error is handled",
+      )
+    end
+
+    hole_done = try maybe_unwrap(raw_hole)
     current = hole_done.cx
     if hole_done.code.include?("\"")
       temp = "py_t#{current.next_temp}"
