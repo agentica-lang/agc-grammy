@@ -8,10 +8,11 @@
 ## emitted program's standard output must match it. The rest check the
 ## emitter seam, where a fragment costs a parse instead of a translation.
 ##
-## The mix keeps the file inside the shared step budget: a `translate` costs
-## over two million steps and loading the grammar 1.8 million, while one
-## expression parse costs half a million, and the file's budget is one
-## million per test.
+## `agentica test` shares one million steps per test (plus one) over the
+## file's tests. As of Agentica 0.35.0, loading the grammar costs about 1.8
+## million of them, one small `translate` about 1.2 million and one
+## expression parse about 0.4 million. The file translates in four tests and
+## each of the rest parses one fragment.
 
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
@@ -147,6 +148,30 @@ def main() -> Void
       try Test.eq(d.code, "{\"k\": (try s.to_i)}")
       Test.assert(d.pre.empty?, d.pre.join("\n"))
     end,
+    # A later hole that needs a temp line (a chained comparison's middle)
+    # hoists every earlier inline call in front of it, so the calls run in
+    # hole order like CPython.
+    Test.test("f-string holes run in hole order when a later hole hoists") do
+      source = (
+        "def tag(n: int) -> int:\n    print(n)\n    return n\n\n" +
+        "def g() -> int:\n    print(\"g\")\n    return 1\n\n" +
+        "s: str = f\"{g()}{1 < tag(20) < 30}\"\nprint(s)\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "holeorder")
+      Test.assert(got.strip() == "g\n20\n1true", got)
+    end,
+    # Every earlier inline conversion hoists, in hole order, in front of the
+    # later hole's own temp line.
+    Test.test("f-string holes hoist earlier inline calls in order") do
+      source = "py_tmp = f\"#{interp("int(s)")}#{interp("int(s)")}#{interp("d['k']")}\"\n"
+      tree = try Engine.run(compiled.unwrap!, "program", source)
+      node = List.last(List.first(Tree.find_all(tree, "assign")).children)
+      scope = {"s": "String", "d": "Map[String, Int]"}
+      out = try EmitExpr.emit_with(node, source, scope, {}, true)
+      try Test.eq(out.pre, ["py_t1 = (try s.to_i)", "py_t2 = (try s.to_i)", "py_t0 = d[\"k\"]"])
+      Test.assert(!out.code.include?("("), out.code)
+    end,
     # Two holes in one f-string unwrap inline, in hole order, with no temp
     # line that could reorder them.
     Test.test("f-string holes unwrap inline in hole order") do
@@ -194,6 +219,16 @@ def main() -> Void
         error(e) ->
           try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
           Test.assert(e.message.include?("f-string hole"), e.message)
+        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
+      end
+    end,
+    # A comparison has no backend form on a `Result`, so outside `try` it
+    # refuses at the link instead of folding to the constant `false`.
+    Test.test("an uncaught comparison operand refuses outside try") do
+      case emit_expr(compiled.unwrap!, "int(s) == 5", false)
+        error(e) ->
+          try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
+          Test.assert(e.message.include?("`try`/`except`"), e.message)
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,

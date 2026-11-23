@@ -143,8 +143,11 @@ plain types only.
   call argument, a collection element, an f-string hole, an `and`/`or` tail,
   either ternary arm and a `print`/`str` interpolation. Source order and
   laziness stay Python's: an earlier operand runs first, and a tail or the
-  untaken ternary arm never runs. The value of a `return` is emitted the
-  same way, but a `return` inside the body is `PY-TRY-CONTROL` first.
+  untaken ternary arm never runs. An f-string hole whose emission needs a
+  temp line (a map index, a chained comparison's middle, a ternary) hoists
+  every earlier inline call in front of it, so the holes still run in order.
+  The value of a `return` is emitted the same way, but a `return` inside the
+  body is `PY-TRY-CONTROL` first.
   Outside `try` nothing catches the error, so that value refuses
   (`PY-TYPE-MISMATCH`, at the operand or the interpolation) instead of
   reaching the output as `ok(...)`; a bare `Result` a statement lane can
@@ -180,9 +183,14 @@ plain types only.
   `PY-IMPORT-CYCLE`, carrying every import span of the cycle. Relative
   imports, packages (`__init__`), and `TYPE_CHECKING`-gated imports are
   excluded.
-- Unknown modules are `PY-IMPORT-UNKNOWN` at the module path; a name a local
-  module does not define is `PY-NAME-UNKNOWN` at the imported name, both in
-  the importing file.
+- Unknown modules are `PY-IMPORT-UNKNOWN` at the module path (a dotted path
+  gets help naming the supported dotted stdlib modules, since only a
+  single-segment path can be a local file); a name a local module does not
+  define is `PY-NAME-UNKNOWN` at the imported name, both in the importing
+  file. A refusal inside an imported module is reported with that module's
+  own path, a parse failure the engine words without a position starts with
+  the path of its file (the root file's included), and a file that cannot be
+  read names the file and one line of the reason.
 - Stdlib surface (closed, each mapped in phase 3). Covered with what the
   backend and its std give today, nothing else:
   - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),

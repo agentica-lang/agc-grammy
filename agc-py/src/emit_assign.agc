@@ -250,8 +250,10 @@ def emit_augassigned_value(
       shifted = shift_out(out, ctx.next_temp)
       # Inside a `try` body a directly consumed `Result[Inner]` unwraps with
       # `try` when `Inner` keeps the target type, like `emit_value_binding`:
-      # `x += e` lowers to `x = x OP (try e)`. Outside `try` the `Result`
-      # stays and `aug_combine` refuses the operand combination.
+      # the operand is spelled `try e` and `aug_combine` places it: `x += e`
+      # lowers to `x = x + (try e)` and `x %= e` to `x = py_pymod(x, try e)`.
+      # Outside `try` the `Result` stays and `aug_combine` refuses the
+      # operand combination.
       rcode = shifted.code
       rtype = out.type
       if ctx.in_try
@@ -592,7 +594,12 @@ def aug_star(xname: String, xtype: String, rcode: String, rtype: String) -> Resu
   return ok(["#{xname} * #{rhs}", "String"]) if xtype == "String" and rtype == "Int"
 
   if xtype == "Int" and rtype == "String"
-    return error("PY-OPERATOR: repeat as `s * n`, not `n * s` = help: write #{rcode} * #{xname}")
+    shown = rcode
+    if rcode.start_with?("try ")
+      shown = rcode.slice(4, rcode.length - 4)
+    end
+
+    return error("PY-OPERATOR: repeat as `s * n`, not `n * s` = help: write #{shown} * #{xname}")
   end
 
   if ann_base(xtype) == "List" and rtype == "Int"

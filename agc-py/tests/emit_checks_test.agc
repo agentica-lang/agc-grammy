@@ -34,6 +34,21 @@ def checks_ctx(source: String, scope: Map[String, String], func_ret: String, nex
   )
 end
 
+# Spells `#{code}` without writing it in a literal (the compiler reads `"#{"`
+# as the start of an interpolation).
+def interp(code: String) -> String = "#" + "{" + code + "}"
+
+def try_ctx(source: String, scope: Map[String, String]) -> EmitCtx.EmitCtx
+  EmitCtx.EmitCtx(
+    source: source,
+    file: "checks.py",
+    scope: scope,
+    func_ret: "Result[Void]",
+    in_try: true,
+    next_temp: 0,
+  )
+end
+
 def stmts_of(compiled: Grammar.Grammar, source: String) -> Result[List[Frontend.Stmt]]
   tree = try Engine.run(compiled, "program", source)
   program = try Frontend.build(tree, source)
@@ -299,6 +314,31 @@ def main() -> Void
       ref = try assert_no(res, "PY-TYPE-MISMATCH")
       try Test.eq(ref.start, msg.start)
       try Test.eq(ref.stop, msg.stop)
+      ok()
+    end,
+    Test.test("assert message unwraps a conversion inside try") do
+      source = "assert x > 0, str(int(s))\n"
+      parts = try assert_of(compiled.unwrap!, source)
+      ctx = try_ctx(source, {"x": "Int", "s": "String"})
+      res = EmitChecks.emit_assert(ctx, parts.cond, parts.msg)
+      done = try assert_ok(res)
+      try assert_lines(
+        done.code,
+        ["if !(x > 0)", "  IO.warn(\"" + interp("(try s.to_i)") + "\")", "  System.exit(1)", "end"],
+      )
+
+      ok()
+    end,
+    Test.test("assert message that is a Result names its inner type") do
+      source = "assert x > 0, int(s)\n"
+      parts = try assert_of(compiled.unwrap!, source)
+      ctx = try_ctx(source, {"x": "Int", "s": "String"})
+      ref = try assert_no(EmitChecks.emit_assert(ctx, parts.cond, parts.msg), "PY-TYPE-MISMATCH")
+      try Test.assert(ref.message.include?("found Int"), ref.message)
+      try Test.eq(ref.start, parts.msg.unwrap!.start)
+      outside = checks_ctx(source, {"x": "Int", "s": "String"}, "Void", 0)
+      ref_outside = try assert_no(EmitChecks.emit_assert(outside, parts.cond, parts.msg), "PY-TYPE-MISMATCH")
+      try Test.assert(ref_outside.message.include?("found Int"), ref_outside.message)
       ok()
     end,
     Test.test("assert hoists a chained guard once") do

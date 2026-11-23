@@ -103,7 +103,9 @@ def main() -> Void
 
       message = try error_text(compiled.unwrap!, dir + "/b.py")
       try Test.assert(message.include?("error[PY-IMPORT-UNKNOWN]"), message)
-      Test.assert(message.include?("unknown module `foo.bar`"), message)
+      try Test.assert(message.include?("unknown module `foo.bar`"), message)
+      try Test.assert(message.include?("urllib.parse"), message)
+      Test.assert(!message.include?("foo.bar.py"), message)
     end,
     Test.test("an unknown module refuses at the module path") do
       dir = "/tmp/agc_py_modules_unknown"
@@ -206,6 +208,21 @@ def main() -> Void
       message = try error_text(compiled.unwrap!, dir + "/a.py")
       try Test.assert(message.include?("b.py:1:1 error[PY-UNTYPED-DEF]"), message)
       Test.assert(!message.include?("a.py:"), message)
+    end,
+    Test.test("a parse failure inside an imported module names that file") do
+      dir = "/tmp/agc_py_modules_parse"
+      try reset(dir)
+      try write_fixture(dir, "a.py", "import b\n")
+      try write_fixture(dir, "b.py", "def f(:\n")
+
+      message = try error_text(compiled.unwrap!, dir + "/a.py")
+      try Test.assert(message.start_with?(dir + "/b.py"), message)
+      Test.assert(!message.include?("\n"), message)
+    end,
+    Test.test("an unreadable entry file names the file and keeps one line") do
+      message = try error_text(compiled.unwrap!, "/tmp/agc_py_modules_missing/nope.py")
+      try Test.assert(message.start_with?("cannot read `/tmp/agc_py_modules_missing/nope.py`"), message)
+      Test.assert(!message.include?("\n"), message)
     end,
   ])
 end

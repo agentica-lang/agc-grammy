@@ -194,9 +194,6 @@ def helpers() -> String
   )
 end
 
-## Whether `found` is a `Result[T]` spelling.
-def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
-
 ## The `T` of `Result[T]`, or none when `found` is not a `Result`.
 def result_inner(found: String) -> Optional[String]
   return none if !is_result?(found)
@@ -254,6 +251,13 @@ struct Done
   cx: Cx
 end
 
+# One piece of an f-string being built: its text and, for an inline hole that
+# still holds an effectful call, that call's code (else empty).
+struct Piece
+  text: String
+  inline: String
+end
+
 # One decoded escape: the character and the offset past it.
 struct Decoded
   text: String
@@ -295,6 +299,9 @@ struct Bound
   cx: Cx
   own: Map[String, String]
 end
+
+# Whether `found` is a `Result[T]` spelling.
+def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
 
 # Unwraps a directly `Result[T]`-typed child inline as `(try <code>)` when
 # inside an outlined `try` body. `try` binds like unary `not` and takes a
@@ -515,7 +522,7 @@ end
 def emit_link(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
   if is_result?(ltype) or is_result?(rtype)
     return error(
-      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
+      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: only a try body unwraps it, so move the comparison inside `try`/`except`",
     )
   end
 
@@ -1311,12 +1318,13 @@ def emit_f_string(
   end
 
   inner_start = node.start + prefix_len + Map.get(info, "quote", "\"").length
-  parts: List[String] = []
+  parts: List[Piece] = []
   current = cx
   cursor = 0
   for hole in holes
     gap = inner.slice(cursor, hole.start - inner_start - cursor)
-    parts = parts.push(encode_cooked(try decode_f_gap(gap)))
+    parts = parts.push(Piece(text: encode_cooked(try decode_f_gap(gap)), inline: ""))
+    before_pre = current.pre.size
     raw_hole = try emit_only_child(current, hole, source)
     # Outside the outlined `try` there is no handler for a hole that answers a
     # `Result`, and interpolating it would print `ok(...)`/`error(...)`.
@@ -1328,20 +1336,57 @@ def emit_f_string(
 
     hole_done = try maybe_unwrap(raw_hole)
     current = hole_done.cx
-    if hole_done.code.include?("\"")
-      temp = "py_t#{current.next_temp}"
-      current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{hole_done.code}"))
-      parts = parts.push("#" + "{" + temp + "}")
+    quoted = hole_done.code.include?("\"")
+    quoted_temp = "py_t#{current.next_temp}"
+    if quoted
+      current = current.with(
+        next_temp: current.next_temp + 1,
+        pre: current.pre.push("#{quoted_temp} = #{hole_done.code}"),
+      )
+    end
+
+    # A later hole's preamble runs before every inline hole, so an earlier
+    # inline call hoists in front of it and keeps Python's order (the same
+    # rule as call arguments).
+    if current.pre.size > before_pre
+      hoisted: List[String] = []
+      next_temp = current.next_temp
+      kept: List[Piece] = []
+      for piece in parts
+        if piece.inline == ""
+          kept = kept.push(piece)
+        else
+          temp = "py_t#{next_temp}"
+          next_temp += 1
+          hoisted = hoisted.push("#{temp} = #{piece.inline}")
+          kept = kept.push(Piece(text: "#" + "{" + temp + "}", inline: ""))
+        end
+      end
+
+      parts = kept
+      current = current.with(
+        next_temp: next_temp,
+        pre: current.pre.take(before_pre) + hoisted + current.pre.drop(before_pre),
+      )
+    end
+
+    if quoted
+      parts = parts.push(Piece(text: "#" + "{" + quoted_temp + "}", inline: ""))
     else
-      parts = parts.push("#" + "{" + hole_done.code + "}")
+      effectful = ""
+      if inline_effectful?(hole_done.code)
+        effectful = hole_done.code
+      end
+
+      parts = parts.push(Piece(text: "#" + "{" + hole_done.code + "}", inline: effectful))
     end
 
     cursor = hole.stop - inner_start
   end
 
   tail = inner.slice(cursor, inner.length - cursor)
-  parts = parts.push(encode_cooked(try decode_f_gap(tail)))
-  ok(Done(code: "\"#{parts.join("")}\"", type: "String", cx: current))
+  parts = parts.push(Piece(text: encode_cooked(try decode_f_gap(tail)), inline: ""))
+  ok(Done(code: "\"#{parts.map { |piece| piece.text }.join("")}\"", type: "String", cx: current))
 end
 
 def decode_f_gap(gap: String) -> Result[String]
