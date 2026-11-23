@@ -51,7 +51,8 @@ def parser() -> OP.Parser
 end
 
 def run(options: Options) -> Result[Void]
-  grammar = try Grammar.load(grammar_path())
+  try check_distinct(options.file, options.output)
+  grammar = try Grammar.load(try grammar_path())
   source = try read_source(options.file)
   text = try Py2Agc.translate(grammar, options.file, source)
   case options.output
@@ -70,23 +71,40 @@ def read_source(file: String) -> Result[String]
   end
 end
 
-# The grammar lives beside this file, so the command works from any folder.
-def grammar_path() -> String
-  parts = System.program_name().split("/")
-  folder = parts.take(parts.size - 1).join("/")
-  return GRAMMAR if folder.empty?()
+# The grammar lives beside this file, so the command works from any folder and
+# through a link.
+def grammar_path() -> Result[String]
+  real = try Path.real(System.program_name())
+  parts = real.split("/")
+  ok("#{parts.take(parts.size - 1).join("/")}/../#{GRAMMAR}")
+end
 
-  "#{folder}/../#{GRAMMAR}"
+def check_distinct(file: String, output: Optional[String]) -> Result[Void]
+  case output
+    none -> ok()
+
+    some(path) ->
+      return error("agc-py: the output #{path} is the input file") if try Path.resolve(path) == try Path.resolve(file)
+
+      ok()
+  end
 end
 
 def write_atomic(path: String, text: String) -> Result[Void]
-  temp = "#{path}.tmp"
-  try File.write_text(temp, text)
+  temp = "#{path}.#{System.pid()}.tmp"
+  case File.write_text(temp, text)
+    error(e) ->
+      _ = Path.remove(temp)
+      return error("agc-py: cannot write #{path}: #{e.message}")
+
+    ok(_) -> nil
+  end
+
   case Path.replace(temp, path)
     ok(_) -> ok()
 
     error(e) ->
       _ = Path.remove(temp)
-      error(e.message)
+      error("agc-py: cannot write #{path}: #{e.message}")
   end
 end
