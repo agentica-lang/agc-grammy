@@ -2,7 +2,7 @@
 ## Python module member lowers to. A function is a `Sig` (Python parameter
 ## names, backend types, the mapped return) whose `code` spells the backend
 ## call with `$1`, `$2` for the arguments, so a call through it is checked
-## like any other call; a constant has `value` set and no parameters. The
+## like any other call; a constant has the `const` kind and no parameters. The
 ## table is closed: a module member that is not here refuses.
 
 import EmitCtx from "emit_ctx"
@@ -23,32 +23,32 @@ def members(module: String) -> Map[String, EmitCtx.Sig]
     "sys" ->
       {
         "argv": const_value("argv", "List[String]", "([System.program_name()] + System.args())"),
-        "exit": fn("exit", ["code"], ["Int"], "Void", "System.exit($1)"),
+        "exit": fn("exit", ["code"], ["Int"], "Void", "System.exit(($1).bit_and(255))"),
       }
     "os" ->
       {
-        "getenv": fn("getenv", ["key"], ["String"], "Result[String]", "System.env($1)"),
+        "getenv": fn("getenv", ["key"], ["String"], "Optional[String]", "py_getenv($1)"),
         "getcwd": fn("getcwd", [], [], "Result[String]", "Path.cwd()"),
-        "environ": const_value("environ", "Environ", "@environ"),
+        "environ": kinded("environ", "Environ", "environ"),
       }
     _ -> {}
   end
 end
 
-## What a call to the backend spelling `template` becomes with `args`; an
-## argument that is a receiver (`$1.floor`) and has an operator in it (or a sign) is
-## parenthesized.
+## What a call to the backend spelling `template` becomes with `args`, in one
+## pass over the `$1`..`$9` marks; an argument that is a receiver (`$1.floor`)
+## and has an operator in it (or a sign) is parenthesized.
 def spell(template: String, args: List[String]) -> String
-  out = template
-  index = args.size
-  while index > 0
-    arg = args[index - 1]
-    if arg.include?(" ") or arg.start_with?("-")
-      out = out.replace("$#{index}.", "(#{arg}).")
+  pieces = template.split("$")
+  out = List.first(pieces)
+  for piece in pieces.drop(1)
+    arg = args[piece.slice(0, 1).to_i! - 1]
+    rest = piece.slice(1, piece.length - 1)
+    if rest.start_with?(".") and (arg.include?(" ") or arg.start_with?("-"))
+      arg = "(#{arg})"
     end
 
-    out = out.replace("$#{index}", arg)
-    index -= 1
+    out = out + arg + rest
   end
 
   out
@@ -63,5 +63,9 @@ end
 def const_float(name: String, code: String) -> EmitCtx.Sig = const_value(name, "Float", code)
 
 def const_value(name: String, type: String, code: String) -> EmitCtx.Sig
-  EmitCtx.Sig(name: name, params: [], types: [], defaults: [], ret: type, code: code, value: true)
+  EmitCtx.Sig(name: name, params: [], types: [], defaults: [], ret: type, code: code, kind: "const")
+end
+
+def kinded(name: String, type: String, kind: String) -> EmitCtx.Sig
+  EmitCtx.Sig(name: name, params: [], types: [], defaults: [], ret: type, kind: kind)
 end

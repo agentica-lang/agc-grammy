@@ -15,10 +15,11 @@ fmt-check:
 lint:
 	$(AGENTICA) lint src examples tests agc-py
 
-# Each test gets 5M steps: translating a few modules in-process needs more than
-# the default 1M.
+# Each test gets 2.6M steps, twice the 1.3M the heaviest one needs (a
+# translation of a few modules in-process, grammar load included); the
+# default is 1M.
 test:
-	$(AGENTICA) test --max-steps 5000000 tests agc-py/tests
+	$(AGENTICA) test --max-steps 2600000 tests agc-py/tests
 
 ci: check fmt-check lint test
 

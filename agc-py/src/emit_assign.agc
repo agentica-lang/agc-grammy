@@ -137,7 +137,7 @@ end
 ## `try` so the error reaches the handler or the caller; elsewhere it refuses
 ## as `PY-TYPE-MISMATCH` (nothing would catch the error).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
+  case EmitExpr.emit_stmt_expr(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)

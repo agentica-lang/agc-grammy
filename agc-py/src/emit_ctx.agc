@@ -36,8 +36,8 @@ end
 ## when the parameter has none), and the mapped return type. `imported` marks
 ## a function of another local module (defaults do not cross). A standard
 ## library member (`stdlib.agc`) is a `Sig` with `code`, the backend spelling
-## with `$1`, `$2` for the arguments, and `value` when it is a constant (no
-## call).
+## with `$1`, `$2` for the arguments, and a `kind` of `const` for a constant
+## (no call) or `environ` for `os.environ` (only `os.environ[key]` lowers).
 struct Sig
   name: String
   params: List[String]
@@ -46,7 +46,7 @@ struct Sig
   ret: String
   imported: Bool = false
   code: String = ""
-  value: Bool = false
+  kind: String = "call"
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.
