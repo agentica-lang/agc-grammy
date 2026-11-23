@@ -233,21 +233,26 @@ plain types only.
     `List.all?`/`any?`), `map`/`filter` over named functions (->
     `List.map`/`select`).
   - `math`: `sqrt` (-> `Math.sqrt`), `floor`/`ceil` (-> the `Float` methods
-    `x.floor()`/`x.ceil()`). The backend has no `Math.pi`/`tau` constants
-    (probed: `CHECK-UNKNOWN-NAME`), so `math.pi`/`math.e`/`math.tau` lower to
-    the `Float` literals `3.141592653589793`/`2.718281828459045`/
-    `6.283185307179586`; `math.inf` has no spelling and is excluded
-    (`PY-OUT-OF-SUBSET`).
-  - `sys`: `argv` (-> `System.args()`), `exit` (-> `System.exit`), stdio via
-    `IO` (`stdin` -> `IO.gets`, `stderr` via `IO.warn`).
+    `x.floor`/`x.ceil`, an `Int`). The backend has no `Math.pi`/`tau`
+    constants (probed: `CHECK-UNKNOWN-NAME`), so `math.pi`/`math.e`/`math.tau`
+    lower to the `Float` literals `3.141592653589793`/`2.718281828459045`/
+    `6.283185307179586`. The arguments are `float` (an `int` is
+    `PY-TYPE-MISMATCH`), and every other member, `math.inf` included, is
+    `PY-IMPORT-UNKNOWN`.
+  - `sys`: `argv` (-> the program name and `System.args()`, as CPython's
+    `argv[0]` and the rest) and `exit(code)` (-> `System.exit`, the code is
+    required). Stdio is unmapped (`IO.gets` and `IO.warn` differ from the
+    file objects in their newlines).
   - `os`: `environ[name]` key lookup only (-> `System.env(name)`, which
-    returns a catchable `Result`; `os.getenv(name)` lowers the same way).
-    Iteration, `len` and `in` over `environ` are unmapped
-    (`PY-OUT-OF-SUBSET`), `os.getcwd()` (-> `Path.cwd()`),
-    `open(path)` read-only (-> `File.read_text`), `open(p, "w")` (->
-    `File.write_text`), `open(p, "a")` (-> `File.append_text`, each a
-    catchable `Result`); other modes are `PY-OUT-OF-SUBSET`. The rest of `os`
-    is `PY-IMPORT-UNKNOWN`.
+    returns a catchable `Result`); `os.getenv(name)` lowers the same way (an
+    unset variable is the error, where CPython answers `None`). Iteration,
+    `len` and `in` over `environ` are `PY-OUT-OF-SUBSET`. `os.getcwd()` (->
+    `Path.cwd()`, a `Result`). The rest of `os` is `PY-IMPORT-UNKNOWN`.
+  - `open`: whole-file use only, through `open(path).read()` (->
+    `File.read_text`), `open(p, "w").write(s)` (-> `File.write_text`) and
+    `open(p, "a").write(s)` (-> `File.append_text`), each a catchable
+    `Result`; a file object has no other form, so any other use or mode is
+    `PY-OUT-OF-SUBSET`.
   - `json` (-> `JSON.parse`/`JSON.encode`), `re` (-> `std/regex`, RE2 subset),
     `toml` (-> `std/toml`), `datetime` (-> `std/utc`, partial:
     instants/formatting only, no arithmetic/`timedelta`/`strptime`),
@@ -259,6 +264,9 @@ plain types only.
     `hashlib` (-> `OpenSSL.Digest`, partial), `pathlib` (-> `File`
     operations, partial), `string` methods: `strip`, `split`, `join`,
     `replace`, `upcase`, `downcase`, `start_with?`, `end_with?`, `include?`.
+  - A mapped member lowers in place: a standard-library import emits no
+    import line. A member the table does not hold is `PY-IMPORT-UNKNOWN`,
+    with the members the module does map in the help.
   - Excluded v0 (each a `PY-IMPORT-UNKNOWN`): `socket`, `threading`,
     `multiprocessing`, `asyncio`, `subprocess`, `sqlite3`, `csv`,
     `decimal`, `statistics` (beyond `List` helpers), `itertools`,

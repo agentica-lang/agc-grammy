@@ -6,14 +6,10 @@
 ## as written, so every case is differential: the same Python source runs
 ## under `python3` and the emitted program's standard output must match it.
 ##
-## Sources stay a few lines each because `agentica test` shares one million
-## steps per test (plus one) over the file's tests, the grammar load costs
-## about 1.8 million of them and a translate costs roughly 0.2 million per
-## source line (as of Agentica 0.35.0).
-##
-## TODO(agentica#1922): the many small pure tests carry the step budget of
-## the translating ones, so their count is tied to it. Drop them (and split
-## the file freely) once `agentica test` has a configurable step budget.
+## Sources stay a few lines each: the grammar load costs about 1.8 million
+## steps and a translate roughly 0.2 million per source line (as of Agentica
+## 0.36.0), and each test has the budget `make test` gives it (`--max-steps`,
+## 5 million), so a long source would not fit.
 
 import EmitAssign from "../src/emit_assign"
 import EmitCtx from "../src/emit_ctx"

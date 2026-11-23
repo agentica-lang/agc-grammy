@@ -74,6 +74,11 @@ file per module: `import m [as y]` is `import Y from "m"`, `from m import f
 line. Only a `def` crosses a module (`SUBSET.md` section 5).
 `Py2Agc.translate` is still single-file and refuses imports.
 
+A standard-library import (`SUBSET.md` section 5) emits no import line: its
+members lower in place from the table in `agc-py/src/stdlib.agc` (`math`,
+`sys`, `os` and `open` so far); a member outside the table is
+`PY-IMPORT-UNKNOWN` with what the module maps in the help.
+
 grammy stays the only parser: `agc-py` will import it by relative path,
 exactly as `tests/` and `examples/python/` do. No workspace split yet by
 release discipline (not a tool requirement: a `ref` pin or `path` dep would

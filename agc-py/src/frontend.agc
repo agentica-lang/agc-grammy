@@ -535,6 +535,7 @@ KNOWN_NAMES = Set.new([
   "map",
   "max",
   "min",
+  "open",
   "ord",
   "print",
   "range",

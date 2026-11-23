@@ -15,7 +15,7 @@
 make check       # agentica check src examples tests
 make fmt         # format in place (CI runs fmt --check)
 make lint        # style suggestions, must stay clean
-make test        # agentica test tests
+make test        # agentica test --max-steps 5000000 tests agc-py/tests
 make ci          # all of the above
 make example     # run the Python subset on examples/python/sample.py
 ```
@@ -23,7 +23,7 @@ make example     # run the Python subset on examples/python/sample.py
 `agentica test` with no path only searches `test/` and `specs/`; this repo keeps
 its tests in `tests/`, so always pass the folder.
 
-`.github/workflows/ci.yml` installs the pinned Agentica release (0.35.0, its
+`.github/workflows/ci.yml` installs the pinned Agentica release (0.36.0, its
 checksum in the workflow) and runs `make check`, `fmt-check`, `lint`, `test` and
 `example` on every pull request and every push to `master`. Keep it in step with
 the Makefile when a target changes.
