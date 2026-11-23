@@ -398,7 +398,7 @@ def main() -> Void
       done = try assert_ok(EmitFlow.emit_for(caller, parts.target, parts.iterable, ["puts(x)"], false))
       try assert_lines(done.code, ["for x in (try get(s))", "  puts(x)", "end"])
       res = EmitFlow.emit_for(caller.with(func_ret: "Void"), parts.target, parts.iterable, ["puts(x)"], false)
-      try assert_refusal(res, "PY-OPERATOR")
+      try assert_refusal(res, "PY-TYPE-MISMATCH")
       ok()
     end,
     Test.test("while emits its guard and body") do

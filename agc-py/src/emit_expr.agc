@@ -3101,6 +3101,17 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
         )
       end
 
+      case args.cx.sigs.get(name)
+        some(sig) ->
+          if sig.ret.start_with?("Result[")
+            return error(
+              "PY-OPERATOR: `#{target}` takes a def that cannot fail, found a Result def `#{name}` = help: call it in a loop inside a def returning `Result[T]`",
+            )
+          end
+
+        none -> name = name
+      end
+
       temp = "py_x#{args.cx.next_temp}"
       current = args.cx.with(next_temp: args.cx.next_temp + 1)
       method = "map"

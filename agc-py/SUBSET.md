@@ -136,10 +136,10 @@ plain types only.
   as a statement, a binding, a loop header or an `if`/`while` guard, and its
   error returns to the caller. Outside a `Result` def and a `try` body such a
   call refuses (`PY-TYPE-MISMATCH` or `PY-COND-NOT-BOOL`, at the call).
-  CPython has no `Result` name, so such a file does not run there as
-  written; the differential tests prepend `from __future__ import
-  annotations` to the CPython run (the subset itself does not accept that
-  import).
+  CPython has no `Result` name, so the quoted form `-> "Result[T]"` is the
+  one that keeps a file valid there (a string annotation); the bare form
+  works for agc-py only. `map` and `filter` refuse a `Result` def
+  (`PY-OPERATOR`): call it in a loop inside a `Result` def instead.
 - `try`/`except` with exactly one handler (bare, `except E` or
   `except E as e`; the class is accepted syntactically but ignored, since
   classes are not modeled — `e`, when bound, is the message `String`).
@@ -161,8 +161,8 @@ plain types only.
   every earlier inline call in front of it, so the holes still run in order.
   The value of a `return` is emitted the same way, but a `return` inside the
   body is `PY-TRY-CONTROL` first.
-  Outside `try` and a `Result` def nothing catches the error, so that value refuses
-  (`PY-TYPE-MISMATCH`, at the operand or the interpolation) instead of
+  Outside `try` and a `Result` def nothing catches the error, so that value
+  refuses (`PY-TYPE-MISMATCH`, at the operand or the interpolation) instead of
   reaching the output as `ok(...)`; a bare `Result` a statement lane can
   spell as `try` is the only shape that passes through.
 - `def` with full annotations, defaults allowed and re-evaluated per call

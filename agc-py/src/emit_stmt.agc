@@ -296,7 +296,13 @@ def for_elem(ctx: EmitCtx.EmitCtx, iterable: Tree.Node) -> Result[String]
   out = try emit_expr_type(ctx, iterable)
   case EmitFlow.elem_type(out)
     some(item) -> ok(item)
-    none -> error("PY-OPERATOR: for needs a List, Range or String iterable, found #{out}")
+    none ->
+      code = "PY-OPERATOR"
+      if EmitExpr.result_inner(out).some?
+        code = "PY-TYPE-MISMATCH"
+      end
+
+      error("#{code}: for needs a List, Range or String iterable, found #{out}")
   end
 end
 

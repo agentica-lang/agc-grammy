@@ -2,14 +2,18 @@
 ## subset. `raise` returns the error, and a call to such a def unwraps with
 ## `try` wherever the caller propagates (an outlined `try` body or another
 ## Result def), so the error lands in the handler where CPython's exception
-## would. Every case is differential: the same Python source runs under
-## `python3` (with postponed annotation evaluation, since CPython has no
-## `Result` name) and the emitted program's standard output must match it.
+## would. The annotation is quoted (`-> "Result[T]"`), the form CPython runs
+## as written, so every case is differential: the same Python source runs
+## under `python3` and the emitted program's standard output must match it.
 ##
 ## Sources stay a few lines each because `agentica test` shares one million
 ## steps per test (plus one) over the file's tests, the grammar load costs
 ## about 1.8 million of them and a translate costs roughly 0.2 million per
 ## source line (as of Agentica 0.35.0).
+##
+## TODO(agentica#1922): the many small pure tests carry the step budget of
+## the translating ones, so their count is tied to it. Drop them (and split
+## the file freely) once `agentica test` has a configurable step budget.
 
 import EmitAssign from "../src/emit_assign"
 import EmitCtx from "../src/emit_ctx"
@@ -46,7 +50,7 @@ end
 # the backend prints `true`/`false`, so the comparison ignores case.
 def agree(compiled: Grammar.Grammar, source: String, tag: String) -> Result[String]
   py_path = "/tmp/agc_py2agc_resultdef_#{tag}.py"
-  try File.write_text(py_path, "from __future__ import annotations\n" + source)
+  try File.write_text(py_path, source)
   runner = try Process.spawn_captured("python3", [py_path])
   ran = try Process.output(runner, 30000)
   text = try Py2Agc.translate(compiled, "prog.py", source)
@@ -66,6 +70,10 @@ def main() -> Void
     Test.test("Result[T] maps to the backend's fallible signature") do
       try Test.eq(mapped("Result[int]"), "Result[Int]")
       Test.eq(mapped("Result[list[int]]"), "Result[List[Int]]")
+    end,
+    Test.test("a quoted Result annotation maps the same") do
+      try Test.eq(mapped("\"Result[int]\""), "Result[Int]")
+      Test.eq(mapped("\"Result[None]\""), "Result[Void]")
     end,
     Test.test("Result[None] maps to Result[Void]") do Test.eq(mapped("Result[None]"), "Result[Void]") end,
     Test.test("a plain return annotation maps as before") do Test.eq(mapped("int"), "Int") end,
@@ -96,8 +104,8 @@ def main() -> Void
     end,
     Test.test("raise reaches the caller's handler through two Result defs") do
       source = (
-        "def p(s: str) -> Result[int]:\n    if s == \"\":\n        raise ValueError(\"empty\")\n    return int(s)\n" +
-        "def t(s: str) -> Result[int]:\n    return p(s) * 2\n" +
+        "def p(s: str) -> \"Result[int]\":\n    if s == \"\":\n        raise ValueError(\"empty\")\n    return int(s)\n" +
+        "def t(s: str) -> \"Result[int]\":\n    return p(s) * 2\n" +
         "try:\n    print(t(\"21\"))\n    print(t(\"\"))\nexcept ValueError as e:\n    print(\"caught\", e)\n"
       )
 
@@ -106,7 +114,7 @@ def main() -> Void
     end,
     Test.test("a conversion error propagates the same way") do
       source = (
-        "def p(s: str) -> Result[int]:\n    return int(s) + 1\n" +
+        "def p(s: str) -> \"Result[int]\":\n    return int(s) + 1\n" +
         "try:\n    print(p(\"4\"))\n    print(p(\"z\"))\nexcept:\n    print(\"bad\")\n"
       )
 
@@ -115,8 +123,8 @@ def main() -> Void
     end,
     Test.test("a call unwraps in a binding, a statement and a loop header") do
       source = (
-        "def g(s: str) -> Result[list[int]]:\n    return [int(s), 2]\n" +
-        "def u(s: str) -> Result[int]:\n    n: int = 0\n    g(s)\n    for x in g(s):\n        n += x\n    return n\n" +
+        "def g(s: str) -> \"Result[list[int]]\":\n    return [int(s), 2]\n" +
+        "def u(s: str) -> \"Result[int]\":\n    n: int = 0\n    g(s)\n    for x in g(s):\n        n += x\n    return n\n" +
         "try:\n    print(u(\"3\"))\n    print(u(\"q\"))\nexcept:\n    print(\"bad\")\n"
       )
 
@@ -125,9 +133,9 @@ def main() -> Void
     end,
     Test.test("a Result return passes through and Result[None] ends in success") do
       source = (
-        "def a(s: str) -> Result[int]:\n    return int(s)\n" +
-        "def b(s: str) -> Result[int]:\n    return a(s)\n" +
-        "def c(s: str) -> Result[None]:\n    if s == \"\":\n        return\n    print(b(s))\n" +
+        "def a(s: str) -> \"Result[int]\":\n    return int(s)\n" +
+        "def b(s: str) -> \"Result[int]\":\n    return a(s)\n" +
+        "def c(s: str) -> \"Result[None]\":\n    if s == \"\":\n        return\n    print(b(s))\n" +
         "try:\n    c(\"\")\n    c(\"4\")\n    c(\"z\")\n    print(\"unreached\")\nexcept:\n    print(\"err\")\n"
       )
 
@@ -136,8 +144,8 @@ def main() -> Void
     end,
     Test.test("a Result bool guard unwraps in an if and a while") do
       source = (
-        "def lim(s: str) -> Result[bool]:\n    return int(s) > 2\n" +
-        "def run(s: str) -> Result[None]:\n    n: int = 0\n    while lim(s):\n        n += 1\n" +
+        "def lim(s: str) -> \"Result[bool]\":\n    return int(s) > 2\n" +
+        "def run(s: str) -> \"Result[None]\":\n    n: int = 0\n    while lim(s):\n        n += 1\n" +
         "        if n > 1:\n            break\n    if lim(s):\n        print(n)\n" +
         "try:\n    run(\"3\")\n    run(\"x\")\nexcept:\n    print(\"bad\")\n"
       )
@@ -147,7 +155,7 @@ def main() -> Void
     end,
     Test.test("a handler inside a Result def returns or re-raises") do
       source = (
-        "def w(s: str) -> Result[int]:\n    try:\n        print(int(s))\n    except ValueError as e:\n" +
+        "def w(s: str) -> \"Result[int]\":\n    try:\n        print(int(s))\n    except ValueError as e:\n" +
         "        if s == \"q\":\n            raise ValueError(\"wrapped\")\n        return -1\n    return 7\n" +
         "try:\n    print(w(\"5\"))\n    print(w(\"x\"))\n    print(w(\"q\"))\n" +
         "except ValueError as e:\n    print(\"top\", e)\n"
@@ -157,11 +165,43 @@ def main() -> Void
       Test.assert(got.strip() == "5\n7\n-1\ntop wrapped", got)
     end,
     Test.test("an uncaught Result call refuses outside a propagating context") do
-      source = "def p(s: str) -> Result[int]:\n    return int(s)\nprint(p(\"1\"))\n"
+      source = "def p(s: str) -> \"Result[int]\":\n    return int(s)\nprint(p(\"1\"))\n"
       case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
         error(e) -> Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
         ok(text) -> Test.assert(false, "expected a refusal, emitted #{text}")
       end
+    end,
+    # The handler of a top-level `try` is not a propagation context: nothing
+    # above it would catch the error.
+    Test.test("a top-level handler refuses a Result call") do
+      source = "def p(s: str) -> \"Result[None]\":\n    print(s)\n" + "try:\n    print(1)\nexcept:\n    p(\"1\")\n"
+
+      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
+        error(e) -> Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
+        ok(text) -> Test.assert(false, "expected a refusal, emitted #{text}")
+      end
+    end,
+    # `return g()` with a `None` call runs it and succeeds.
+    Test.test("returning a None call under Result[None] runs it then succeeds") do
+      source = (
+        "def g() -> None:\n    print(\"g\")\n" +
+        "def h() -> \"Result[None]\":\n    return g()\n" +
+        "try:\n    h()\n    print(\"done\")\nexcept:\n    print(\"err\")\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "voidreturn")
+      Test.assert(got.strip() == "g\ndone", got)
+    end,
+    # An `if`/`else` that returns in every arm closes a Result[None] def: no
+    # `ok()` follows it.
+    Test.test("a Result[None] def ending in an if with returns in every arm") do
+      source = (
+        "def k(s: str) -> \"Result[None]\":\n    if s == \"\":\n        return\n    else:\n        print(s)\n        return\n" +
+        "try:\n    k(\"\")\n    k(\"a\")\nexcept:\n    print(\"err\")\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "ifends")
+      Test.assert(got.strip() == "a", got)
     end,
   ])
 end

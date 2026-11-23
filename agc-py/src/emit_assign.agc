@@ -219,10 +219,15 @@ def map_annotation(text: String, scope: Map[String, String]) -> Result[String] =
 
 ## Maps a `def` return annotation: `Result[T]` is the fallible signature
 ## (`Result[None]` is `Result[Void]`), anything else maps like an annotation.
-## `Result` spells nowhere else, so a parameter, a binding or a nested use
-## refuses in `map_generic`.
+## The quoted form `-> "Result[T]"` means the same and keeps the file valid in
+## CPython, which has no `Result` name. `Result` spells nowhere else, so a
+## parameter, a binding or a nested use refuses in `map_generic`.
 def map_return(text: String, scope: Map[String, String]) -> Result[String]
   stripped = text.strip
+  if quoted?(stripped)
+    stripped = stripped.slice(1, stripped.length - 2).strip
+  end
+
   return map_annotation(stripped, scope) if !stripped.start_with?("Result[") or !stripped.end_with?("]")
 
   inner = stripped.slice(7, stripped.length - 8).strip
@@ -466,8 +471,6 @@ def bind_fit(want: String, got: String) -> OptFit
   OptFit.No
 end
 
-# A bare `return` only checks under a `Void` return; anything else is
-# `PY-TYPE-MISMATCH`.
 # `return` under `-> Result[T]`: a plain value of `T` returns as `ok(value)`,
 # a `Result[T]` value (a conversion or a call that already is one) returns as
 # written, so the error flows to the caller. Bare `return` and `return None`
@@ -507,6 +510,17 @@ end
 
 def emit_result_value(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: EmitExpr.Out) -> EmitCtx.StmtRes
   shifted = shift_out(out, ctx.next_temp)
+  # `return g()` with `g` returning `None` runs the call, then succeeds.
+  if out.type == "Void" and want == "Void"
+    return EmitCtx.StmtRes.Ok(
+      EmitCtx.StmtOut(
+        code: shifted.pre + [shifted.code, "return ok()"],
+        scope: ctx.scope,
+        next_temp: ctx.next_temp + shifted.used,
+      ),
+    )
+  end
+
   already = out.type == ctx.func_ret
   fit = OptFit.Bare
   if !already
@@ -541,6 +555,8 @@ def emit_result_value(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: 
   end
 end
 
+# A bare `return` only checks under a `Void` return; anything else is
+# `PY-TYPE-MISMATCH`.
 def emit_bare_return(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
   if is_void_return?(ctx.func_ret)
     EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["return"], scope: ctx.scope, next_temp: ctx.next_temp))
@@ -571,9 +587,10 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span
       case map_ann_scoped(ctx.func_ret, ctx.scope)
         error(e) -> refuse_split(span.start, span.stop, e)
         ok(want) ->
-          # `emit_return` already refused inside a `try` body, so this is
-          # false today; thread it anyway so the strict value expression
-          # keeps unwrapping if that control refusal ever moves.
+          # `emit_return` already refused inside a `try` body, and a def that
+          # returns `Result[T]` took `emit_result_return`, so nothing
+          # propagates here today; thread it anyway so the strict value
+          # expression keeps unwrapping if either route ever moves.
           case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
             error(e) -> refuse_split(expr.start, expr.stop, e)
             ok(out) -> emit_return_line(ctx, expr, want, out)

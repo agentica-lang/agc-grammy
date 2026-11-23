@@ -694,6 +694,23 @@ def main() -> Void
       try Test.eq(plain.code, "PY-TYPE-MISMATCH")
       ok()
     end,
+    Test.test("a plain def refuses a Result def call as a statement") do
+      src = "p(s)\n"
+      p_sig = EmitCtx.Sig(name: "p", params: ["s"], types: ["String"], defaults: [none], ret: "Result[Int]")
+      ctx = EmitCtx.EmitCtx(
+        source: src,
+        file: "assign_test",
+        scope: {"s": "String", "p": EmitCtx.def_marker()},
+        func_ret: "Int",
+        in_try: false,
+        next_temp: 0,
+        sigs: {"p": p_sig},
+      )
+
+      ref = try run_no(compiled.unwrap!, src, ctx)
+      try Test.eq(ref.code, "PY-TYPE-MISMATCH")
+      ok()
+    end,
     Test.test("Result spells only as a def return annotation") do
       src = "x: Result[int] = 1\n"
       ref = try run_no(compiled.unwrap!, src, top_ctx(src))

@@ -49,6 +49,7 @@ import EmitCtx from "emit_ctx"
 import EmitExpr from "emit_expr"
 import EmitStmt from "emit_stmt"
 import Frontend from "frontend"
+import {Stmt} from "frontend"
 import Tree from "../../src/tree"
 
 ## One assembled module: the full single-file program, one line per entry.
@@ -167,7 +168,7 @@ def all_aliases(program: Frontend.Program) -> Map[String, String]
     case item
       Frontend.TopItem.StmtItem(stmt, _) ->
         case stmt
-          Frontend.Stmt.AliasDef(occ, ann) ->
+          Stmt.AliasDef(occ, ann) ->
             case EmitAssign.map_annotation(ann.text, out)
               ok(want) -> out = out.put(occ.name, want)
               error(_) -> out = out
@@ -279,17 +280,11 @@ def import_span(decls: List[Frontend.ImportDecl], program: Frontend.Program) -> 
   program.span
 end
 
-def step_stmt_item(
-  asm: Asm,
-  stmt: Frontend.Stmt,
-  names: List[Frontend.NameOcc],
-  source: String,
-  file: String,
-) -> StepRes
+def step_stmt_item(asm: Asm, stmt: Stmt, names: List[Frontend.NameOcc], source: String, file: String) -> StepRes
   # `type Alias = T` is a declaration, not a value binding: the lane hoists
   # its line and the alias joins the module scope for the annotations after it.
   case stmt
-    Frontend.Stmt.AliasDef(_, _) ->
+    Stmt.AliasDef(_, _) ->
       case EmitStmt.emit_block(item_ctx(asm, source, file), [stmt])
         EmitStmt.BlockRes.No(ref) -> StepRes.No(ref)
         EmitStmt.BlockRes.Ok(out) ->
@@ -334,9 +329,9 @@ def step_stmt_item(
 end
 
 # The alias a `type Alias = T` item declares: the item's first name.
-def alias_name(stmt: Frontend.Stmt) -> String
+def alias_name(stmt: Stmt) -> String
   case stmt
-    Frontend.Stmt.AliasDef(occ, _) -> occ.name
+    Stmt.AliasDef(occ, _) -> occ.name
     _ -> ""
   end
 end
@@ -496,7 +491,7 @@ end
 
 # The main-body occurrence walk over one item's names, threaded through the
 # assembly state so an annotated declaration in one item binds for the next.
-def main_walk(asm: Asm, names: List[Frontend.NameOcc], stmt: Frontend.Stmt, source: String) -> WalkRes
+def main_walk(asm: Asm, names: List[Frontend.NameOcc], stmt: Stmt, source: String) -> WalkRes
   walk_stream(asm.walk, names, bare_ann_starts([stmt]), self_keys([stmt], source), {}, asm.aliases, false)
 end
 
@@ -644,20 +639,20 @@ end
 
 # The span starts of valueless annotated declarations (`x: T`), so the walk
 # knows a `declare` binds without a value.
-def bare_ann_starts(stmts: List[Frontend.Stmt]) -> List[Int]
+def bare_ann_starts(stmts: List[Stmt]) -> List[Int]
   out: List[Int] = []
   for stmt in stmts
     case stmt
-      Frontend.Stmt.Annotated(occ, _, none) -> out = out.push(occ.span.start)
-      Frontend.Stmt.ForLoop(_, _, body) -> out = out + bare_ann_starts(body)
-      Frontend.Stmt.IfStmt(arms, else_body) ->
+      Stmt.Annotated(occ, _, none) -> out = out.push(occ.span.start)
+      Stmt.ForLoop(_, _, body) -> out = out + bare_ann_starts(body)
+      Stmt.IfStmt(arms, else_body) ->
         for arm in arms
           out = out + bare_ann_starts(arm.body)
         end
 
         out = out + bare_ann_starts(else_body)
-      Frontend.Stmt.WhileStmt(_, body) -> out = out + bare_ann_starts(body)
-      Frontend.Stmt.TryStmt(try_body, handler, _) -> out = out + bare_ann_starts(try_body) + bare_ann_starts(handler)
+      Stmt.WhileStmt(_, body) -> out = out + bare_ann_starts(body)
+      Stmt.TryStmt(try_body, handler, _) -> out = out + bare_ann_starts(try_body) + bare_ann_starts(handler)
       _ -> out = out
     end
   end
@@ -701,28 +696,38 @@ end
 # last statement must return, or be an `if`/`else` chain every leaf of which
 # returns — the backend's own rule, so a def that can fall through refuses
 # spanned instead of failing backend check.
-def returns_everywhere?(body: List[Frontend.Stmt]) -> Bool
+def returns_everywhere?(body: List[Stmt]) -> Bool
   return false if body.empty?
 
   last = List.first(body.drop(body.size - 1))
   case last
-    Frontend.Stmt.ReturnStmt(some(_), _) -> true
-    Frontend.Stmt.RaiseStmt(_) -> true
-    Frontend.Stmt.IfStmt(arms, else_body) -> every_arm_returns?(arms) and returns_everywhere?(else_body)
+    Stmt.ReturnStmt(some(_), _) -> true
+    Stmt.RaiseStmt(_) -> true
+    Stmt.IfStmt(arms, else_body) -> every_arm_returns?(arms) and returns_everywhere?(else_body)
     _ -> false
   end
 end
 
 # Whether the last statement already leaves the def, so no closing `ok()`
-# follows it (a `Result[None]` def otherwise ends with its success).
-def ends_with_return?(body: List[Frontend.Stmt]) -> Bool
+# follows it (a `Result[None]` def otherwise ends with its success): a
+# `return`, a `raise`, or an `if` chain with an `else` that every arm ends so.
+def ends_with_return?(body: List[Stmt]) -> Bool
   return false if body.empty?
 
   case List.first(body.drop(body.size - 1))
-    Frontend.Stmt.ReturnStmt(_, _) -> true
-    Frontend.Stmt.RaiseStmt(_) -> true
+    Stmt.ReturnStmt(_, _) -> true
+    Stmt.RaiseStmt(_) -> true
+    Stmt.IfStmt(arms, else_body) -> every_arm_ends?(arms) and ends_with_return?(else_body)
     _ -> false
   end
+end
+
+def every_arm_ends?(arms: List[Frontend.CondArm]) -> Bool
+  for arm in arms
+    return false if !ends_with_return?(arm.body)
+  end
+
+  true
 end
 
 def every_arm_returns?(arms: List[Frontend.CondArm]) -> Bool
@@ -1086,24 +1091,23 @@ end
 # augmented target makes of itself (its lowering reads the name even when
 # the right-hand side never mentions it) — the reads the backend discounts
 # as dead. Kwarg names are skipped (they name nothing).
-def self_keys(stmts: List[Frontend.Stmt], source: String) -> List[String]
+def self_keys(stmts: List[Stmt], source: String) -> List[String]
   out: List[String] = []
   for stmt in stmts
     case stmt
-      Frontend.Stmt.Assigned(occ, value) -> out = out + target_keys(occ.name, value, source)
-      Frontend.Stmt.AugAssigned(occ, _, value) ->
+      Stmt.Assigned(occ, value) -> out = out + target_keys(occ.name, value, source)
+      Stmt.AugAssigned(occ, _, value) ->
         out = out.push("#{occ.name}:#{occ.span.start}:#{occ.span.stop}")
         out = out + target_keys(occ.name, value, source)
-      Frontend.Stmt.ForLoop(_, _, body) -> out = out + self_keys(body, source)
-      Frontend.Stmt.IfStmt(arms, else_body) ->
+      Stmt.ForLoop(_, _, body) -> out = out + self_keys(body, source)
+      Stmt.IfStmt(arms, else_body) ->
         for arm in arms
           out = out + self_keys(arm.body, source)
         end
 
         out = out + self_keys(else_body, source)
-      Frontend.Stmt.WhileStmt(_, body) -> out = out + self_keys(body, source)
-      Frontend.Stmt.TryStmt(try_body, handler, _) ->
-        out = out + self_keys(try_body, source) + self_keys(handler, source)
+      Stmt.WhileStmt(_, body) -> out = out + self_keys(body, source)
+      Stmt.TryStmt(try_body, handler, _) -> out = out + self_keys(try_body, source) + self_keys(handler, source)
       _ -> out = out
     end
   end

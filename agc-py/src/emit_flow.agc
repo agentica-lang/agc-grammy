@@ -161,8 +161,13 @@ def emit_for(
       elem = elem_type(out.type)
       case elem
         none ->
+          code = "PY-OPERATOR"
+          if EmitExpr.result_inner(out.type).some?
+            code = "PY-TYPE-MISMATCH"
+          end
+
           EmitCtx.refuse_at(
-            "PY-OPERATOR",
+            code,
             "for needs a List, Range or String iterable, found #{out.type}",
             some("use a list, a range, or a string"),
             iterable.start,
