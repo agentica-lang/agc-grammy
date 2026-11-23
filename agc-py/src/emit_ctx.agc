@@ -139,6 +139,45 @@ def render_refusal(file: String, source: String, refusal: Refusal) -> String
   )
 end
 
+# The receiver of a method call: a code that is more than one atom (an
+# operator, a sign, a range) goes in parentheses, so `len(a + b)` is
+# `(a + b).size` and `abs(-n)` is `(-n).abs`.
+def recv_code(code: String) -> String
+  return code if !compound_code?(code)
+
+  "(#{code})"
+end
+
+def compound_code?(code: String) -> Bool
+  return true if code.start_with?("-") or code.start_with?("+") or code.start_with?("!")
+
+  depth = 0
+  quoted = false
+  index = 0
+  while index < code.length
+    ch = code.slice(index, 1)
+    if quoted
+      if ch == "\\"
+        index += 1
+      elsif ch == "\""
+        quoted = false
+      end
+    elsif ch == "\""
+      quoted = true
+    elsif ch == "(" or ch == "[" or ch == "{"
+      depth += 1
+    elsif ch == ")" or ch == "]" or ch == "}"
+      depth -= 1
+    elsif depth == 0 and (ch == " " or (index + 3 <= code.length and code.slice(index, 3) == "..."))
+      return true
+    end
+
+    index += 1
+  end
+
+  false
+end
+
 ## Indents every non-empty line by `level` steps.
 def indented(lines: List[String], level: Int) -> List[String]
   pad = "  " * level

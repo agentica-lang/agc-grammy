@@ -8,7 +8,8 @@
 ## nothing runs, is `py312_corpus_test.agc`.
 
 NAMES = [
-  "types", "literals", "arith", "control", "loops_next", "strings", "lists_maps", "functions", "results", "precedence",
+  "annotations", "literals", "arith", "control", "loops_next", "strings", "lists_maps", "functions", "results",
+  "precedence", "exits", "assert_fails",
 ]
 FOLDER = "agc-py/tests/corpus"
 
@@ -40,7 +41,7 @@ def expected(name: String) -> Result[Ran]
     return ok(Ran(code: 0, stdout: try File.read_text("#{FOLDER}/#{name}.expected"), stderr: ""))
   end
 
-  capture("python3", ["#{FOLDER}/#{name}.py"])
+  capture("python3", ["-I", "#{FOLDER}/#{name}.py"])
 end
 
 def runs_like_expected(name: String) -> Result[Void]

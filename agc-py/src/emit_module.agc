@@ -924,19 +924,17 @@ end
 # (Python still runs the expression) while the variable itself disappears.
 def rewrite_unused(lines: List[String], unused: List[String]) -> List[String]
   out: List[String] = []
-  index = 0
-  for line in lines
-    rewritten = rewrite_line(line, unused)
-    out = out.push(rewrite_idle_loop(rewritten, lines.drop(index + 1)))
-    index += 1
+  for index in 0...lines.size
+    out = out.push(rewrite_idle_loop(rewrite_line(lines[index], unused), lines, index))
   end
 
   out
 end
 
 # A loop target that its own loop never reads becomes `for _`, even when the
-# name is read in another loop of the same def.
-def rewrite_idle_loop(line: String, after: List[String]) -> String
+# name is read in another loop of the same def. The loop body is the lines
+# after `index` that are indented deeper than the header.
+def rewrite_idle_loop(line: String, lines: List[String], index: Int) -> String
   indent = indent_of(line)
   rest = line.slice(indent.length, line.length - indent.length)
   return line if !rest.start_with?("for ")
@@ -944,11 +942,13 @@ def rewrite_idle_loop(line: String, after: List[String]) -> String
   name = word_after(rest, 4)
   return line if name == "" or name == "_"
 
-  for next_line in after
-    next_indent = indent_of(next_line)
-    break if next_line.strip != "" and next_indent.length <= indent.length
-
+  at = index + 1
+  while at < lines.size
+    next_line = lines[at]
+    break if next_line.strip != "" and indent_of(next_line).length <= indent.length
     return line if EmitStmt.code_words(next_line).include?(name)
+
+    at += 1
   end
 
   "#{indent}for _#{rest.slice(4 + name.length, rest.length - 4 - name.length)}"

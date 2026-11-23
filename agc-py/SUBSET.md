@@ -92,15 +92,19 @@ plain types only.
 - Conversions and builtins, each with its lowering:
   `int(s)` → `s.to_i` (catchable `Result`, like `ValueError`),
   `int(f)` → `f.to_i`, `float(s)` → `s.to_f`, `float(n)` → `n.to_f`
+  (a plain `Float`: only `float(s)` is a `Result`)
   (`float("inf")`/`float("nan")` are catchable conversion errors in the
   backend, unlike Python — same `Result` family, documented divergence),
   `str(x)` → interpolation, `int`/`float` of the wrong kind →
   `PY-TYPE-MISMATCH`. `bool(x)` accepts `Bool` only, else `PY-TYPE-MISMATCH`
   (there is no truthiness to convert from, §6). `len()` → `size`/`length`.
-  `range(a)` / `range(a, b)` map to ranges; 3-arg `range(a, b, step)`
-  desugars to a `while`. `print(a, b, ...)` joins with single spaces via
-  interpolation (one backend arg); `sep=`/`end=`/`file=` kwargs are
-  `PY-OUT-OF-SUBSET`.
+  `range(a)` / `range(a, b)` map to ranges; 3-arg `range(a, b, step)` is
+  refused for now (`PY-OUT-OF-SUBSET`, #60). `print(a, b, ...)` joins with
+  single spaces via interpolation (one backend arg); `sep=`/`end=`/`file=`
+  kwargs are `PY-OUT-OF-SUBSET`. The text of a `bool`, a list or a map is the
+  backend's, not Python's: `true`/`false` for `True`/`False`, `["a"]` and
+  `{"a": 1}` for `['a']` and `{'a': 1}` (#61); spell a `bool` as `"yes" if b else "no"` and print a
+  collection element by element.
 - `x is None` / `x is not None` only (→ `.none?()` checks); any other `is`
   is `PY-IS`.
 - `x in xs` / `x not in xs` over `List`/`String` and `Map` keys (→
@@ -169,8 +173,10 @@ plain types only.
   (values are immutable, so sharing is unobservable — `def f(x: list = [])`
   is fine), keyword calls allowed. The call maps onto the signature: the
   arguments evaluate left to right in source order even when keywords
-  reorder them into parameter order, and a default lowers at the call site
-  with the call's own argument values bound to the parameter names. A lowered
+  reorder them into parameter order (one exception: when a later argument of
+  an outer call lowers to hoisted temp lines, those lines run before the
+  earlier arguments that stay inline, #62), and a default lowers at the call
+  site with the call's own argument values bound to the parameter names. A lowered
   default fits exactly like an explicit argument (a plain value into an
   `Optional` parameter wraps in `some`, a wrong type is `PY-TYPE-MISMATCH`);
   a default naming its own parameter refuses (`PY-OUT-OF-SUBSET`), as does a
@@ -224,12 +230,15 @@ plain types only.
 - Stdlib surface (closed, each mapped in phase 3). Covered with what the
   backend and its std give today, nothing else:
   - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),
-    `range` (-> `Range`, 3-arg form desugars), `str`/`int`/`float`/`bool`
+    `range` (-> `Range`, no 3-arg form yet, #60), `str`/`int`/`float`/`bool`
     conversions, `sorted` (-> `List.sort`), `sum`/`min`/`max` (->
-    `List.sum`/`min`/`max`), `abs` (-> `.abs`), `round` (-> `.round`,
-    `Float` only — probed: `Int` has no `round`, an `int` needs no rounding),
-    `chr`/`ord` (-> `String.from_code`/`.code`), `enumerate` (desugars to an
-    index counter), `reversed` (-> `List.reverse`), `all`/`any` (->
+    `List.sum`/`min`/`max`; `min` and `max` answer an `Optional` that the
+    subset cannot unwrap, so they are not usable yet, #63), `abs` (-> `.abs`),
+    `round` (-> `.round`, `Float` only — probed: `Int` has no `round`, an `int`
+    needs no rounding; halves round away from zero where Python rounds to
+    even, #61),
+    `chr`/`ord` (-> `String.from_code`/`.code`), `enumerate` (refused for now,
+    `PY-OUT-OF-SUBSET`, #60), `reversed` (-> `List.reverse`), `all`/`any` (->
     `List.all?`/`any?`), `map`/`filter` over named functions (->
     `List.map`/`select`).
   - `math`: `sqrt` (-> `Math.sqrt`), `floor`/`ceil` (-> the `Float` methods

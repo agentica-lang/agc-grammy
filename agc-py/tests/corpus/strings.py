@@ -6,7 +6,7 @@ s: str = "  Hello, World  "
 print(s.strip(), len(s), s.upper(), s.lower())
 print(yn(s.strip().startswith("Hello")), yn(s.strip().endswith("x")), yn("World" in s), yn("x" not in s))
 print(s.replace("l", "L"), len(s.strip().split(", ")), len("a,b,c".split(",")))
-print("-".join(["a", "b", "c"]), ", ".join(["x"]), "".join(["p", "q"]))
+print(",".join(["a"] + ["b"]), "-".join(["a", "b", "c"]), ", ".join(["x"]), "".join(["p", "q"]))
 words: list[str] = "the quick brown fox".split(" ")
 print(len(words), words[0], words[3], words[-1])
 text: str = "héllo wörld"

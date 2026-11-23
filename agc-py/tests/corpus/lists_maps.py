@@ -2,6 +2,10 @@ def yn(b: bool) -> str:
     return "yes" if b else "no"
 
 
+def is_big(x: int) -> bool:
+    return x > 4
+
+
 xs: list[int] = [5, 3, 8, 1]
 print(len(xs), xs[0], xs[-1], xs[1:3], xs[:2], xs[2:], xs[1:100], xs[3:1])
 ys: list[int] = xs + [9, 9]
@@ -31,3 +35,19 @@ for w in "a b a c b a".split(" "):
         tally += 1
 print(tally)
 print(yn(all([True, True])), yn(any([False, True])), yn(all([1 < 2, 2 < 3])), yn(any([1 > 2])))
+flags: list[bool] = [True, False]
+if any(flags):
+    print("some")
+if all(flags):
+    print("every")
+else:
+    print("not every")
+if any(map(is_big, xs)) and not all(map(is_big, xs)):
+    print("mixed")
+rest: list[int] = xs
+while all(map(is_big, rest)) or any(flags):
+    print("loop")
+    flags = [False]
+    rest = [1]
+for big in filter(is_big, xs):
+    print("big", big)

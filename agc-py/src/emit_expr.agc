@@ -689,7 +689,7 @@ def eq_answer(equal: Bool, same: Bool) -> String
 end
 
 def emit_order(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
-  return ok("#{recv_code(lcode)}.compare(#{rcode}) #{op} 0") if ltype == "String" and rtype == "String"
+  return ok("#{EmitCtx.recv_code(lcode)}.compare(#{rcode}) #{op} 0") if ltype == "String" and rtype == "String"
 
   if is_num?(ltype) and is_num?(rtype)
     pair = numeric_pair(lcode, ltype, rcode, rtype)
@@ -701,9 +701,9 @@ end
 
 # Mixed `Int` / `Float` meets at `Float`: the `Int` side converts once.
 def numeric_pair(lcode: String, ltype: String, rcode: String, rtype: String) -> List[String]
-  return ["#{recv_code(lcode)}.to_f", rcode] if ltype == "Int" and rtype == "Float"
+  return ["#{EmitCtx.recv_code(lcode)}.to_f", rcode] if ltype == "Int" and rtype == "Float"
 
-  return [lcode, "#{recv_code(rcode)}.to_f"] if ltype == "Float" and rtype == "Int"
+  return [lcode, "#{EmitCtx.recv_code(rcode)}.to_f"] if ltype == "Float" and rtype == "Int"
 
   [lcode, rcode]
 end
@@ -712,10 +712,10 @@ def emit_membership(lcode: String, ltype: String, rcode: String, rtype: String, 
   base = base_of(rtype)
   test: String = ""
   if base == "List" or base == "String"
-    test = "#{recv_code(rcode)}.include?(#{lcode})"
+    test = "#{EmitCtx.recv_code(rcode)}.include?(#{lcode})"
   else
     if base == "Map"
-      test = "#{recv_code(rcode)}.key?(#{lcode})"
+      test = "#{EmitCtx.recv_code(rcode)}.key?(#{lcode})"
     else
       return error("PY-OPERATOR: `in` needs a list, string or map on the right, found #{ltype} and #{rtype}")
     end
@@ -868,7 +868,9 @@ end
 # `/` on two `Int` would truncate in the backend, while Python divides
 # exactly: two ints convert once and divide as floats.
 def fold_slash(lcode: String, ltype: String, rcode: String, rtype: String) -> Result[List[String]]
-  return ok(["#{recv_code(lcode)}.to_f / #{recv_code(rcode)}.to_f", "Float"]) if ltype == "Int" and rtype == "Int"
+  if ltype == "Int" and rtype == "Int"
+    return ok(["#{EmitCtx.recv_code(lcode)}.to_f / #{EmitCtx.recv_code(rcode)}.to_f", "Float"])
+  end
 
   return ok(["#{lcode} / #{rcode}", "Float"]) if ltype == "Float" and rtype == "Float"
 
@@ -1179,7 +1181,7 @@ def emit_pow_base(base: Done, power: Tree.Node, source: String, cx: Cx) -> Resul
     )
   end
 
-  ok(Done(code: "#{recv_code(base.code)}.pow(#{exp.code})", type: "Int", cx: exp.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(base.code)}.pow(#{exp.code})", type: "Int", cx: exp.cx))
 end
 
 def emit_pow_exp(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Done]
@@ -1832,7 +1834,7 @@ def emit_string_index(
     none ->
       raw_bound = try emit_in(cx, bound_node, source)
       bound = try maybe_unwrap(raw_bound)
-      ok(Done(code: "#{recv_code(recv.code)}.at(#{bound.code})", type: "String", cx: bound.cx))
+      ok(Done(code: "#{EmitCtx.recv_code(recv.code)}.at(#{bound.code})", type: "String", cx: bound.cx))
   end
 end
 
@@ -2397,7 +2399,7 @@ def emit_join(recv: Done, args: CallArgs) -> Result[Done]
 
   return error("PY-OPERATOR: `join` takes 1 arg, found #{args.pos.size}") if args.pos.size != 1
 
-  ok(Done(code: "#{List.first(args.pos).code}.join(#{recv.code})", type: "String", cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(List.first(args.pos).code)}.join(#{recv.code})", type: "String", cx: args.cx))
 end
 
 def format_args(args: CallArgs) -> String
@@ -3132,55 +3134,16 @@ def emit_print(args: CallArgs) -> Result[Done]
   ok(Done(code: "puts(\"#{parts.join(" ")}\")", type: "Void", cx: current))
 end
 
-# The receiver of a method call: a code that is more than one atom (an
-# operator, a sign, a range) goes in parentheses, so `len(a + b)` is
-# `(a + b).size` and `abs(-n)` is `(-n).abs`.
-def recv_code(code: String) -> String
-  return code if !compound_code?(code)
-
-  "(#{code})"
-end
-
-def compound_code?(code: String) -> Bool
-  return true if code.start_with?("-") or code.start_with?("+") or code.start_with?("!")
-
-  depth = 0
-  quoted = false
-  index = 0
-  while index < code.length
-    ch = code.slice(index, 1)
-    if quoted
-      if ch == "\\"
-        index += 1
-      elsif ch == "\""
-        quoted = false
-      end
-    elsif ch == "\""
-      quoted = true
-    elsif ch == "(" or ch == "[" or ch == "{"
-      depth += 1
-    elsif ch == ")" or ch == "]" or ch == "}"
-      depth -= 1
-    elsif depth == 0 and (ch == " " or (ch == "." and code.slice(index, code.length - index).start_with?("...")))
-      return true
-    end
-
-    index += 1
-  end
-
-  false
-end
-
 def emit_len(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `len` takes exactly 1 arg") if args.pos.size != 1 or !args.kw.empty?
 
   item = List.first(args.pos)
   base = base_of(item.type)
   if base == "List" or base == "Map" or base == "Range"
-    return ok(Done(code: "#{recv_code(item.code)}.size", type: "Int", cx: args.cx))
+    return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.size", type: "Int", cx: args.cx))
   end
 
-  return ok(Done(code: "#{recv_code(item.code)}.length", type: "Int", cx: args.cx)) if base == "String"
+  return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.length", type: "Int", cx: args.cx)) if base == "String"
 
   if base == "Unknown"
     return error("PY-OPERATOR: `len` has no form for #{item.type} = help: use a list, string, map or range")
@@ -3230,10 +3193,12 @@ def emit_int(args: CallArgs) -> Result[Done]
 
   item = List.first(args.pos)
   if item.type == "String" or item.type == "Float"
-    return ok(Done(code: "#{recv_code(item.code)}.to_i", type: "Result[Int]", cx: args.cx))
+    return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.to_i", type: "Result[Int]", cx: args.cx))
   end
 
-  return ok(Done(code: "#{recv_code(item.code)}.to_i", type: "Result[Int]", cx: args.cx)) if item.type == "Unknown"
+  if item.type == "Unknown"
+    return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.to_i", type: "Result[Int]", cx: args.cx))
+  end
 
   error("PY-TYPE-MISMATCH: `int` converts str or float, found #{item.type}")
 end
@@ -3242,11 +3207,15 @@ def emit_float(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `float` takes exactly 1 arg") if args.pos.size != 1 or !args.kw.empty?
 
   item = List.first(args.pos)
-  return ok(Done(code: "#{recv_code(item.code)}.to_f", type: "Result[Float]", cx: args.cx)) if item.type == "String"
+  if item.type == "String"
+    return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.to_f", type: "Result[Float]", cx: args.cx))
+  end
 
-  return ok(Done(code: "#{recv_code(item.code)}.to_f", type: "Float", cx: args.cx)) if item.type == "Int"
+  return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.to_f", type: "Float", cx: args.cx)) if item.type == "Int"
 
-  return ok(Done(code: "#{recv_code(item.code)}.to_f", type: "Result[Float]", cx: args.cx)) if item.type == "Unknown"
+  if item.type == "Unknown"
+    return ok(Done(code: "#{EmitCtx.recv_code(item.code)}.to_f", type: "Result[Float]", cx: args.cx))
+  end
 
   error("PY-TYPE-MISMATCH: `float` converts str or int, found #{item.type}")
 end
@@ -3306,7 +3275,7 @@ end
 def emit_sorted(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "sorted")
   base = base_of(sole.type)
-  return ok(Done(code: "#{recv_code(sole.code)}.sort", type: sole.type, cx: args.cx)) if base == "Unknown"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.sort", type: sole.type, cx: args.cx)) if base == "Unknown"
 
   return error("PY-TYPE-MISMATCH: `sorted` needs a list, found #{sole.type}") if base != "List"
 
@@ -3317,13 +3286,13 @@ def emit_sorted(args: CallArgs) -> Result[Done]
     end
   end
 
-  ok(Done(code: "#{recv_code(sole.code)}.sort", type: sole.type, cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.sort", type: sole.type, cx: args.cx))
 end
 
 def emit_sum_call(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "sum")
   base = base_of(sole.type)
-  return ok(Done(code: "#{recv_code(sole.code)}.sum", type: "Unknown", cx: args.cx)) if base == "Unknown"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.sum", type: "Unknown", cx: args.cx)) if base == "Unknown"
 
   return error("PY-TYPE-MISMATCH: `sum` needs a list, found #{sole.type}") if base != "List"
 
@@ -3332,13 +3301,13 @@ def emit_sum_call(args: CallArgs) -> Result[Done]
     return error("PY-TYPE-MISMATCH: `sum` needs numeric elements, found #{elem}") if elem != "Int" and elem != "Float"
   end
 
-  ok(Done(code: "#{recv_code(sole.code)}.sum", type: elem_of(sole.type), cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.sum", type: elem_of(sole.type), cx: args.cx))
 end
 
 def emit_min_max(args: CallArgs, op: String) -> Result[Done]
   sole = try sole_arg(args, op)
   base = base_of(sole.type)
-  return ok(Done(code: "#{recv_code(sole.code)}.#{op}", type: "Optional", cx: args.cx)) if base == "Unknown"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.#{op}", type: "Optional", cx: args.cx)) if base == "Unknown"
 
   return error("PY-TYPE-MISMATCH: `#{op}` needs a list, found #{sole.type}") if base != "List"
 
@@ -3348,16 +3317,16 @@ def emit_min_max(args: CallArgs, op: String) -> Result[Done]
     type = "Optional[#{elem}]"
   end
 
-  ok(Done(code: "#{recv_code(sole.code)}.#{op}", type: type, cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.#{op}", type: type, cx: args.cx))
 end
 
 def emit_abs(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "abs")
   if sole.type == "Int" or sole.type == "Float"
-    return ok(Done(code: "#{recv_code(sole.code)}.abs", type: sole.type, cx: args.cx))
+    return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.abs", type: sole.type, cx: args.cx))
   end
 
-  return ok(Done(code: "#{recv_code(sole.code)}.abs", type: "Unknown", cx: args.cx)) if sole.type == "Unknown"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.abs", type: "Unknown", cx: args.cx)) if sole.type == "Unknown"
 
   error("PY-TYPE-MISMATCH: `abs` needs a number, found #{sole.type}")
 end
@@ -3365,7 +3334,7 @@ end
 # `round` is `Float`-only: `Int` has no `round`, an int needs no rounding.
 def emit_round(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "round")
-  return ok(Done(code: "#{recv_code(sole.code)}.round", type: "Int", cx: args.cx)) if sole.type == "Float"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.round", type: "Int", cx: args.cx)) if sole.type == "Float"
 
   return error("PY-OPERATOR: `round` takes a Float; an int needs no rounding") if sole.type == "Int"
 
@@ -3387,7 +3356,7 @@ def emit_ord(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "ord")
   return emit_conv_mismatch("ord", "str", sole.type) if sole.type != "String"
 
-  ok(Done(code: "#{recv_code(sole.code)}.code", type: "Int", cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.code", type: "Int", cx: args.cx))
 end
 
 def emit_conv_mismatch(name: String, want: String, found: String) -> Result[Done]
@@ -3399,11 +3368,11 @@ end
 def emit_reversed(args: CallArgs) -> Result[Done]
   sole = try sole_arg(args, "reversed")
   base = base_of(sole.type)
-  return ok(Done(code: "#{recv_code(sole.code)}.reverse", type: sole.type, cx: args.cx)) if base == "Unknown"
+  return ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.reverse", type: sole.type, cx: args.cx)) if base == "Unknown"
 
   return error("PY-TYPE-MISMATCH: `reversed` needs a list, found #{sole.type}") if base != "List"
 
-  ok(Done(code: "#{recv_code(sole.code)}.reverse", type: sole.type, cx: args.cx))
+  ok(Done(code: "#{EmitCtx.recv_code(sole.code)}.reverse", type: sole.type, cx: args.cx))
 end
 
 def emit_all_any(args: CallArgs, name: String, target: String) -> Result[Done]
@@ -3412,7 +3381,9 @@ def emit_all_any(args: CallArgs, name: String, target: String) -> Result[Done]
   if base == "Unknown"
     temp = "py_x#{args.cx.next_temp}"
     current = args.cx.with(next_temp: args.cx.next_temp + 1)
-    return ok(Done(code: "#{recv_code(sole.code)}.#{target} { |#{temp}| #{temp} }", type: "Bool", cx: current))
+    return ok(
+      Done(code: "(#{EmitCtx.recv_code(sole.code)}.#{target} { |#{temp}| #{temp} })", type: "Bool", cx: current),
+    )
   end
 
   return error("PY-TYPE-MISMATCH: `#{name}` needs a list, found #{sole.type}") if base != "List"
@@ -3424,11 +3395,13 @@ def emit_all_any(args: CallArgs, name: String, target: String) -> Result[Done]
 
   temp = "py_x#{args.cx.next_temp}"
   current = args.cx.with(next_temp: args.cx.next_temp + 1)
-  ok(Done(code: "#{recv_code(sole.code)}.#{target} { |#{temp}| #{temp} }", type: "Bool", cx: current))
+  ok(Done(code: "(#{EmitCtx.recv_code(sole.code)}.#{target} { |#{temp}| #{temp} })", type: "Bool", cx: current))
 end
 
 # `map` / `filter` take a named function and lower through a block, since
-# functions are not values: `map(f, xs)` is `xs.map { |t| f(t) }`.
+# functions are not values: `map(f, xs)` is `(xs.map { |t| f(t) })`, in
+# parentheses so that a condition or a `for` header does not read the `{`
+# as its body.
 def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Done]
   return error("PY-OPERATOR: `#{target}` takes a function and a list") if args.pos.size != 2 or !args.kw.empty?
 
@@ -3479,7 +3452,13 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
         method = "filter"
       end
 
-      ok(Done(code: "#{recv_code(xs.code)}.#{method} { |#{temp}| #{name}(#{temp}) }", type: "List", cx: current))
+      ok(
+        Done(
+          code: "(#{EmitCtx.recv_code(xs.code)}.#{method} { |#{temp}| #{name}(#{temp}) })",
+          type: "List",
+          cx: current,
+        ),
+      )
     none -> error("PY-OPERATOR: `#{target}` takes a named function, found `#{func.code}`")
   end
 end

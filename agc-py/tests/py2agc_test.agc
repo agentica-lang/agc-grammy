@@ -212,7 +212,7 @@ def main() -> Void
         error(e) -> Test.assert(false, "expected a program, got #{e.message}")
         ok(text) ->
           try Test.assert(text.include?("def f(greet: Int) -> Int"), text)
-          try Test.assert(text.include?("xs.map { |py_x0| inc(py_x0) }"), text)
+          try Test.assert(text.include?("(xs.map { |py_x0| inc(py_x0) })"), text)
           ran = try check_and_run(text, "/tmp/agc_py2agc_def_value.agc")
           try Test.assert(ran.include?("1"), ran)
           Test.assert(ran.include?("5"), ran)

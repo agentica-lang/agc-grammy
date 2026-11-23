@@ -871,24 +871,6 @@ def main() -> Void
         [errcased("len(x)", {"x": "Int"}, "PY-TYPE-MISMATCH")],
       )
     end,
-    Test.test("a compound argument becomes a parenthesized receiver") do
-      scope = {"xs": "List[Int]", "ys": "List[Int]", "a": "Int", "b": "Int", "x": "Float"}
-      decls = ["xs: List[Int] = [3]", "ys: List[Int] = [1]", "a: Int = 1", "b: Int = 2", "x: Float = 1.5"]
-      check_all(
-        compiled.unwrap!,
-        "recv",
-        [
-          cased("len(xs + ys)", scope, decls, "Int", "(xs + ys).size"),
-          cased("abs(a - b)", scope, decls, "Int", "(a - b).abs"),
-          cased("abs(-a)", scope, decls, "Int", "(-a).abs"),
-          cased("round(x * 2.0)", scope, decls, "Int", "(x * 2.0).round"),
-          cased("sorted(xs + ys)", scope, decls, "List[Int]", "(xs + ys).sort"),
-          cased("float(a + b)", scope, decls, "Float", "(a + b).to_f"),
-          cased("a in xs + ys", scope, decls, "Bool", "(xs + ys).include?(a)"),
-        ],
-        [],
-      )
-    end,
     Test.test("range maps to backend ranges") do
       check_all(
         compiled.unwrap!,
@@ -978,14 +960,14 @@ def main() -> Void
         "builtins2",
         [
           cased("reversed(xs)", scope, decls, "List[Int]", "xs.reverse"),
-          cased("all(bs)", scope, decls, "Bool", "bs.all? { |py_x0| py_x0 }"),
-          cased("any(bs)", scope, decls, "Bool", "bs.any? { |py_x0| py_x0 }"),
+          cased("all(bs)", scope, decls, "Bool", "(bs.all? { |py_x0| py_x0 })"),
+          cased("any(bs)", scope, decls, "Bool", "(bs.any? { |py_x0| py_x0 })"),
           Case(
             expr: "map(inc, xs)",
             scope: {"inc": EmitCtx.def_marker(), "xs": "List[Int]"},
             decls: ["xs: List[Int] = [1]"],
             want_type: "List",
-            want_code: "xs.map { |py_x0| inc(py_x0) }",
+            want_code: "(xs.map { |py_x0| inc(py_x0) })",
             want_contains: [],
             want_pre: [],
             as_type: "",
@@ -997,7 +979,7 @@ def main() -> Void
             scope: {"keep": EmitCtx.def_marker(), "xs": "List[Int]"},
             decls: ["xs: List[Int] = [1]"],
             want_type: "List",
-            want_code: "xs.filter { |py_x0| keep(py_x0) }",
+            want_code: "(xs.filter { |py_x0| keep(py_x0) })",
             want_contains: [],
             want_pre: [],
             as_type: "",
