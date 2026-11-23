@@ -104,12 +104,16 @@ end
 ## Resolves the module graph rooted at `file`: its own folder first, then
 ## `search_path` in order, then the supported standard library. Answers the
 ## graph, or every refusal rendered in source order (`file:line:col
-## error[PY-*]`, one block per problem, separated by blank lines). A root
-## file that cannot be read is a plain `error`; a refusal inside an imported
-## module is reported with that module's own file and source.
+## error[PY-*]`, one block per problem, separated by blank lines). The
+## `error` is that text and nothing else: spans live only inside it, so a
+## caller prints it and cannot inspect a refusal. That stays the contract
+## until issue #26 has a consumer that needs the diagnostics as data. A
+## refusal inside an imported module is reported with that module's own file
+## and source; a parse failure the engine words without a position and a file
+## that cannot be read start with the path of the file at fault.
 def resolve(grammar: Grammar.Grammar, file: String, search_path: List[String]) -> Result[ModuleGraph]
   name = module_stem(file)
-  source = try File.read_text(file)
+  source = try read_source(file)
   if !valid_name?(name)
     return error(
       Frontend.render(
@@ -174,7 +178,7 @@ def load(loader: Loader, grammar: Grammar.Grammar, frame: Frame, folder: String,
 
   pushed = loader.with(frames: loader.frames.push(frame))
   case Frontend.program(grammar, frame.path, frame.source)
-    error(e) -> finish(pushed, none, e.message)
+    error(e) -> finish(pushed, none, with_file(frame.path, e.message))
     ok(program) ->
       run = load_imports(pushed, grammar, imports_of(program), folder, search_path)
       module = Module(name: frame.name, path: frame.path, program: program, imports: run.edges)
@@ -250,7 +254,7 @@ def open_local(
   search_path: List[String],
 ) -> Loader
   case File.read_text(path)
-    error(e) -> add_refusal(loader, unreadable_module_diag(module_path, name, path, e.message))
+    error(e) -> add_refusal(loader, unreadable_module_diag(module_path, name, path, first_line(e.message)))
     ok(source) ->
       load(loader, grammar, Frame(name: name, path: path, source: source, entering: some(decl)), folder, search_path)
   end
@@ -331,6 +335,24 @@ def locate(name: String, folder: String, search_path: List[String]) -> Found
   Found.Miss
 end
 
+# The entry file's text; a failed read names the file and keeps one line.
+def read_source(file: String) -> Result[String]
+  case File.read_text(file)
+    error(e) -> error("cannot read `#{file}`: #{first_line(e.message)}")
+    ok(source) -> ok(source)
+  end
+end
+
+def first_line(reason: String) -> String = List.first(reason.split("\n"))
+
+# A frontend failure is either a rendered diagnostic, which already starts
+# with `file:`, or a bare engine message with no position, which does not.
+def with_file(file: String, text: String) -> String
+  return text if text.start_with?(file + ":")
+
+  "#{file}: #{text}"
+end
+
 def file_exists?(path: String) -> Bool
   case File.stat(path)
     ok(info) -> info.kind == "file"
@@ -405,10 +427,16 @@ def add_in(loader: Loader, file: String, source: String, diagnostic: Frontend.Di
 end
 
 def unknown_module_diag(path: Frontend.ModulePath) -> Frontend.Diagnostic
+  help = "add `#{path.text}.py` to the entry folder or a search path, or check the name"
+  if path.text.include?(".")
+    dotted = STDLIB_MODULES.to_a.filter { |module| module.include?(".") }
+    help = "a dotted module path must be a supported standard-library module: #{dotted.join(", ")}"
+  end
+
   Frontend.Diagnostic(
     code: "PY-IMPORT-UNKNOWN",
     message: "unknown module `#{path.text}`",
-    help: some("add `#{path.text}.py` to the entry folder or a search path, or check the name"),
+    help: some(help),
     start: path.span.start,
     stop: path.span.stop,
   )

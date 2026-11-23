@@ -8,10 +8,11 @@
 ## emitted program's standard output must match it. The rest check the
 ## emitter seam, where a fragment costs a parse instead of a translation.
 ##
-## The mix keeps the file inside the shared step budget: a `translate` costs
-## over two million steps and loading the grammar 1.8 million, while one
-## expression parse costs half a million, and the file's budget is one
-## million per test.
+## `agentica test` shares one million steps per test (plus one) over the
+## file's tests. Loading the grammar costs about 1.8 million of them, one
+## small `translate` about 1.2 million and one expression parse about 0.4
+## million, so the file translates in three tests and keeps the rest to one
+## fragment each.
 
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
@@ -194,6 +195,17 @@ def main() -> Void
         error(e) ->
           try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
           Test.assert(e.message.include?("f-string hole"), e.message)
+        ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
+      end
+    end,
+    # A comparison has no backend form on a `Result`, so outside `try` it
+    # refuses at the link instead of folding to the constant `false`.
+    Test.test("an uncaught comparison operand refuses outside try") do
+      case emit_expr(compiled.unwrap!, "int(s) == 5", false)
+        error(e) ->
+          try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
+          try Test.assert(e.message.include?("`==` with a Result operand"), e.message)
+          Test.assert(e.message.include?("inside `try`/`except`"), e.message)
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,

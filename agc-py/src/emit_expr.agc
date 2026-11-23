@@ -194,9 +194,6 @@ def helpers() -> String
   )
 end
 
-## Whether `found` is a `Result[T]` spelling.
-def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
-
 ## The `T` of `Result[T]`, or none when `found` is not a `Result`.
 def result_inner(found: String) -> Optional[String]
   return none if !is_result?(found)
@@ -295,6 +292,9 @@ struct Bound
   cx: Cx
   own: Map[String, String]
 end
+
+# Whether `found` is a `Result[T]` spelling.
+def is_result?(found: String) -> Bool = found.start_with?("Result[") and found.end_with?("]")
 
 # Unwraps a directly `Result[T]`-typed child inline as `(try <code>)` when
 # inside an outlined `try` body. `try` binds like unary `not` and takes a
@@ -515,7 +515,7 @@ end
 def emit_link(lcode: String, ltype: String, rcode: String, rtype: String, op: String) -> Result[String]
   if is_result?(ltype) or is_result?(rtype)
     return error(
-      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: bind the Result first, for example `v = f()`",
+      "PY-TYPE-MISMATCH: `#{op}` with a Result operand, found #{ltype} and #{rtype} = help: only a try body unwraps it, so move the comparison inside `try`/`except`",
     )
   end
 

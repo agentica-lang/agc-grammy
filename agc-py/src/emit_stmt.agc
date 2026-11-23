@@ -33,7 +33,8 @@
 ## exiting (the raise seam in `EmitChecks` accepts only that shape).
 ## Catchable `Result` semantics inside a `try` body flow through
 ## `EmitExpr` plus lane A `try` unwrapping (`try v` unwraps inside the
-## helper; directly consumed `Result` values unwrap, nested ones refuse);
+## helper; a `Result` value unwraps wherever an expression fits, nested
+## operands included, and outside `try` it refuses);
 ## halts stay uncatchable.
 ##
 ## Every failure is a `BlockRes.No` refusal with its span; unsupported

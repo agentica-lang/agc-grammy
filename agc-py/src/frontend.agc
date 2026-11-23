@@ -279,25 +279,6 @@ def from_import_name(node: Tree.Node, source: String) -> Result[ImportName]
   ok(import_binding(node, source, some(member), member, span_of(member_node)))
 end
 
-# The alias when written, else the fallback (the member or the path head).
-def import_binding(
-  node: Tree.Node,
-  source: String,
-  member: Optional[String],
-  fallback: String,
-  fallback_span: Span,
-) -> ImportName
-  case Tree.first_child(node, "import_alias")
-    some(alias) ->
-      case Tree.first_child(alias, "name")
-        some(bound) -> ImportName(member: member, bound: Tree.text(bound, source), span: span_of(bound))
-        none -> ImportName(member: member, bound: fallback, span: fallback_span)
-      end
-
-    none -> ImportName(member: member, bound: fallback, span: fallback_span)
-  end
-end
-
 ## Checks every scope in `program`: `def` names are pre-bound up front (so
 ## mutual recursion resolves), top-level items are then checked strictly in
 ## order with each `def` name joining the module scope at its own position
@@ -423,10 +404,6 @@ def decl_span(decl: ImportDecl) -> Span
     ImportDecl.FromImport(_, _, span) -> span
   end
 end
-
-# An imported name is declared at the occurrence that binds it (the alias
-# when written, else the member or path head).
-def import_occ(name: ImportName) -> NameOcc = NameOcc(name: name.bound, span: name.span, kind: "declare")
 
 # The module scope visible at a `def` at `at`: every `def` name plus the
 # top-level bindings (`declare`, `assign` and silent `reuse` targets) whose
@@ -577,6 +554,29 @@ struct ScopeState
   scope: Set[String]
   diags: List[Diagnostic]
 end
+
+# The alias when written, else the fallback (the member or the path head).
+def import_binding(
+  node: Tree.Node,
+  source: String,
+  member: Optional[String],
+  fallback: String,
+  fallback_span: Span,
+) -> ImportName
+  case Tree.first_child(node, "import_alias")
+    some(alias) ->
+      case Tree.first_child(alias, "name")
+        some(bound) -> ImportName(member: member, bound: Tree.text(bound, source), span: span_of(bound))
+        none -> ImportName(member: member, bound: fallback, span: fallback_span)
+      end
+
+    none -> ImportName(member: member, bound: fallback, span: fallback_span)
+  end
+end
+
+# An imported name is declared at the occurrence that binds it (the alias
+# when written, else the member or path head).
+def import_occ(name: ImportName) -> NameOcc = NameOcc(name: name.bound, span: name.span, kind: "declare")
 
 # Parses, mapping an untyped `def` header to its rendered diagnostic,
 # then a stepped or literal-negative slice to `PY-SLICE`.
