@@ -1,4 +1,5 @@
 AGENTICA ?= agentica
+export AGENTICA
 
 .PHONY: check fmt fmt-check lint test ci example
 

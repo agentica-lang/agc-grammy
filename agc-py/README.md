@@ -27,11 +27,12 @@ prints its diagnostics to standard error and exits 1; a bad command line
 exits 2. The command translates one file: local imports wait for issue #26,
 and so does an import search path (`-I`), since nothing reads one yet.
 
-`--agcb` needs `-o`. It runs `agentica compile` (from `PATH`) on the emitted
+`--agcb` needs `-o`. It runs `agentica compile` (`$AGENTICA`, else `agentica` from `PATH`) on the emitted
 program inside a private folder beside the output, and a compile failure prints
 that diagnostic (the program is named after the input, `prog.py` is `prog.agc`)
 and exits 1. The bytecode records the program's name, so the same input name
-and text give the same bytes wherever the output goes.
+and text give the same bytes wherever the output goes. A kill (SIGKILL, SIGINT)
+can leave `OUT.PID.tmp` behind; the command does not handle signals.
 
 ## Layout
 
