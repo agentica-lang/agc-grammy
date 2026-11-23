@@ -67,7 +67,7 @@ def emit_with(
   sigs: Map[String, EmitCtx.Sig],
   in_try: Bool,
 ) -> Result[Out]
-  emit_top(node, source, scope, sigs, in_try, -1)
+  emit_top(node, source, scope, sigs, in_try, -1, -1)
 end
 
 ## `emit_with` for an expression statement: a value that has no use in a
@@ -79,11 +79,11 @@ def emit_stmt_expr(
   sigs: Map[String, EmitCtx.Sig],
   in_try: Bool,
 ) -> Result[Out]
-  emit_top(node, source, scope, sigs, in_try, node.start)
+  emit_top(node, source, scope, sigs, in_try, node.start, node.stop)
 end
 
-# The shared body: `stmt_start` is where the statement's expression starts
-# (`-1` when the expression is a value).
+# The shared body: `stmt_start` and `stmt_stop` are the span of the
+# statement's expression (`-1` when the expression is a value).
 def emit_top(
   node: Tree.Node,
   source: String,
@@ -91,6 +91,7 @@ def emit_top(
   sigs: Map[String, EmitCtx.Sig],
   in_try: Bool,
   stmt_start: Int,
+  stmt_stop: Int,
 ) -> Result[Out]
   bare = bare_builtin_name(node, source)
   case bare
@@ -99,7 +100,17 @@ def emit_top(
     none -> bare = bare
   end
 
-  cx = Cx(scope: scope, next_temp: 0, pre: [], sigs: sigs, substs: {}, in_try: in_try, stmt_start: stmt_start)
+  cx = Cx(
+    scope: scope,
+    next_temp: 0,
+    pre: [],
+    sigs: sigs,
+    substs: {},
+    in_try: in_try,
+    stmt_start: stmt_start,
+    stmt_stop: stmt_stop,
+  )
+
   done = try emit_in(cx, node, source)
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
 end
@@ -293,6 +304,7 @@ struct Cx
   substs: Map[String, String]
   in_try: Bool = false
   stmt_start: Int = -1
+  stmt_stop: Int = -1
 end
 
 # An emitted expression still carrying its state.
@@ -607,6 +619,14 @@ def emit_eq(lcode: String, ltype: String, rcode: String, rtype: String, equal: B
   end
 
   return ok(eq_answer(equal, false)) if comparable_fold?(ltype, rtype)
+
+  if base_of(ltype) == "Optional" and ltype == "Optional[#{rtype}]"
+    return ok("#{lcode} #{eq_op(equal)} some(#{rcode})")
+  end
+
+  if base_of(rtype) == "Optional" and rtype == "Optional[#{ltype}]"
+    return ok("some(#{lcode}) #{eq_op(equal)} #{rcode}")
+  end
 
   ok("#{lcode} #{eq_op(equal)} #{rcode}")
 end
@@ -1031,7 +1051,7 @@ def emit_open_use(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Done
         "PY-OUT-OF-SUBSET: `open` supports mode \"r\" with `.read()`, \"w\" and \"a\" with `.write(text)` = help: other modes and methods have no form",
       )
     some(found) ->
-      if found != "read_text" and List.first(nodes).start != cx.stmt_start
+      if found != "read_text" and (List.first(nodes).start != cx.stmt_start or nodes[2].stop != cx.stmt_stop)
         return error(
           "PY-OUT-OF-SUBSET: the result of `write` (a character count in CPython) has no form = help: use `write` as a statement",
         )
@@ -1574,6 +1594,7 @@ def emit_f_string(
     end
 
     hole_done = try maybe_unwrap(raw_hole)
+    try refuse_optional_text(hole_done.type, "an f-string hole")
     current = hole_done.cx
     quoted = hole_done.code.include?("\"")
     quoted_temp = "py_t#{current.next_temp}"
@@ -3098,6 +3119,7 @@ def emit_print(args: CallArgs) -> Result[Done]
       )
     end
 
+    try refuse_optional_text(arg.type, "print")
     if arg.code.include?("\"")
       temp = "py_t#{current.next_temp}"
       current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{arg.code}"))
@@ -3190,6 +3212,17 @@ def emit_float(args: CallArgs) -> Result[Done]
   error("PY-TYPE-MISMATCH: `float` converts str or int, found #{item.type}")
 end
 
+# An `Optional` interpolates as `some(...)`/`none`, never as Python's text.
+def refuse_optional_text(found: String, what: String) -> Result[Void]
+  if base_of(found) == "Optional"
+    return error(
+      "PY-TYPE-MISMATCH: #{what} holds an #{found}, which has no text form like Python's = help: test it with `is None` first",
+    )
+  end
+
+  ok()
+end
+
 def emit_str(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `str` takes no keyword args") if !args.kw.empty?
 
@@ -3206,6 +3239,7 @@ def emit_str(args: CallArgs) -> Result[Done]
     )
   end
 
+  try refuse_optional_text(item.type, "str")
   if item.code.include?("\"")
     temp = "py_t#{args.cx.next_temp}"
     current = args.cx.with(next_temp: args.cx.next_temp + 1, pre: args.cx.pre.push("#{temp} = #{item.code}"))

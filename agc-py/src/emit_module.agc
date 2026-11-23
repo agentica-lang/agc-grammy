@@ -1108,6 +1108,8 @@ def generated_name?(name: String) -> Bool
 
   return true if name == "py_slice_list" or name == "py_slice_str"
 
+  return true if name == "py_getenv" or name == "py_read_text"
+
   counted?("py_t", name) or counted?("py_x", name) or counted?("py_try_body", name) or counted?("py_try_err", name)
 end
 
