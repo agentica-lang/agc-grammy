@@ -1,7 +1,11 @@
 ## The `agc-py` command line, run as a child process from the repo root:
-## standard output, `-o`, failures that leave no output, and exit codes.
+## standard output, `-o`, failures that leave no output, and exit codes. Each
+## test works in a folder of its own that it creates and removes.
 
 GOOD = "def add(x: int, y: int) -> int:\n    return x + y\nprint(add(1, 2))\n"
+# The frontend does not check the range of an int literal yet, so only
+# `agentica compile` refuses this one (CHECK-INT-RANGE). When the translator
+# learns to refuse it, pick another program that the frontend lets through.
 HUGE = "x: int = 99999999999999999999999\nprint(x)\n"
 BAD = "def f(x) -> int:\n    return x\n"
 
@@ -11,99 +15,137 @@ struct Ran
   stderr: String
 end
 
-def cli(args: List[String]) -> Result[Ran]
-  proc = try Process.spawn_captured("agentica", ["agc-py/src/main.agc"] + args)
-  out = try Process.output(proc, 60000)
-  code = try Process.wait(proc, 60000)
-  ok(Ran(code: code, stdout: out.stdout, stderr: out.stderr))
-end
-
-def run_bytecode(path: String) -> Result[Ran]
-  proc = try Process.spawn_captured("agentica", ["run", "--", path])
-  out = try Process.output(proc, 60000)
-  code = try Process.wait(proc, 60000)
-  ok(Ran(code: code, stdout: out.stdout, stderr: out.stderr))
-end
-
-def exists?(path: String) -> Bool
-  case File.stat(path)
-    ok(_) -> true
-    error(_) -> false
+# The binary under test: `$AGENTICA` (the Makefile sets it) or `agentica`.
+def agentica() -> String
+  case System.env("AGENTICA")
+    ok(path) if !path.empty?() -> path
+    _ -> "agentica"
   end
+end
+
+def capture(command: String, args: List[String], folder: String = ".") -> Result[Ran]
+  proc = try Process.spawn_captured(command, args, Process.Options(chdir: folder))
+  out = try Process.output(proc, 60000)
+  code = try Process.wait(proc, 60000)
+  ok(Ran(code: code, stdout: out.stdout, stderr: out.stderr))
+end
+
+def run_bytecode(path: String) -> Result[Ran] = capture(agentica(), ["run", "--", path])
+
+def cli(args: List[String]) -> Result[Ran] = capture(agentica(), ["agc-py/src/main.agc"] + args)
+
+# Runs `body` in a fresh folder of this test and removes it afterwards, whatever
+# the body answers.
+def in_folder(n: Int, body: Fn[String, Result[Void]]) -> Result[Void]
+  folder = "/tmp/agc_cli_#{System.pid()}_#{n}"
+  try Path.remove(folder)
+  try Dir.mkdir(folder)
+  result = body.call(folder)
+  _ = Path.remove(folder)
+  result
 end
 
 def main() -> Void
   Test.run([
     Test.test("without -o the program goes to standard output") do
-      try File.write_text("/tmp/agc_cli_good.py", GOOD)
-      ran = try cli(["/tmp/agc_cli_good.py"])
-      try Test.eq(ran.code, 0)
-      Test.assert(ran.stdout.include?("def add(x: Int, y: Int) -> Int"), ran.stdout)
+      in_folder(1) do |dir|
+        try File.write_text("#{dir}/good.py", GOOD)
+        ran = try cli(["#{dir}/good.py"])
+        try Test.eq(ran.code, 0)
+        Test.assert(ran.stdout.include?("def add(x: Int, y: Int) -> Int"), ran.stdout)
+      end
     end,
     Test.test("-o writes the same text and leaves no temporary file") do
-      try Path.remove("/tmp/agc_cli_out.agc")
-      try File.write_text("/tmp/agc_cli_good.py", GOOD)
-      printed = try cli(["/tmp/agc_cli_good.py"])
-      ran = try cli(["/tmp/agc_cli_good.py", "-o", "/tmp/agc_cli_out.agc"])
-      try Test.eq(ran.code, 0)
-      try Test.eq(ran.stdout, "")
-      try Test.eq(try File.read_text("/tmp/agc_cli_out.agc"), printed.stdout)
-      Test.assert(!exists?("/tmp/agc_cli_out.agc.tmp"), "temporary file left behind")
+      in_folder(2) do |dir|
+        try File.write_text("#{dir}/good.py", GOOD)
+        printed = try cli(["#{dir}/good.py"])
+        ran = try cli(["#{dir}/good.py", "-o", "#{dir}/out.agc"])
+        try Test.eq(ran.code, 0)
+        try Test.eq(ran.stdout, "")
+        try Test.eq(try File.read_text("#{dir}/out.agc"), printed.stdout)
+        Test.eq(try Dir.list(dir), ["good.py", "out.agc"])
+      end
     end,
     Test.test("a refusal prints its diagnostic and writes no output") do
-      try Path.remove("/tmp/agc_cli_new.agc")
-      try File.write_text("/tmp/agc_cli_old.agc", "kept\n")
-      try File.write_text("/tmp/agc_cli_bad.py", BAD)
-      fresh = try cli(["/tmp/agc_cli_bad.py", "-o", "/tmp/agc_cli_new.agc"])
-      try Test.eq(fresh.code, 1)
-      try Test.assert(fresh.stderr.include?("error[PY-UNTYPED-DEF]"), fresh.stderr)
-      try Test.assert(!exists?("/tmp/agc_cli_new.agc"), "output created by a failure")
-      try Test.assert(!exists?("/tmp/agc_cli_new.agc.tmp"), "temporary file left behind")
-      old = try cli(["/tmp/agc_cli_bad.py", "-o", "/tmp/agc_cli_old.agc"])
-      try Test.eq(old.code, 1)
-      Test.eq(try File.read_text("/tmp/agc_cli_old.agc"), "kept\n")
+      in_folder(3) do |dir|
+        try File.write_text("#{dir}/old.agc", "kept\n")
+        try File.write_text("#{dir}/bad.py", BAD)
+        fresh = try cli(["#{dir}/bad.py", "-o", "#{dir}/new.agc"])
+        try Test.eq(fresh.code, 1)
+        try Test.assert(fresh.stderr.include?("error[PY-UNTYPED-DEF]"), fresh.stderr)
+        old = try cli(["#{dir}/bad.py", "-o", "#{dir}/old.agc"])
+        try Test.eq(old.code, 1)
+        try Test.eq(try File.read_text("#{dir}/old.agc"), "kept\n")
+        Test.eq(try Dir.list(dir), ["bad.py", "old.agc"])
+      end
+    end,
+    Test.test("the output may not be the input file") do
+      in_folder(4) do |dir|
+        try File.write_text("#{dir}/good.py", GOOD)
+        ran = try cli(["#{dir}/good.py", "-o", "#{dir}/./good.py"])
+        try Test.eq(ran.code, 1)
+        try Test.assert(ran.stderr.include?("is the input file"), ran.stderr)
+        Test.eq(try File.read_text("#{dir}/good.py"), GOOD)
+      end
+    end,
+    Test.test("it runs from any folder, by an absolute path or a bare file name") do
+      in_folder(5) do |dir|
+        try File.write_text("#{dir}/good.py", GOOD)
+        main = try Path.resolve("agc-py/src/main.agc")
+        ran = try capture(agentica(), [main, "good.py", "-o", "out.agc"], dir)
+        try Test.eq(ran.code, 0)
+        try Test.eq(try Dir.list(dir), ["good.py", "out.agc"])
+        bare = try capture(agentica(), ["main.agc", "#{dir}/good.py", "-o", "#{dir}/bare.agc"], "agc-py/src")
+        try Test.eq(bare.code, 0)
+        Test.eq(try File.read_text("#{dir}/bare.agc"), try File.read_text("#{dir}/out.agc"))
+      end
     end,
     Test.test("--agcb compiles to bytecode that runs, and the same input gives the same bytes anywhere") do
-      try Path.remove("/tmp/agc_cli_b1")
-      try Path.remove("/tmp/agc_cli_b2")
-      try Dir.mkdir("/tmp/agc_cli_b1")
-      try Dir.mkdir("/tmp/agc_cli_b2")
-      try File.write_text("/tmp/agc_cli_good.py", GOOD)
-      first = try cli(["/tmp/agc_cli_good.py", "--agcb", "-o", "/tmp/agc_cli_b1/first.agcb"])
-      second = try cli(["/tmp/agc_cli_good.py", "--agcb", "-o", "/tmp/agc_cli_b2/other.agcb"])
-      try Test.eq(first.code, 0)
-      try Test.eq(second.code, 0)
-      try Test.eq(try File.sha256("/tmp/agc_cli_b1/first.agcb"), try File.sha256("/tmp/agc_cli_b2/other.agcb"))
-      try Test.eq(try Dir.list("/tmp/agc_cli_b1"), ["first.agcb"])
-      ran = try run_bytecode("/tmp/agc_cli_b1/first.agcb")
-      try Test.eq(ran.code, 0)
-      Test.eq(ran.stdout, "3\n")
+      in_folder(7) do |dir|
+        try Dir.mkdir("#{dir}/a")
+        try Dir.mkdir("#{dir}/b")
+        try File.write_text("#{dir}/good.py", GOOD)
+        first = try cli(["#{dir}/good.py", "--agcb", "-o", "#{dir}/a/first.agcb"])
+        second = try cli(["#{dir}/good.py", "--agcb", "-o", "#{dir}/b/other.agcb"])
+        try Test.eq(first.code, 0)
+        try Test.eq(second.code, 0)
+        try Test.eq(try File.sha256("#{dir}/a/first.agcb"), try File.sha256("#{dir}/b/other.agcb"))
+        try Test.eq(try Dir.list("#{dir}/a"), ["first.agcb"])
+        ran = try run_bytecode("#{dir}/a/first.agcb")
+        try Test.eq(ran.code, 0)
+        Test.eq(ran.stdout, "3\n")
+      end
     end,
     Test.test("a compile failure shows the diagnostic, exits 1 and leaves nothing behind") do
-      try Path.remove("/tmp/agc_cli_b3")
-      try Dir.mkdir("/tmp/agc_cli_b3")
-      try File.write_text("/tmp/agc_cli_huge.py", HUGE)
-      ran = try cli(["/tmp/agc_cli_huge.py", "--agcb", "-o", "/tmp/agc_cli_b3/huge.agcb"])
-      try Test.eq(ran.code, 1)
-      try Test.assert(ran.stderr.include?("error[CHECK-INT-RANGE]"), ran.stderr)
-      try Test.assert(ran.stderr.include?("huge.agc:"), ran.stderr)
-      Test.eq(try Dir.list("/tmp/agc_cli_b3"), [])
+      in_folder(8) do |dir|
+        try File.write_text("#{dir}/huge.py", HUGE)
+        ran = try cli(["#{dir}/huge.py", "--agcb", "-o", "#{dir}/huge.agcb"])
+        try Test.eq(ran.code, 1)
+        try Test.assert(ran.stderr.include?("error[CHECK-INT-RANGE]"), ran.stderr)
+        try Test.assert(ran.stderr.include?("huge.agc:"), ran.stderr)
+        try Test.assert(ran.stderr.include?("run without --agcb"), ran.stderr)
+        Test.eq(try Dir.list(dir), ["huge.py"])
+      end
     end,
     Test.test("a refusal before compiling writes nothing, and --agcb without -o exits 2") do
-      try File.write_text("/tmp/agc_cli_bad.py", BAD)
-      refused = try cli(["/tmp/agc_cli_bad.py", "--agcb", "-o", "/tmp/agc_cli_b3/bad.agcb"])
-      try Test.eq(refused.code, 1)
-      try Test.assert(refused.stderr.include?("error[PY-UNTYPED-DEF]"), refused.stderr)
-      try Test.eq(try Dir.list("/tmp/agc_cli_b3"), [])
-      usage = try cli(["/tmp/agc_cli_good.py", "--agcb"])
-      Test.eq(usage.code, 2)
+      in_folder(9) do |dir|
+        try File.write_text("#{dir}/bad.py", BAD)
+        refused = try cli(["#{dir}/bad.py", "--agcb", "-o", "#{dir}/bad.agcb"])
+        try Test.eq(refused.code, 1)
+        try Test.assert(refused.stderr.include?("error[PY-UNTYPED-DEF]"), refused.stderr)
+        try Test.eq(try Dir.list(dir), ["bad.py"])
+        usage = try cli(["#{dir}/bad.py", "--agcb"])
+        Test.eq(usage.code, 2)
+      end
     end,
     Test.test("a missing file exits 1 and a bad command line exits 2") do
-      missing = try cli(["/tmp/agc_cli_missing.py"])
-      try Test.eq(missing.code, 1)
-      try Test.assert(missing.stderr.include?("/tmp/agc_cli_missing.py"), missing.stderr)
-      usage = try cli([])
-      Test.eq(usage.code, 2)
+      in_folder(6) do |dir|
+        missing = try cli(["#{dir}/missing.py"])
+        try Test.eq(missing.code, 1)
+        try Test.assert(missing.stderr.include?("#{dir}/missing.py"), missing.stderr)
+        usage = try cli([])
+        Test.eq(usage.code, 2)
+      end
     end,
   ])
 end

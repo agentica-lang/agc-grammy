@@ -7,7 +7,7 @@
 ## built before anything is written, and `-o` writes a temporary file beside
 ## the output and renames it into place, so a failure leaves no partial file
 ## and keeps an older output as it was. `--agcb` compiles the emitted program
-## with `agentica compile` (the binary found on `PATH`) in a private folder
+## with `agentica compile` (`$AGENTICA`, else `agentica` on `PATH`) in a private folder
 ## beside the output, where the program is named after the input
 ## (`prog.py` becomes `prog.agc`): the bytecode records that name, so the same
 ## input name and text give the same bytes wherever the output goes. A
@@ -66,7 +66,8 @@ def parser() -> OP.Parser
 end
 
 def run(options: Options) -> Result[Void]
-  grammar = try Grammar.load(grammar_path())
+  try check_distinct(options.file, options.output)
+  grammar = try Grammar.load(try grammar_path())
   source = try read_source(options.file)
   text = try Py2Agc.translate(grammar, options.file, source)
   case options.output
@@ -86,24 +87,41 @@ def read_source(file: String) -> Result[String]
   end
 end
 
-# The grammar lives beside this file, so the command works from any folder.
-def grammar_path() -> String
-  parts = System.program_name().split("/")
-  folder = parts.take(parts.size - 1).join("/")
-  return GRAMMAR if folder.empty?()
+# The grammar lives beside this file, so the command works from any folder and
+# through a link.
+def grammar_path() -> Result[String]
+  real = try Path.real(System.program_name())
+  parts = real.split("/")
+  ok("#{parts.take(parts.size - 1).join("/")}/../#{GRAMMAR}")
+end
 
-  "#{folder}/../#{GRAMMAR}"
+def check_distinct(file: String, output: Optional[String]) -> Result[Void]
+  case output
+    none -> ok()
+
+    some(path) ->
+      return error("agc-py: the output #{path} is the input file") if try Path.resolve(path) == try Path.resolve(file)
+
+      ok()
+  end
 end
 
 def write_atomic(path: String, text: String) -> Result[Void]
-  temp = "#{path}.tmp"
-  try File.write_text(temp, text)
+  temp = "#{path}.#{System.pid()}.tmp"
+  case File.write_text(temp, text)
+    error(e) ->
+      _ = Path.remove(temp)
+      return error("agc-py: cannot write #{path}: #{e.message}")
+
+    ok(_) -> nil
+  end
+
   case Path.replace(temp, path)
     ok(_) -> ok()
 
     error(e) ->
       _ = Path.remove(temp)
-      error(e.message)
+      error("agc-py: cannot write #{path}: #{e.message}")
   end
 end
 
@@ -118,30 +136,60 @@ end
 
 def compile_atomic(path: String, name: String, text: String) -> Result[Void]
   folder = "#{path}.#{System.pid()}.tmp"
-  try Dir.mkdir_private(folder)
+  case Dir.mkdir_private(folder)
+    error(e) -> return error("agc-py: cannot write #{path}: #{e.message}")
+    ok(_) -> nil
+  end
+
   result = compile_in(folder, name, text, path)
   _ = Path.remove(folder)
   result
 end
 
 def compile_in(folder: String, name: String, text: String, path: String) -> Result[Void]
-  source = "#{folder}/#{name}"
   built = "#{folder}/out.agcb"
-  try File.write_text(source, text)
+  case File.write_text("#{folder}/#{name}", text)
+    error(e) -> return error("agc-py: cannot write #{path}: #{e.message}")
+    ok(_) -> nil
+  end
+
   try agentica_compile(folder, name, built)
-  Path.replace(built, path)
+  case Path.replace(built, path)
+    ok(_) -> ok()
+    error(e) -> error("agc-py: cannot write #{path}: #{e.message}")
+  end
+end
+
+# The binary that compiles: `$AGENTICA` (as the Makefile sets it) or `agentica`.
+def agentica() -> String
+  case System.env("AGENTICA")
+    ok(path) if !path.empty?() -> path
+    _ -> "agentica"
+  end
 end
 
 # `agentica compile` with its own diagnostic as the error, naming the program
 # without its temporary folder; the bytecode cache is off so that nothing is
 # written beside it.
 def agentica_compile(folder: String, name: String, output: String) -> Result[Void]
-  proc = try Process.spawn_captured("agentica", ["--no-cache", "compile", "#{folder}/#{name}", "-o", output])
+  args = ["--no-cache", "compile", "#{folder}/#{name}", "-o", output]
+  case Process.spawn_captured(agentica(), args)
+    error(e) -> error("agc-py: cannot run agentica: #{e.message}")
+
+    ok(proc) ->
+      result = finish_compile(proc, folder)
+      Process.close(proc)
+      result
+  end
+end
+
+def finish_compile(proc: Process, folder: String) -> Result[Void]
   out = try Process.output(proc, 120000)
   code = try Process.wait(proc, 120000)
   return ok() if code == 0
 
   error(
-    "agc-py: `agentica compile` refused the emitted program (exit #{code})\n#{out.stderr.replace("#{folder}/", "")}",
+    "agc-py: `agentica compile` refused the emitted program (exit #{code})\n#{out.stderr.replace("#{folder}/", "")}" +
+    "\nrun without --agcb to see the emitted program",
   )
 end
