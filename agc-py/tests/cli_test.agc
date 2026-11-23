@@ -3,6 +3,12 @@
 ## test works in a folder of its own that it creates and removes.
 
 GOOD = "def add(x: int, y: int) -> int:\n    return x + y\nprint(add(1, 2))\n"
+# Recursion, a loop with a rebinding, floor division and modulo of negatives,
+# true division, a map and a string length, all printed.
+PROGRAM = (
+  "def fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n\n\ndef total(xs: list[int]) -> int:\n    acc: int = 0\n    for x in xs:\n        acc += x\n    return acc\n\n\ncounts: dict[str, int] = {\"a\": 1, \"b\": 2}\nprint(fib(15))\nprint(total([1, -2, 3, 40]))\nprint(-7 // 2, -7 % 3, 7 / 2)\nprint(counts[\"b\"], len(\"héllo\"))\ni: int = 0\nwhile i < 3:\n    print(\"n\" + str(i))\n    i += 1\n"
+)
+
 # The frontend does not check the range of an int literal yet, so only
 # `agentica compile` refuses this one (CHECK-INT-RANGE). When the translator
 # learns to refuse it, pick another program that the frontend lets through.
@@ -32,6 +38,10 @@ def capture(command: String, args: List[String], folder: String = ".") -> Result
 end
 
 def run_bytecode(path: String) -> Result[Ran] = capture(agentica(), ["run", "--", path])
+
+def run_agc(path: String) -> Result[Ran] = capture(agentica(), [path])
+
+def python(path: String) -> Result[Ran] = capture("python3", [path])
 
 def cli(args: List[String]) -> Result[Ran] = capture(agentica(), ["agc-py/src/main.agc"] + args)
 
@@ -137,6 +147,23 @@ def main() -> Void
         try Test.eq(try Dir.list(dir), ["bad.py"])
         usage = try cli(["#{dir}/bad.py", "--agcb"])
         Test.eq(usage.code, 2)
+      end
+    end,
+    Test.test(".py to .agc to .agcb runs like python3 on both routes") do
+      in_folder(10) do |dir|
+        try File.write_text("#{dir}/prog.py", PROGRAM)
+        expected = try python("#{dir}/prog.py")
+        agc = try cli(["#{dir}/prog.py", "-o", "#{dir}/prog.agc"])
+        agcb = try cli(["#{dir}/prog.py", "--agcb", "-o", "#{dir}/prog.agcb"])
+        try Test.eq(agc.code, 0)
+        try Test.eq(agcb.code, 0)
+        try Test.assert(expected.stdout.include?("610"), expected.stdout)
+        from_agc = try run_agc("#{dir}/prog.agc")
+        from_agcb = try run_bytecode("#{dir}/prog.agcb")
+        try Test.eq(from_agc.stdout, expected.stdout)
+        try Test.eq(from_agc.code, expected.code)
+        try Test.eq(from_agcb.stdout, expected.stdout)
+        Test.eq(from_agcb.code, expected.code)
       end
     end,
     Test.test("a missing file exits 1 and a bad command line exits 2") do
