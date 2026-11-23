@@ -5,8 +5,9 @@
 ##
 ## Without `-o` the `.agc` text goes to standard output. The whole text is
 ## built before anything is written, and `-o` writes temporary files beside
-## the outputs and renames them into place, so a failure leaves no partial
-## file and keeps an older output as it was.
+## the outputs and renames them into place: a refusal or a failed write phase
+## leaves the outputs as they were (a rename that fails midway can leave some
+## files renamed).
 ##
 ## The local modules `FILE.py` imports are found in its folder, then in each
 ## `-I DIR` in order. A program with imports is one `.agc` file per module,
@@ -51,9 +52,17 @@ end
 
 def main() -> Void
   split = split_includes(System.args())
+  case split
+    error(e) ->
+      IO.warn("agc-py: #{e.message}\nTry 'agc-py --help' for more information")
+      System.exit(2)
+
+    ok(_) -> nil
+  end
+
   parsed = (
     parser()
-    |> OP.parse(split.rest)
+    |> OP.parse(split.unwrap!.rest)
     |> OP.run!()
   )
 
@@ -61,7 +70,7 @@ def main() -> Void
   options = Options(
     file: file,
     output: OP.optional_string(parsed, "output"),
-    includes: split.includes,
+    includes: split.unwrap!.includes,
     agcb: OP.flag(parsed, "agcb"),
   )
 
@@ -94,8 +103,9 @@ def parser() -> OP.Parser
 end
 
 # `-I DIR` and `-IDIR` are taken out before the parser sees the words (it
-# keeps one value per option, and `-I` repeats); `--` ends them.
-def split_includes(args: List[String]) -> Split
+# keeps one value per option, and `-I` repeats); `--` ends them. A missing
+# value, one that starts with `-`, and `-I=DIR` are usage errors.
+def split_includes(args: List[String]) -> Result[Split]
   rest: List[String] = []
   includes: List[String] = []
   index = 0
@@ -106,11 +116,16 @@ def split_includes(args: List[String]) -> Split
       break
     end
 
-    if word == "-I" and index + 1 < args.size
+    if word == "-I"
+      return error("-I needs DIR") if index + 1 >= args.size or args[index + 1].start_with?("-")
+
       includes = includes.push(args[index + 1])
       index += 2
-    elsif word.start_with?("-I") and word.length > 2
-      includes = includes.push(word.slice(2, word.length - 2))
+    elsif word.start_with?("-I")
+      value = word.slice(2, word.length - 2)
+      return error("-I needs DIR") if value.start_with?("=") or value.start_with?("-")
+
+      includes = includes.push(value)
       index += 1
     else
       rest = rest.push(word)
@@ -118,7 +133,7 @@ def split_includes(args: List[String]) -> Split
     end
   end
 
-  Split(rest: rest, includes: includes)
+  ok(Split(rest: rest, includes: includes))
 end
 
 def run(options: Options) -> Result[Void]

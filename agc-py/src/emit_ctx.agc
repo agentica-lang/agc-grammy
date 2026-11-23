@@ -40,6 +40,7 @@ struct Sig
   types: List[String]
   defaults: List[Optional[Tree.Node]]
   ret: String
+  imported: Bool = false
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.

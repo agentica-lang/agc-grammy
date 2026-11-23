@@ -23,7 +23,7 @@ agentica agc-py/src/main.agc FILE.py -I DIR -o OUT.agc  # with imported modules
 ```
 
 The whole text is built first; `-o` writes a temporary file and renames it into
-place, so a failure leaves no partial output and keeps an older one. A refusal
+place: a refusal or a failed write phase leaves the outputs as they were. A refusal
 prints its diagnostics to standard error and exits 1; a bad command line
 exits 2.
 
@@ -31,9 +31,13 @@ The local modules `FILE.py` imports are found in its folder, then in each
 `-I DIR` (repeatable) in order. A program with imports is one `.agc` file per
 module, so it needs `-o`: the entry module goes to `OUT.agc` and each imported
 module to `NAME.agc` beside it (an output that is a module's file is refused).
-All the files are written to temporaries first and renamed together. With
-`--agcb` the modules are compiled in the private folder and only the bytecode
-is kept.
+All the files are written to temporaries first and renamed together (a rename
+that fails midway can leave some renamed). An existing `NAME.agc` is
+overwritten, and files from an earlier run that the program no longer needs
+stay. With `--agcb` the modules are compiled in the private folder and only
+the bytecode is kept. A call across modules must pass every parameter:
+defaults do not cross modules (`SUBSET.md` section 5). An `-I` without a
+directory exits 2.
 
 `--agcb` needs `-o`. It runs `agentica compile` (`$AGC_PY_AGENTICA`, else
 `agentica` from `PATH`) on the emitted program inside a private folder beside

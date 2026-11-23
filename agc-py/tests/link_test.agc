@@ -92,12 +92,32 @@ def main() -> Void
         try Test.assert(!(try File.read_text("#{dir}/out/lib.agc")).include?("def main"), "a module has no main")
         agcb = try cli(args + ["--agcb", "-o", "#{dir}/prog.agcb"])
         try Test.eq(agcb.code, 0)
+        try Test.eq(try Dir.list(dir), ["app", "one", "out", "prog.agcb", "two"])
         expected = try capture("env", ["PYTHONPATH=#{dir}/one:#{dir}/two", "python3", "#{dir}/app/prog.py"])
         try Test.eq(expected.stdout, "3 6 8 11 23\n9\n")
         from_agc = try capture(agentica(), ["#{dir}/out/prog.agc"])
         from_agcb = try capture(agentica(), ["run", "--", "#{dir}/prog.agcb"])
         try Test.eq(from_agc.stdout, expected.stdout)
         Test.eq(from_agcb.stdout, expected.stdout)
+      end
+    end,
+    Test.test("two modules with the same function name, a call result method and a call in an interpolation") do
+      in_folder(16) do |dir|
+        prog = "import a\nimport b\nfrom b import f as g\n\nprint(a.f(1), b.f(2), g(3))\nprint(b.f(2).upper())\n"
+        prog = prog + "print(f\"{a.f(1)} and {g(3)}\")\n"
+        a = "\"\"\"Module a.\"\"\"\n\n\ndef f(x: int) -> int:\n    return x + 1\n"
+        b = "def f(x: int) -> str:\n    return \"b\" + str(x)\n"
+        try write_files(dir, {"prog": prog, "a": a, "b": b})
+        try Dir.mkdir("#{dir}/out")
+        built = try cli(["#{dir}/prog.py", "-o", "#{dir}/out/prog.agc"])
+        try Test.eq(built.code, 0)
+        text = try File.read_text("#{dir}/out/prog.agc")
+        try Test.assert(text.include?("A.f(1)") and text.include?("B.f(2)") and text.include?("g(3)"), text)
+        try Test.assert(!(try File.read_text("#{dir}/out/a.agc")).include?("Module a"), "the docstring is dropped")
+        expected = try capture("python3", ["#{dir}/prog.py"])
+        try Test.eq(expected.stdout, "2 b2 b3\nB2\n2 and b3\n")
+        from_agc = try capture(agentica(), ["#{dir}/out/prog.agc"])
+        Test.eq(from_agc.stdout, expected.stdout)
       end
     end,
     Test.test("a program with imports needs -o, and an output that is a module's file is refused") do
@@ -124,7 +144,7 @@ def main() -> Void
       refuses(
         4,
         {"prog": "import lib\nprint(lib.f(1))\n", "lib": "def f(x: int, y: int = 1) -> int:\n    return x + y\n"},
-        ["error[PY-CALL-ARITY]", "`lib.f` is missing 1 required argument (`y`)"],
+        ["error[PY-CALL-ARITY]", "`lib.f` is missing 1 required argument (`y`)", "defaults do not cross modules"],
       )
     end,
     Test.test("an argument of the wrong type refuses") do
@@ -140,6 +160,46 @@ def main() -> Void
     Test.test("a member and a module are not values") do
       try refuses(7, {"prog": "import lib\nx: int = lib.twice\n", "lib": LIB}, ["`lib.twice` is not a value"])
       refuses(8, {"prog": "import lib\nprint(lib)\n", "lib": LIB}, ["module `lib` is not a value"])
+    end,
+    Test.test("an import whose alias Agentica reserves refuses") do
+      refuses(
+        17,
+        {"prog": "import time\nprint(time.f(1))\n", "time": SAME},
+        ["prog.py:1:8 error[PY-OUT-OF-SUBSET]", "becomes `Time`", "a type name Agentica reserves"],
+      )
+    end,
+    Test.test("an import whose alias is a type alias of the file refuses") do
+      refuses(
+        18,
+        {"prog": "import point\ntype Point = int\nprint(point.f(1))\n", "point": SAME},
+        ["error[PY-OUT-OF-SUBSET]", "becomes `Point`", "type alias of this file"],
+      )
+    end,
+    Test.test("two imports with the same alias refuse") do
+      refuses(
+        19,
+        {"prog": "import lib\nimport lib as Lib\nprint(lib.twice(1), Lib.twice(2))\n", "lib": LIB},
+        ["prog.py:2:15 error[PY-OUT-OF-SUBSET]", "another import of this file already uses"],
+      )
+    end,
+    Test.test("a function renamed to an uppercase name refuses") do
+      refuses(
+        20,
+        {"prog": "from lib import twice as Dbl\nprint(Dbl(1))\n", "lib": LIB},
+        ["prog.py:1:26 error[PY-OUT-OF-SUBSET]", "must start with a lowercase letter"],
+      )
+    end,
+    Test.test("-I needs a directory") do
+      in_folder(21) do |dir|
+        try write_files(dir, {"prog": "print(1)\n"})
+        for args in [["-I"], ["-I", "-o"], ["-I=#{dir}"]]
+          ran = try cli(["#{dir}/prog.py"] + args)
+          try Test.eq(ran.code, 2)
+          try Test.assert(ran.stderr.include?("-I needs DIR"), ran.stderr)
+        end
+
+        ok()
+      end
     end,
     Test.test("a type alias cannot be imported") do
       refuses(

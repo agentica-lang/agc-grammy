@@ -143,7 +143,7 @@ def exported_sigs(program: Frontend.Program) -> Map[String, EmitCtx.Sig]
   sigs = sig_table(program)
   for name in sigs.keys()
     sig = sigs.get(name).unwrap!
-    out = out.put(name, sig.with(defaults: sig.defaults.map { |_| none }))
+    out = out.put(name, sig.with(defaults: sig.defaults.map { |_| none }, imported: true))
   end
 
   out
@@ -152,6 +152,9 @@ end
 ## The names of the `type` aliases of a module, which cannot cross a module.
 def alias_names(program: Frontend.Program) -> List[String] = all_aliases(program).keys()
 
+## The single-file path stays for `Py2Agc.translate`, which has a source text
+## and no module graph; it is `emit_linked` with imports refused.
+##
 ## Emits a resolved `Program` as one standalone `.agc` file: `type` aliases
 ## hoist above every `def`, each `def` keeps its source order with a fully
 ## typed signature, outlined `try` helpers hoist next to the `def`s, and the
@@ -363,11 +366,26 @@ def step_stmt(
     FileMode.Imported ->
       case stmt
         Stmt.AliasDef(_, _) -> step_stmt_item(asm, stmt, names, source, file)
+        Stmt.ExprStmt(expr) if docstring?(expr, source) -> StepRes.Ok(asm)
         _ -> imported_statement_refusal(item)
       end
 
     _ -> step_stmt_item(asm, stmt, names, source, file)
   end
+end
+
+# A plain string statement (a module docstring) does nothing in Python, so an
+# imported module may hold it; it emits nothing.
+def docstring?(expr: Tree.Node, source: String) -> Bool
+  node = expr
+  while node.rule != "text" and node.children.size == 1
+    node = List.first(node.children)
+  end
+
+  return false if node.rule != "text"
+
+  first = Tree.text(node, source).slice(0, 1)
+  first == "\"" or first == "'"
 end
 
 def imported_statement_refusal(item: Frontend.TopItem) -> StepRes

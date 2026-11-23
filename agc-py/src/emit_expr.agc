@@ -1854,6 +1854,12 @@ def validate_call_shape(args: List[Tree.Node], sig: EmitCtx.Sig, source: String)
     count_word = "1 required argument"
   end
 
+  if sig.imported
+    return error(
+      "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}`: defaults do not cross modules (SUBSET section 5)",
+    )
+  end
+
   error(
     "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}` or give it a default",
   )

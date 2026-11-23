@@ -207,12 +207,15 @@ plain types only.
 - Emission is one `.agc` file per module, named `<module>.agc`, each importing
   its siblings by name: `import x [as y]` is `import Y from "x"` (aliases are
   capitalized) and `from x import a [as b]` is `import {a as b} from "x"`. An
-  `import` the file never uses emits no line. Only a `def` of a local module
-  can be imported: a type alias, a name the module itself imports and a
-  top-level value are `PY-OUT-OF-SUBSET` or `PY-NAME-UNKNOWN` at the imported
-  name, and an imported module may hold only `def`s and `type` aliases
-  (`PY-OUT-OF-SUBSET` at its first statement, in its own file; the entry
-  module's statements run in `main`). A call through an import is checked like
+  `import` the file never uses emits no line, and an alias that Agentica
+  reserves (`time` becomes `Time`), that repeats another alias or that names a
+  `type` alias of the file is `PY-OUT-OF-SUBSET` at the import (rename it with
+  `as`); a renamed function (`as g`) must start with a lowercase letter. Only
+  a `def` of a local module can be imported: a type alias or a name the module
+  itself imports is `PY-OUT-OF-SUBSET` or `PY-NAME-UNKNOWN` at the imported
+  name, and an imported module may hold only `def`s, `type` aliases and a
+  docstring (`PY-OUT-OF-SUBSET` at its first other statement, in its own
+  file; the entry module's statements run in `main`). A call through an import is checked like
   a local call (arity, keywords, types) except that a default is not lowered
   (its value lives in the other file), so the call passes every parameter. A
   module is only an attribute root: `x.f(...)` is the one form (`x`, `x.f` and

@@ -58,6 +58,52 @@ end
 
 private
 
+# The type names the Agentica checker reserves, which no import alias may take
+# (`RESERVED_TYPE_NAMES` of the checker, as of 0.35.0).
+RESERVED_ALIASES = Set.new([
+  "ATS",
+  "Await",
+  "Base64",
+  "Bool",
+  "Bytes",
+  "Channel",
+  "Codec",
+  "Dir",
+  "Error",
+  "File",
+  "Float",
+  "Fn",
+  "IO",
+  "Int",
+  "JSON",
+  "Lazy",
+  "List",
+  "Map",
+  "Math",
+  "Nil",
+  "OpenSSL",
+  "Optional",
+  "Path",
+  "Process",
+  "Random",
+  "Range",
+  "Result",
+  "Set",
+  "String",
+  "StructMember",
+  "System",
+  "TCP",
+  "TLS",
+  "Task",
+  "TaskDown",
+  "TaskExit",
+  "TaskRef",
+  "Test",
+  "Time",
+  "Void",
+  "Zlib",
+])
+
 # The `Link` of one module: an import line and the bound names per import,
 # or the first import that cannot link, rendered in this module's file.
 def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String, Exports]) -> Result[EmitModule.Link]
@@ -65,13 +111,32 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
   scope: Map[String, String] = {}
   sigs: Map[String, EmitCtx.Sig] = {}
   used = used_names(module.program)
+  aliases: List[String] = []
+  type_aliases = EmitModule.alias_names(module.program)
   for edge in module.imports
     target = try local_target(module, edge)
     found = exports.get(target).unwrap!
     case edge.decl
       Frontend.ImportDecl.ModuleImport(_, binding, _) ->
+        alias = EmitCtx.module_alias(binding.bound)
         if used.include?(binding.bound)
-          lines = lines.push("import #{EmitCtx.module_alias(binding.bound)} from \"#{target}\"")
+          case alias_clash(alias, aliases, type_aliases)
+            some(why) ->
+              return error(
+                refusal_text(
+                  module,
+                  "the import `#{binding.bound}` becomes `#{alias}`, #{why}",
+                  "rename it with `as`",
+                  binding.span,
+                  "PY-OUT-OF-SUBSET",
+                ),
+              )
+
+            none -> nil
+          end
+
+          aliases = aliases.push(alias)
+          lines = lines.push("import #{alias} from \"#{target}\"")
         end
 
         scope = scope.put(binding.bound, EmitCtx.module_marker())
@@ -86,6 +151,18 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
           member = name.member.unwrap!
           case found.sigs.get(member)
             some(sig) ->
+              if !lowercase_start?(name.bound)
+                return error(
+                  refusal_text(
+                    module,
+                    "`#{name.bound}` renames a function, so it must start with a lowercase letter",
+                    "pick a lowercase name after `as`",
+                    name.span,
+                    "PY-OUT-OF-SUBSET",
+                  ),
+                )
+              end
+
               scope = scope.put(name.bound, EmitCtx.def_marker())
               sigs = sigs.put(name.bound, sig.with(name: name.bound))
               entries = entries.push(import_entry(member, name.bound))
@@ -98,6 +175,22 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
   end
 
   ok(EmitModule.Link(mode: mode, import_lines: lines, scope: scope, sigs: sigs))
+end
+
+# Why an import alias cannot be spelled `alias`, or none: Agentica reserves
+# some type names, and an alias may not repeat another alias or a type alias
+# of the file.
+def alias_clash(alias: String, taken: List[String], type_aliases: List[String]) -> Optional[String]
+  return some("a type name Agentica reserves") if RESERVED_ALIASES.include?(alias)
+  return some("the name of a type alias of this file") if type_aliases.include?(alias)
+  return some("which another import of this file already uses") if taken.include?(alias)
+
+  none
+end
+
+def lowercase_start?(name: String) -> Bool
+  code = name.slice(0, 1).code
+  code >= 97 and code <= 122
 end
 
 def import_entry(member: String, bound: String) -> String
@@ -137,13 +230,12 @@ def refuse_member(module: Modules.Module, target: String, name: Frontend.ImportN
     )
   end
 
-  refusal_text(
-    module,
-    "module `#{target}` has no function `#{member}` to import",
-    "only a `def` of the module can be imported: the module defines #{found.sigs.keys().join(", ")}",
-    name.span,
-    "PY-NAME-UNKNOWN",
-  )
+  help = "only a `def` of the module can be imported, and the module defines none"
+  if !found.sigs.empty?
+    help = "only a `def` of the module can be imported: the module defines #{found.sigs.keys().join(", ")}"
+  end
+
+  refusal_text(module, "module `#{target}` has no function `#{member}` to import", help, name.span, "PY-NAME-UNKNOWN")
 end
 
 def refusal_text(module: Modules.Module, message: String, help: String, span: Frontend.Span, code: String) -> String
