@@ -33,7 +33,11 @@ end
 
 ## One `def` signature for the call ABI: parameter names and their backend
 ## types in order, each parameter's default-value expression node (`none`
-## when the parameter has none), and the mapped return type.
+## when the parameter has none), and the mapped return type. `imported` marks
+## a function of another local module (defaults do not cross). A standard
+## library member (`stdlib.agc`) is a `Sig` with `code`, the backend spelling
+## with `$1`, `$2` for the arguments, and a `kind` of `const` for a constant
+## (no call) or `environ` for `os.environ` (only `os.environ[key]` lowers).
 struct Sig
   name: String
   params: List[String]
@@ -41,6 +45,8 @@ struct Sig
   defaults: List[Optional[Tree.Node]]
   ret: String
   imported: Bool = false
+  code: String = ""
+  kind: String = "call"
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.

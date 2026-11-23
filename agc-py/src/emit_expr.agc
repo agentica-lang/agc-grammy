@@ -37,6 +37,7 @@
 ## thread node spans into rendered `Diagnostic` values.
 
 import EmitCtx from "emit_ctx"
+import Stdlib from "stdlib"
 import Tree from "../../src/tree"
 
 ## One emitted expression: Agentica text, its static type, and the temp
@@ -66,6 +67,32 @@ def emit_with(
   sigs: Map[String, EmitCtx.Sig],
   in_try: Bool,
 ) -> Result[Out]
+  emit_top(node, source, scope, sigs, in_try, -1, -1)
+end
+
+## `emit_with` for an expression statement: a value that has no use in a
+## statement position only (`open(path, "w").write(text)`) is allowed here.
+def emit_stmt_expr(
+  node: Tree.Node,
+  source: String,
+  scope: Map[String, String],
+  sigs: Map[String, EmitCtx.Sig],
+  in_try: Bool,
+) -> Result[Out]
+  emit_top(node, source, scope, sigs, in_try, node.start, node.stop)
+end
+
+# The shared body: `stmt_start` and `stmt_stop` are the span of the
+# statement's expression (`-1` when the expression is a value).
+def emit_top(
+  node: Tree.Node,
+  source: String,
+  scope: Map[String, String],
+  sigs: Map[String, EmitCtx.Sig],
+  in_try: Bool,
+  stmt_start: Int,
+  stmt_stop: Int,
+) -> Result[Out]
   bare = bare_builtin_name(node, source)
   case bare
     some(name) ->
@@ -73,7 +100,18 @@ def emit_with(
     none -> bare = bare
   end
 
-  done = try emit_in(Cx(scope: scope, next_temp: 0, pre: [], sigs: sigs, substs: {}, in_try: in_try), node, source)
+  cx = Cx(
+    scope: scope,
+    next_temp: 0,
+    pre: [],
+    sigs: sigs,
+    substs: {},
+    in_try: in_try,
+    stmt_start: stmt_start,
+    stmt_stop: stmt_stop,
+  )
+
+  done = try emit_in(cx, node, source)
   ok(Out(code: done.code, type: done.type, pre: done.cx.pre))
 end
 
@@ -190,6 +228,18 @@ def helpers() -> String
     "    b = a\n" +
     "  end\n" +
     "  s.slice(a, b - a)\n" +
+    "end\n" +
+    "\n" +
+    "def py_getenv(key: String) -> Optional[String]\n" +
+    "  case System.env(key)\n" +
+    "    ok(value) -> some(value)\n" +
+    "    error(_) -> none\n" +
+    "  end\n" +
+    "end\n" +
+    "\n" +
+    "def py_read_text(path: String) -> Result[String]\n" +
+    "  text = try File.read_text(path)\n" +
+    "  ok(text.replace(\"\\r\\n\", \"\\n\").replace(\"\\r\", \"\\n\"))\n" +
     "end\n"
   )
 end
@@ -237,6 +287,7 @@ BUILTINS = [
   "map",
   "filter",
   "enumerate",
+  "open",
 ]
 
 # Emission state: the visible names, the next temp number, the preamble,
@@ -252,6 +303,8 @@ struct Cx
   sigs: Map[String, EmitCtx.Sig]
   substs: Map[String, String]
   in_try: Bool = false
+  stmt_start: Int = -1
+  stmt_stop: Int = -1
 end
 
 # An emitted expression still carrying its state.
@@ -566,6 +619,14 @@ def emit_eq(lcode: String, ltype: String, rcode: String, rtype: String, equal: B
   end
 
   return ok(eq_answer(equal, false)) if comparable_fold?(ltype, rtype)
+
+  if base_of(ltype) == "Optional" and ltype == "Optional[#{rtype}]"
+    return ok("#{lcode} #{eq_op(equal)} some(#{rcode})")
+  end
+
+  if base_of(rtype) == "Optional" and rtype == "Optional[#{ltype}]"
+    return ok("some(#{lcode}) #{eq_op(equal)} #{rcode}")
+  end
 
   ok("#{lcode} #{eq_op(equal)} #{rcode}")
 end
@@ -907,12 +968,136 @@ def emit_group_nodes(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[D
 end
 
 def emit_chain(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Done]
+  return emit_open_use(cx, nodes, source) if open_use?(cx, nodes, source)
+
+  case environ_head(cx, nodes, source)
+    some(found) -> return chain_from(try found, nodes.drop(2), source)
+    none -> nil
+  end
+
   raw_head = try emit_in(cx, List.first(nodes), source)
-  head = try maybe_unwrap(raw_head)
+  chain_from(try maybe_unwrap(raw_head), nodes.drop(1), source)
+end
+
+# `os.environ[key]` (through any binding of it) lowers to `System.env(key)`.
+def environ_head(cx: Cx, nodes: List[Tree.Node], source: String) -> Optional[Result[Done]]
+  head = List.first(nodes)
+  return none if nodes.size < 2 or nodes[1].rule != "index" or (head.rule != "attr" and head.rule != "name")
+
+  case cx.sigs.get(Tree.text(head, source))
+    some(sig) if sig.kind == "environ" ->
+      key = nodes[1].children
+      if key.size != 1 or key[0].rule == "slice"
+        return some(error("PY-OUT-OF-SUBSET: `os.environ` takes a plain key, not a slice"))
+      end
+
+      some(environ_lookup(cx, key[0], source))
+    _ -> none
+  end
+end
+
+def environ_lookup(cx: Cx, key: Tree.Node, source: String) -> Result[Done]
+  raw = try emit_in(cx, key, source)
+  bound = try maybe_unwrap(raw)
+  if bound.type != "String" and bound.type != "Unknown"
+    return error("PY-TYPE-MISMATCH: `os.environ` is indexed by a string, found #{bound.type}")
+  end
+
+  ok(Done(code: "System.env(#{bound.code})", type: "Result[String]", cx: bound.cx))
+end
+
+# `open(path[, mode]).read()` / `.write(text)`: a file object has no form, so
+# the two uses lower to the whole-file `File` functions.
+def open_use?(cx: Cx, nodes: List[Tree.Node], source: String) -> Bool
+  head = List.first(nodes)
+  if (
+    cx.scope.get("open", "") != "" or
+    nodes.size != 3 or
+    head.rule != "call" or
+    nodes[1].rule != "attr_trailer" or
+    nodes[2].rule != "call_trailer"
+  )
+    return false
+  end
+
+  Tree.text(List.first(head.children), source) == "open"
+end
+
+def emit_open_use(cx: Cx, nodes: List[Tree.Node], source: String) -> Result[Done]
+  opened = try emit_call_args(cx, List.first(nodes).children.drop(1), none, source)
+  attr_text = Tree.text(nodes[1], source)
+  method = attr_text.slice(1, attr_text.length - 1)
+  if opened.pos.empty? or opened.pos.size > 2 or !opened.kw.empty?
+    return error(
+      "PY-OUT-OF-SUBSET: `open` takes a path and an optional mode string = help: write `open(path)` or `open(path, \"w\")`",
+    )
+  end
+
+  path = List.first(opened.pos)
+  if path.type != "String" and path.type != "Unknown"
+    return error("PY-TYPE-MISMATCH: `open` needs a string path, found #{path.type}")
+  end
+
+  mode = "r"
+  if opened.pos.size == 2
+    mode = open_mode(Tree.text(opened.raws[1], source))
+  end
+
+  args = try emit_call_args(opened.cx, nodes[2].children, none, source)
+  verb = open_verb(mode, method)
+  case verb
+    none ->
+      error(
+        "PY-OUT-OF-SUBSET: `open` supports mode \"r\" with `.read()`, \"w\" and \"a\" with `.write(text)` = help: other modes and methods have no form",
+      )
+    some(found) ->
+      if found != "read_text" and (List.first(nodes).start != cx.stmt_start or nodes[2].stop != cx.stmt_stop)
+        return error(
+          "PY-OUT-OF-SUBSET: the result of `write` (a character count in CPython) has no form = help: use `write` as a statement",
+        )
+      end
+
+      emit_open_call(path, found, args)
+  end
+end
+
+# The mode a string literal spells, or `?` for anything else.
+def open_mode(text: String) -> String
+  return "?" if text.length != 3 or (!text.start_with?("\"") and !text.start_with?("'"))
+
+  text.slice(1, 1)
+end
+
+def open_verb(mode: String, method: String) -> Optional[String]
+  return some("read_text") if mode == "r" and method == "read"
+  return some("write_text") if mode == "w" and method == "write"
+  return some("append_text") if mode == "a" and method == "write"
+
+  none
+end
+
+def emit_open_call(path: Done, verb: String, args: CallArgs) -> Result[Done]
+  if verb == "read_text"
+    if !args.pos.empty? or !args.kw.empty?
+      return error("PY-OUT-OF-SUBSET: `read` takes no argument here = help: write `open(path).read()`")
+    end
+
+    return ok(Done(code: "py_read_text(#{path.code})", type: "Result[String]", cx: args.cx))
+  end
+
+  text = try sole_arg(args, "write")
+  if text.type != "String" and text.type != "Unknown"
+    return error("PY-TYPE-MISMATCH: `write` needs a string, found #{text.type}")
+  end
+
+  ok(Done(code: "File.#{verb}(#{path.code}, #{text.code})", type: "Result[Void]", cx: args.cx))
+end
+
+def chain_from(head: Done, trailers: List[Tree.Node], source: String) -> Result[Done]
   recv = head
   attrs: List[String] = []
   current = head.cx
-  for trailer in nodes.drop(1)
+  for trailer in trailers
     case trailer.rule
       "attr_trailer" ->
         text = Tree.text(trailer, source)
@@ -1142,6 +1327,12 @@ def emit_name(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
     return error("PY-NAME-UNKNOWN: unknown name `#{name}` = help: bind it first, for example `#{name}: int = ...`")
   end
 
+  # A constant of a standard-library module (`from math import pi`).
+  case cx.sigs.get(name)
+    some(sig) if sig.kind != "call" -> return const_done(cx, sig, name)
+    _ -> nil
+  end
+
   # A def name carries the callable marker, not a type: the backend has no
   # function values, so a bare use (`print(greet)`, `f"{greet}"`, a returned
   # `greet`) refuses at the value; only a call uses a def name and a call
@@ -1169,9 +1360,7 @@ def emit_attr(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
 
   method = List.last(parts)
   root = List.first(parts)
-  if cx.scope.get(root, "") == EmitCtx.module_marker()
-    return error("PY-OUT-OF-SUBSET: `#{full}` is not a value = help: call it, for example `#{full}(...)`")
-  end
+  return emit_module_attr(cx, parts, full) if cx.scope.get(root, "") == EmitCtx.module_marker()
 
   if (
     parts.size == 2 and
@@ -1190,6 +1379,58 @@ def emit_attr(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
   end
 
   ok(Done(code: full, type: "Unknown", cx: cx))
+end
+
+# `m.name` through an import binding: a standard-library constant is a value,
+# anything else is a function (needs its call) or unknown.
+def emit_module_attr(cx: Cx, parts: List[String], full: String) -> Result[Done]
+  root = List.first(parts)
+  if parts.size == 2
+    case cx.sigs.get(full)
+      some(sig) if sig.kind != "call" -> return const_done(cx, sig, full)
+      some(_) -> return error("PY-OUT-OF-SUBSET: `#{full}` is not a value = help: call it, for example `#{full}(...)`")
+      none -> nil
+    end
+  end
+
+  error(unknown_module_member(cx, root, parts))
+end
+
+# The refusal for a member a module binding does not have: a standard-library
+# module is closed (`PY-IMPORT-UNKNOWN`), a local one has the names it defines.
+def unknown_module_member(cx: Cx, root: String, parts: List[String]) -> String
+  full = parts.join(".")
+  if parts.size != 2
+    return "PY-OUT-OF-SUBSET: nested path `#{full}` through module `#{root}` = help: call one function of it"
+  end
+
+  case cx.sigs.get("#{root}.")
+    some(std) ->
+      known = cx.sigs.keys().filter { |key| key.start_with?("#{root}.") and key != "#{root}." }
+      listed = known.map { |key| key.slice(root.length + 1, key.length - root.length - 1) }.sort.join(", ")
+      (
+        "PY-IMPORT-UNKNOWN: `#{std.name}.#{List.last(parts)}` is not in the supported standard-library surface = help: #{std_listing(std.name, listed)}"
+      )
+    none -> "PY-NAME-UNKNOWN: module `#{root}` does not define a function `#{List.last(parts)}`"
+  end
+end
+
+def std_listing(std: String, listed: String) -> String
+  return "no member of `#{std}` is mapped yet" if listed.empty?
+
+  "`#{std}` maps #{listed}"
+end
+
+# A standard-library constant. `os.environ` has no value of its own: only
+# `os.environ[key]` lowers (`emit_chain`).
+def const_done(cx: Cx, sig: EmitCtx.Sig, spelled: String) -> Result[Done]
+  if sig.kind == "environ"
+    return error(
+      "PY-OUT-OF-SUBSET: `#{spelled}` is only supported as `#{spelled}[name]` = help: iteration, `len` and `in` over the environment are unmapped",
+    )
+  end
+
+  ok(Done(code: sig.code, type: sig.ret, cx: cx))
 end
 
 def emit_list(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
@@ -1355,6 +1596,7 @@ def emit_f_string(
     end
 
     hole_done = try maybe_unwrap(raw_hole)
+    try refuse_optional_text(hole_done.type, "an f-string hole")
     current = hole_done.cx
     quoted = hole_done.code.include?("\"")
     quoted_temp = "py_t#{current.next_temp}"
@@ -1774,13 +2016,11 @@ def module_call_sig(cx: Cx, head: Tree.Node, source: String) -> Result[Optional[
   root = List.first(parts)
   return ok(none) if cx.scope.get(root, "") != EmitCtx.module_marker()
 
-  if parts.size != 2
-    return error("PY-OUT-OF-SUBSET: nested path `#{full}` through module `#{root}` = help: call one function of it")
-  end
-
   case cx.sigs.get(full)
+    some(sig) if sig.kind != "call" ->
+      error("PY-OUT-OF-SUBSET: `#{full}` is a constant, not a function = help: drop the call")
     some(sig) -> ok(some(sig))
-    none -> error("PY-NAME-UNKNOWN: module `#{root}` does not define a function `#{List.last(parts)}`")
+    none -> error(unknown_module_member(cx, root, parts))
   end
 end
 
@@ -1830,6 +2070,12 @@ def validate_call_shape(args: List[Tree.Node], sig: EmitCtx.Sig, source: String)
     end
   end
 
+  if pos_count > sig.params.size and !sig.code.empty?
+    return error(
+      "PY-CALL-ARITY: `#{sig.name}` takes #{sig.params.size} argument#{plural(sig.params.size)}, #{pos_count} given = help: the mapping of `#{sig.name}` has no further parameter (its optional ones are not supported)",
+    )
+  end
+
   if pos_count > sig.params.size
     return error(
       "PY-CALL-ARITY: `#{sig.name}` takes #{sig.params.size} argument#{plural(sig.params.size)}, #{pos_count} given = help: drop the extra argument or widen the signature",
@@ -1857,6 +2103,12 @@ def validate_call_shape(args: List[Tree.Node], sig: EmitCtx.Sig, source: String)
   if sig.imported
     return error(
       "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}`: defaults do not cross modules (SUBSET section 5)",
+    )
+  end
+
+  if !sig.code.empty?
+    return error(
+      "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}`",
     )
   end
 
@@ -1982,14 +2234,14 @@ def open_interp() -> String = "#" + "{"
 
 def emit_head_call(cx: Cx, head: Tree.Node, args: CallArgs, source: String) -> Result[Done]
   if head.rule == "attr" and args.sig.some?
+    sig = args.sig.unwrap!
     parts = Tree.text(head, source).split(".")
-    return emit_abi_call(
-      cx,
-      "#{EmitCtx.module_alias(List.first(parts))}.#{List.last(parts)}",
-      args.sig.unwrap!,
-      args,
-      source,
-    )
+    name = "#{EmitCtx.module_alias(List.first(parts))}.#{List.last(parts)}"
+    if !sig.code.empty?
+      name = sig.name
+    end
+
+    return emit_abi_call(cx, name, sig, args, source)
   end
 
   return emit_attr_call(cx, head, args, source) if head.rule == "attr"
@@ -2237,7 +2489,12 @@ def emit_abi_call(cx: Cx, name: String, sig: EmitCtx.Sig, args: CallArgs, source
     index += 1
   end
 
-  ok(Done(code: "#{name}(#{parts.join(", ")})", type: sig.ret, cx: current.with(substs: caller_substs)))
+  code = "#{name}(#{parts.join(", ")})"
+  if !sig.code.empty?
+    code = Stdlib.spell(sig.code, parts)
+  end
+
+  ok(Done(code: code, type: sig.ret, cx: current.with(substs: caller_substs)))
 end
 
 # An earlier inline value that would otherwise run after a later preamble:
@@ -2816,6 +3073,10 @@ end
 def emit_builtin(name: String, args: CallArgs, source: String) -> Result[Optional[Done]]
   case name
     "print" -> ok(some(try emit_print(args)))
+    "open" if args.cx.scope.get("open", "") == "" ->
+      error(
+        "PY-OUT-OF-SUBSET: `open` is only supported as `open(path).read()` or `open(path, \"w\").write(text)` = help: a file object has no form",
+      )
     "len" -> ok(some(try emit_len(args)))
     "range" -> ok(some(try emit_range(args)))
     "int" -> ok(some(try emit_int(args)))
@@ -2860,6 +3121,7 @@ def emit_print(args: CallArgs) -> Result[Done]
       )
     end
 
+    try refuse_optional_text(arg.type, "print")
     if arg.code.include?("\"")
       temp = "py_t#{current.next_temp}"
       current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{arg.code}"))
@@ -2952,6 +3214,17 @@ def emit_float(args: CallArgs) -> Result[Done]
   error("PY-TYPE-MISMATCH: `float` converts str or int, found #{item.type}")
 end
 
+# An `Optional` interpolates as `some(...)`/`none`, never as Python's text.
+def refuse_optional_text(found: String, what: String) -> Result[Void]
+  if base_of(found) == "Optional"
+    return error(
+      "PY-TYPE-MISMATCH: #{what} holds an #{found}, which has no text form like Python's = help: test it with `is None` first",
+    )
+  end
+
+  ok()
+end
+
 def emit_str(args: CallArgs) -> Result[Done]
   return error("PY-OPERATOR: `str` takes no keyword args") if !args.kw.empty?
 
@@ -2968,6 +3241,7 @@ def emit_str(args: CallArgs) -> Result[Done]
     )
   end
 
+  try refuse_optional_text(item.type, "str")
   if item.code.include?("\"")
     temp = "py_t#{args.cx.next_temp}"
     current = args.cx.with(next_temp: args.cx.next_temp + 1, pre: args.cx.pre.push("#{temp} = #{item.code}"))

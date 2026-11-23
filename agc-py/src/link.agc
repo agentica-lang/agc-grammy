@@ -15,11 +15,19 @@ import EmitCtx from "emit_ctx"
 import EmitModule from "emit_module"
 import Frontend from "frontend"
 import Modules from "modules"
+import Stdlib from "stdlib"
 
 ## One emitted file: its name (`<module>.agc`) and its text.
 struct Unit
   name: String
   text: String
+end
+
+## The names the imports of one module bind so far: the scope marker of each
+## and the signature behind it.
+struct Binds
+  scope: Map[String, String]
+  sigs: Map[String, EmitCtx.Sig]
 end
 
 ## What an importer can reach in a module: the signatures of its `def`s (no
@@ -59,7 +67,7 @@ end
 private
 
 # The type names the Agentica checker reserves, which no import alias may take
-# (`RESERVED_TYPE_NAMES` of the checker, as of 0.35.0).
+# (`RESERVED_TYPE_NAMES` of the checker, as of 0.36.0).
 RESERVED_ALIASES = Set.new([
   "ATS",
   "Await",
@@ -114,7 +122,17 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
   aliases: List[String] = []
   type_aliases = EmitModule.alias_names(module.program)
   for edge in module.imports
-    target = try local_target(module, edge)
+    case edge.source
+      Modules.ModuleSource.Stdlib(std) ->
+        bound = try std_binds(module, edge.decl, std, Binds(scope: scope, sigs: sigs))
+        scope = bound.scope
+        sigs = bound.sigs
+        next
+
+      Modules.ModuleSource.Local(_) -> nil
+    end
+
+    target = try local_target(edge)
     found = exports.get(target).unwrap!
     case edge.decl
       Frontend.ImportDecl.ModuleImport(_, binding, _) ->
@@ -199,23 +217,59 @@ def import_entry(member: String, bound: String) -> String
   "#{member} as #{bound}"
 end
 
-# The module an edge names; a standard-library import has no emission yet.
-def local_target(module: Modules.Module, edge: Modules.ImportEdge) -> Result[String]
+# The local module an edge names.
+def local_target(edge: Modules.ImportEdge) -> Result[String]
   case edge.source
     Modules.ModuleSource.Local(name) -> ok(name)
-
-    Modules.ModuleSource.Stdlib(name) ->
-      path = Frontend.decl_path(edge.decl)
-      error(
-        refusal_text(
-          module,
-          "`#{name}` is a standard-library module: its members are not mapped yet",
-          "inline what you need, or wait for the standard-library mapping (issue #27)",
-          path.span,
-          "PY-OUT-OF-SUBSET",
-        ),
-      )
+    Modules.ModuleSource.Stdlib(name) -> error("agc-py: `#{name}` is not a local module")
   end
+end
+
+# The names a standard-library import binds: `import m` binds the module (its
+# members as `m.name` signatures, and `m.` itself marks it as standard library
+# for the refusals) and `from m import a` binds each mapped member. Neither
+# emits an import line: the backend spelling is in the signature.
+def std_binds(module: Modules.Module, decl: Frontend.ImportDecl, std: String, binds: Binds) -> Result[Binds]
+  table = Stdlib.members(std)
+  scope = binds.scope
+  sigs = binds.sigs
+  case decl
+    Frontend.ImportDecl.ModuleImport(_, binding, _) ->
+      scope = scope.put(binding.bound, EmitCtx.module_marker())
+      sigs = sigs.put("#{binding.bound}.", EmitCtx.Sig(name: std, params: [], types: [], defaults: [], ret: ""))
+      for member in table.keys()
+        sigs = sigs.put("#{binding.bound}.#{member}", table.get(member).unwrap!.with(name: "#{std}.#{member}"))
+      end
+
+    Frontend.ImportDecl.FromImport(_, names, _) ->
+      for name in names
+        member = name.member.unwrap!
+        case table.get(member)
+          some(sig) ->
+            scope = scope.put(name.bound, EmitCtx.def_marker())
+            sigs = sigs.put(name.bound, sig.with(name: "#{std}.#{member}"))
+
+          none ->
+            return error(
+              refusal_text(
+                module,
+                "`#{std}.#{member}` is not in the supported standard-library surface",
+                std_help(std, table),
+                name.span,
+                "PY-IMPORT-UNKNOWN",
+              ),
+            )
+        end
+      end
+  end
+
+  ok(Binds(scope: scope, sigs: sigs))
+end
+
+def std_help(std: String, table: Map[String, EmitCtx.Sig]) -> String
+  return "no member of `#{std}` is mapped yet" if table.empty?
+
+  "`#{std}` maps #{table.keys().sort.join(", ")}"
 end
 
 def refuse_member(module: Modules.Module, target: String, name: Frontend.ImportName, found: Exports) -> String

@@ -1,140 +1,73 @@
-## Linked-module emission through the command line (issue #26): one `.agc`
-## file per module, the import forms and their aliases, `-I`, what a call
-## through an import checks, and what refuses (and in which file). Each test
-## runs the command as a child process (the runner's step budget is too small
-## for several translations in one file) in a folder of its own.
+## Linked-module emission (issue #26): one `.agc` file per module in dependency
+## order, the import forms and their aliases, what a call through an import
+## checks, and what refuses (and in which file). Every fixture is a real
+## multi-file program in a temporary folder, translated in-process; the
+## command line and the run against python3 are in `link_cli_test.agc`.
+
+import Grammar from "../../src/grammar"
+import Link from "../src/link"
+import Py2Agc from "../src/py2agc"
 
 LIB = "def inc(x: int, step: int) -> int:\n    return x + step\n\n\ndef twice(x: int) -> int:\n    return x * 2\n"
 MID = "from lib import twice\n\n\ndef quad(step: int, x: int) -> int:\n    return twice(x) + step\n"
 SAME = "def f(x: int) -> int:\n    return x\n"
 
-struct Ran
-  code: Int
-  stdout: String
-  stderr: String
-end
-
-# The binary under test: `$AGC_PY_AGENTICA` (the Makefile sets it) or
-# `agentica`.
-def agentica() -> String
-  case System.env("AGC_PY_AGENTICA")
-    ok(path) if !path.empty?() -> path
-    _ -> "agentica"
-  end
-end
-
-def capture(command: String, args: List[String]) -> Result[Ran]
-  proc = try Process.spawn_captured(command, args)
-  out = try Process.output(proc, 60000)
-  code = try Process.wait(proc, 60000)
-  ok(Ran(code: code, stdout: out.stdout, stderr: out.stderr))
-end
-
-def cli(args: List[String]) -> Result[Ran] = capture(agentica(), ["agc-py/src/main.agc"] + args)
-
-# Runs `body` in a fresh folder of this test and removes it afterwards, whatever
-# the body answers.
-def in_folder(n: Int, body: Fn[String, Result[Void]]) -> Result[Void]
-  folder = "/tmp/agc_link_#{System.pid()}_#{n}"
-  try Path.remove(folder)
-  try Dir.mkdir_private(folder)
-  result = body.call(folder)
-  _ = Path.remove(folder)
-  result
-end
-
-def write_files(dir: String, files: Map[String, String]) -> Result[Void]
+# Writes `files` (name to text) in a fresh folder of this test, translates its
+# `prog.py` and removes the folder.
+def translate(compiled: Grammar.Grammar, n: Int, files: Map[String, String]) -> Result[List[Link.Unit]]
+  dir = "/tmp/agc_link_#{System.pid()}_#{n}"
+  try Path.remove(dir)
+  try Dir.mkdir_private(dir)
   for name in files.keys()
     try File.write_text("#{dir}/#{name}.py", files.get(name, ""))
   end
 
-  ok()
+  result = Py2Agc.translate_modules(compiled, "#{dir}/prog.py", [])
+  _ = Path.remove(dir)
+  result
 end
 
-# Translating `prog.py` (with `files` beside it) refuses: exit 1, nothing
-# written, and the diagnostic holds every needle.
-def refuses(n: Int, files: Map[String, String], needles: List[String]) -> Result[Void]
-  in_folder(n) do |dir|
-    try write_files(dir, files)
-    ran = try cli(["#{dir}/prog.py", "-o", "#{dir}/out.agc"])
-    try Test.eq(ran.code, 1)
-    try Test.eq(try Dir.list(dir), Map.keys(files).sort.map { |name| "#{name}.py" })
-    for needle in needles
-      try Test.assert(ran.stderr.include?(needle), ran.stderr)
-    end
+# Translating refuses, and the rendered diagnostic holds every needle.
+def refuses(compiled: Grammar.Grammar, n: Int, files: Map[String, String], needles: List[String]) -> Result[Void]
+  case translate(compiled, n, files)
+    ok(_) -> error("expected a refusal")
 
-    ok()
+    error(e) ->
+      for needle in needles
+        try Test.assert(e.message.include?(needle), e.message)
+      end
+
+      ok()
   end
 end
 
 def main() -> Void
+  compiled: Result[Grammar.Grammar] = error("grammar is not loaded during discovery")
+  if System.args() == ["--agentica-test", "run"]
+    compiled = Grammar.load("agc-py/grammars/py312.grammar")
+  end
+
   Test.run([
-    Test.test("every import form links to the sibling file and runs like python3, from .agc and from .agcb") do
-      in_folder(1) do |dir|
-        try Dir.mkdir("#{dir}/app")
-        try Dir.mkdir("#{dir}/one")
-        try Dir.mkdir("#{dir}/two")
-        try Dir.mkdir("#{dir}/out")
-        prog = "import lib\nimport lib as l2\nimport mid\nimport util\nfrom lib import twice as dbl, inc\n"
-        prog = prog + "from mid import quad\nprint(lib.inc(1, 2), l2.twice(3), dbl(4), inc(5, 6), quad(step=7, x=8))\n"
-        prog = prog + "print(util.f(9))\n"
-        try write_files("#{dir}/app", {"prog": prog})
-        try write_files("#{dir}/one", {"lib": LIB, "mid": MID})
-        try write_files("#{dir}/two", {"util": SAME})
-        args = ["#{dir}/app/prog.py", "-I", "#{dir}/one", "-I#{dir}/two"]
-        agc = try cli(args + ["-o", "#{dir}/out/prog.agc"])
-        try Test.eq(agc.code, 0)
-        try Test.eq(try Dir.list("#{dir}/out"), ["lib.agc", "mid.agc", "prog.agc", "util.agc"])
-        text = try File.read_text("#{dir}/out/prog.agc")
-        try Test.assert(text.start_with?("import Lib from \"lib\"\nimport L2 from \"lib\"\n"), text)
-        try Test.assert(text.include?("import {twice as dbl, inc} from \"lib\"\nimport {quad} from \"mid\""), text)
-        try Test.assert(!text.include?("import Mid"), text)
-        try Test.assert(!(try File.read_text("#{dir}/out/lib.agc")).include?("def main"), "a module has no main")
-        agcb = try cli(args + ["--agcb", "-o", "#{dir}/prog.agcb"])
-        try Test.eq(agcb.code, 0)
-        try Test.eq(try Dir.list(dir), ["app", "one", "out", "prog.agcb", "two"])
-        expected = try capture("env", ["PYTHONPATH=#{dir}/one:#{dir}/two", "python3", "#{dir}/app/prog.py"])
-        try Test.eq(expected.stdout, "3 6 8 11 23\n9\n")
-        from_agc = try capture(agentica(), ["#{dir}/out/prog.agc"])
-        from_agcb = try capture(agentica(), ["run", "--", "#{dir}/prog.agcb"])
-        try Test.eq(from_agc.stdout, expected.stdout)
-        Test.eq(from_agcb.stdout, expected.stdout)
-      end
-    end,
-    Test.test("two modules with the same function name, a call result method and a call in an interpolation") do
-      in_folder(16) do |dir|
-        prog = "import a\nimport b\nfrom b import f as g\n\nprint(a.f(1), b.f(2), g(3))\nprint(b.f(2).upper())\n"
-        prog = prog + "print(f\"{a.f(1)} and {g(3)}\")\n"
-        a = "\"\"\"Module a.\"\"\"\n\n\ndef f(x: int) -> int:\n    return x + 1\n"
-        b = "def f(x: int) -> str:\n    return \"b\" + str(x)\n"
-        try write_files(dir, {"prog": prog, "a": a, "b": b})
-        try Dir.mkdir("#{dir}/out")
-        built = try cli(["#{dir}/prog.py", "-o", "#{dir}/out/prog.agc"])
-        try Test.eq(built.code, 0)
-        text = try File.read_text("#{dir}/out/prog.agc")
-        try Test.assert(text.include?("A.f(1)") and text.include?("B.f(2)") and text.include?("g(3)"), text)
-        try Test.assert(!(try File.read_text("#{dir}/out/a.agc")).include?("Module a"), "the docstring is dropped")
-        expected = try capture("python3", ["#{dir}/prog.py"])
-        try Test.eq(expected.stdout, "2 b2 b3\nB2\n2 and b3\n")
-        from_agc = try capture(agentica(), ["#{dir}/out/prog.agc"])
-        Test.eq(from_agc.stdout, expected.stdout)
-      end
-    end,
-    Test.test("a program with imports needs -o, and an output that is a module's file is refused") do
-      in_folder(2) do |dir|
-        try write_files(dir, {"prog": "import lib\nprint(lib.twice(2))\n", "lib": LIB})
-        printed = try cli(["#{dir}/prog.py"])
-        try Test.eq(printed.code, 1)
-        try Test.eq(printed.stdout, "")
-        try Test.assert(printed.stderr.include?("pass -o OUT.agc"), printed.stderr)
-        clash = try cli(["#{dir}/prog.py", "-o", "#{dir}/lib.agc"])
-        try Test.eq(clash.code, 1)
-        try Test.assert(clash.stderr.include?("module lib.agc"), clash.stderr)
-        Test.eq(try Dir.list(dir), ["lib.py", "prog.py"])
-      end
+    Test.test("every import form links to an import of the sibling file, in dependency order") do
+      prog = "import lib\nimport lib as l2\nimport mid\nfrom lib import twice as dbl, inc\nfrom mid import quad\n"
+      prog = prog + "print(lib.inc(1, 2), l2.twice(3), dbl(4), inc(5, 6), quad(step=7, x=8))\n"
+      units = try translate(compiled.unwrap!, 1, {"prog": prog, "lib": LIB, "mid": MID})
+      try Test.eq(units.map { |unit| unit.name }, ["lib.agc", "mid.agc", "prog.agc"])
+      text = units[2].text
+      try Test.assert(
+        text.start_with?("import Lib from \"lib\"\nimport L2 from \"lib\"\nimport {twice as dbl, inc}"),
+        text,
+      )
+
+      try Test.assert(text.include?("import {quad} from \"mid\"") and !text.include?("import Mid"), text)
+      try Test.assert(text.include?("Lib.inc(1, 2)") and text.include?("L2.twice(3)"), text)
+      try Test.assert(units[1].text.include?("import {twice} from \"lib\"\n"), units[1].text)
+      try Test.assert(!units[0].text.include?("def main"), units[0].text)
+      Test.assert(text.include?("def main() -> Void"), text)
     end,
     Test.test("a call through an import checks arity like a local call") do
       refuses(
+        compiled.unwrap!,
         3,
         {"prog": "from lib import inc\nprint(inc(1))\n", "lib": LIB},
         ["prog.py:2:1 error[PY-CALL-ARITY]", "`inc` is missing 1 required argument (`step`)"],
@@ -142,27 +75,41 @@ def main() -> Void
     end,
     Test.test("a default is not lowered across modules") do
       refuses(
+        compiled.unwrap!,
         4,
         {"prog": "import lib\nprint(lib.f(1))\n", "lib": "def f(x: int, y: int = 1) -> int:\n    return x + y\n"},
         ["error[PY-CALL-ARITY]", "`lib.f` is missing 1 required argument (`y`)", "defaults do not cross modules"],
       )
     end,
     Test.test("an argument of the wrong type refuses") do
-      refuses(5, {"prog": "import lib\nprint(lib.twice(\"a\"))\n", "lib": LIB}, ["error[PY-TYPE-MISMATCH]"])
+      refuses(
+        compiled.unwrap!,
+        5,
+        {"prog": "import lib\nprint(lib.twice(\"a\"))\n", "lib": LIB},
+        ["error[PY-TYPE-MISMATCH]"],
+      )
     end,
     Test.test("a member the module does not have refuses") do
       refuses(
+        compiled.unwrap!,
         6,
         {"prog": "import lib\nprint(lib.nope(1))\n", "lib": LIB},
         ["error[PY-NAME-UNKNOWN]", "does not define a function `nope`"],
       )
     end,
     Test.test("a member and a module are not values") do
-      try refuses(7, {"prog": "import lib\nx: int = lib.twice\n", "lib": LIB}, ["`lib.twice` is not a value"])
-      refuses(8, {"prog": "import lib\nprint(lib)\n", "lib": LIB}, ["module `lib` is not a value"])
+      try refuses(
+        compiled.unwrap!,
+        7,
+        {"prog": "import lib\nx: int = lib.twice\n", "lib": LIB},
+        ["`lib.twice` is not a value"],
+      )
+
+      refuses(compiled.unwrap!, 8, {"prog": "import lib\nprint(lib)\n", "lib": LIB}, ["module `lib` is not a value"])
     end,
     Test.test("an import whose alias Agentica reserves refuses") do
       refuses(
+        compiled.unwrap!,
         17,
         {"prog": "import time\nprint(time.f(1))\n", "time": SAME},
         ["prog.py:1:8 error[PY-OUT-OF-SUBSET]", "becomes `Time`", "a type name Agentica reserves"],
@@ -170,6 +117,7 @@ def main() -> Void
     end,
     Test.test("an import whose alias is a type alias of the file refuses") do
       refuses(
+        compiled.unwrap!,
         18,
         {"prog": "import point\ntype Point = int\nprint(point.f(1))\n", "point": SAME},
         ["error[PY-OUT-OF-SUBSET]", "becomes `Point`", "type alias of this file"],
@@ -177,6 +125,7 @@ def main() -> Void
     end,
     Test.test("two imports with the same alias refuse") do
       refuses(
+        compiled.unwrap!,
         19,
         {"prog": "import lib\nimport lib as Lib\nprint(lib.twice(1), Lib.twice(2))\n", "lib": LIB},
         ["prog.py:2:15 error[PY-OUT-OF-SUBSET]", "another import of this file already uses"],
@@ -184,25 +133,15 @@ def main() -> Void
     end,
     Test.test("a function renamed to an uppercase name refuses") do
       refuses(
+        compiled.unwrap!,
         20,
         {"prog": "from lib import twice as Dbl\nprint(Dbl(1))\n", "lib": LIB},
         ["prog.py:1:26 error[PY-OUT-OF-SUBSET]", "must start with a lowercase letter"],
       )
     end,
-    Test.test("-I needs a directory") do
-      in_folder(21) do |dir|
-        try write_files(dir, {"prog": "print(1)\n"})
-        for args in [["-I"], ["-I", "-o"], ["-I=#{dir}"]]
-          ran = try cli(["#{dir}/prog.py"] + args)
-          try Test.eq(ran.code, 2)
-          try Test.assert(ran.stderr.include?("-I needs DIR"), ran.stderr)
-        end
-
-        ok()
-      end
-    end,
     Test.test("a type alias cannot be imported") do
       refuses(
+        compiled.unwrap!,
         9,
         {"prog": "from lib import Names\n", "lib": "type Names = list[str]\n"},
         ["prog.py:1:17 error[PY-OUT-OF-SUBSET]", "type aliases do not cross modules"],
@@ -210,6 +149,7 @@ def main() -> Void
     end,
     Test.test("a name a module only imports cannot be imported through it") do
       refuses(
+        compiled.unwrap!,
         10,
         {"prog": "from mid import twice\n", "lib": LIB, "mid": MID},
         ["prog.py:1:17 error[PY-NAME-UNKNOWN]", "module `mid` has no function `twice`"],
@@ -217,31 +157,15 @@ def main() -> Void
     end,
     Test.test("an imported module holds only defs and aliases") do
       refuses(
+        compiled.unwrap!,
         11,
         {"prog": "import lib\nprint(1)\n", "lib": "count: int = 3\n"},
         ["lib.py:1:1 error[PY-OUT-OF-SUBSET]", "may only declare"],
       )
     end,
-    Test.test("a standard-library import refuses until it is mapped") do
-      refuses(
-        12,
-        {"prog": "import math\nprint(1)\n"},
-        ["prog.py:1:8 error[PY-OUT-OF-SUBSET]", "`math` is a standard-library module"],
-      )
-    end,
-    Test.test("a refusal in a deeper module is rendered against that module's file and writes nothing") do
-      refuses(
-        13,
-        {
-          "prog": "import mid\nprint(mid.g(1))\n", "lib": SAME,
-          "mid": "import lib\n\n\ndef g(x: int) -> int:\n    return lib.f(\"a\")\n",
-        },
-        ["mid.py:5:", "error[PY-TYPE-MISMATCH]"],
-      )
-    end,
     Test.test("an import cycle and an unknown module refuse before emission") do
-      try refuses(14, {"prog": "import lib\n", "lib": "import prog\n"}, ["error[PY-IMPORT-CYCLE]"])
-      refuses(15, {"prog": "import nope\n"}, ["error[PY-IMPORT-UNKNOWN]"])
+      try refuses(compiled.unwrap!, 14, {"prog": "import lib\n", "lib": "import prog\n"}, ["error[PY-IMPORT-CYCLE]"])
+      refuses(compiled.unwrap!, 15, {"prog": "import nope\n"}, ["error[PY-IMPORT-UNKNOWN]"])
     end,
   ])
 end
