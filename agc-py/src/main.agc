@@ -6,13 +6,16 @@
 ## Without `-o` the `.agc` text goes to standard output. The whole text is
 ## built before anything is written, and `-o` writes a temporary file beside
 ## the output and renames it into place, so a failure leaves no partial file
-## and keeps an older output as it was. `--agcb` compiles the emitted program
-## with `agentica compile` (`$AGENTICA`, else `agentica` on `PATH`) in a private folder
-## beside the output, where the program is named after the input
-## (`prog.py` becomes `prog.agc`): the bytecode records that name, so the same
-## input name and text give the same bytes wherever the output goes. A
-## refusal, or a compile failure, prints its diagnostics to standard error and
-## exits 1; a bad command line exits 2.
+## and keeps an older output as it was.
+##
+## `--agcb` compiles the emitted program with `agentica compile`
+## (`$AGC_PY_AGENTICA`, else `agentica` on `PATH`) in a private folder beside
+## the output. The program is named after the input (`prog.py` becomes
+## `prog.agc`): the bytecode records that name, so the same input name and text
+## give the same bytes wherever the output goes.
+##
+## A refusal, or a compile failure, prints its diagnostics to standard error
+## and exits 1; a bad command line exits 2.
 
 import Grammar from "../../src/grammar"
 import OP from "std/option_parser"
@@ -160,9 +163,10 @@ def compile_in(folder: String, name: String, text: String, path: String) -> Resu
   end
 end
 
-# The binary that compiles: `$AGENTICA` (as the Makefile sets it) or `agentica`.
+# The binary that compiles: `$AGC_PY_AGENTICA` (the Makefile sets it) or
+# `agentica`.
 def agentica() -> String
-  case System.env("AGENTICA")
+  case System.env("AGC_PY_AGENTICA")
     ok(path) if !path.empty?() -> path
     _ -> "agentica"
   end
@@ -188,8 +192,9 @@ def finish_compile(proc: Process, folder: String) -> Result[Void]
   code = try Process.wait(proc, 120000)
   return ok() if code == 0
 
+  diagnostic = out.stderr.replace("#{folder}/", "").strip()
   error(
-    "agc-py: `agentica compile` refused the emitted program (exit #{code})\n#{out.stderr.replace("#{folder}/", "")}" +
-    "\nrun without --agcb to see the emitted program",
+    "agc-py: `agentica compile` refused the emitted program (exit #{code})\n#{diagnostic}\n" +
+    "run without --agcb to see the emitted program",
   )
 end
