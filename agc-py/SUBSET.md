@@ -238,23 +238,38 @@ plain types only.
     lower to the `Float` literals `3.141592653589793`/`2.718281828459045`/
     `6.283185307179586`. The arguments are `float` (an `int` is
     `PY-TYPE-MISMATCH`), and every other member, `math.inf` included, is
-    `PY-IMPORT-UNKNOWN`.
-  - `sys`: `argv` (-> the program name and `System.args()`, as CPython's
-    `argv[0]` and the rest) and `exit(code)` (-> `System.exit`, the code is
-    required). Stdio is unmapped (`IO.gets` and `IO.warn` differ from the
-    file objects in their newlines).
+    `PY-IMPORT-UNKNOWN`. Where CPython raises a catchable `ValueError` or
+    `OverflowError` (`sqrt` of a negative, `floor`/`ceil` of NaN or an
+    infinity) the backend halts the run: no handler can catch it.
+  - `sys`: `argv` (-> the program name and `System.args()`; the name is the
+    backend program's, not the script path CPython puts in `argv[0]`) and
+    `exit(code)` (-> `System.exit` of the code modulo 256, as the operating
+    system reduces it; the code is required). `sys.exit` ends the run at once,
+    where CPython raises `SystemExit`, which a bare `except:` would catch.
+    Stdio is unmapped (`IO.gets` and `IO.warn` differ from the file objects in
+    their newlines).
   - `os`: `environ[name]` key lookup only (-> `System.env(name)`, which
-    returns a catchable `Result`); `os.getenv(name)` lowers the same way (an
-    unset variable is the error, where CPython answers `None`). Iteration,
-    `len` and `in` over `environ` are `PY-OUT-OF-SUBSET`. `os.getcwd()` (->
-    `Path.cwd()`, a `Result`). The rest of `os` is `PY-IMPORT-UNKNOWN`.
+    returns a catchable `Result`, the error being CPython's `KeyError`).
+    Iteration, `len` and `in` over `environ` are `PY-OUT-OF-SUBSET`.
+    `os.getenv(name)` answers `Optional[str]` (`none` for an unset variable)
+    and takes no default (`PY-CALL-ARITY`); test it with `is None`.
+    `os.getcwd()` (-> `Path.cwd()`, a catchable `Result`). The rest of `os`
+    is `PY-IMPORT-UNKNOWN`.
   - `open`: whole-file use only, through `open(path).read()` (->
-    `File.read_text`), `open(p, "w").write(s)` (-> `File.write_text`) and
+    `File.read_text`, with `\r\n` and `\r` read as `\n` like CPython's text
+    mode), `open(p, "w").write(s)` (-> `File.write_text`) and
     `open(p, "a").write(s)` (-> `File.append_text`), each a catchable
-    `Result`; a file object has no other form, so any other use or mode is
-    `PY-OUT-OF-SUBSET`.
-  - `html`: `escape(s)` (-> `std/html`, with `'` as `&#x27;` like CPython) and
-    `unescape(s)`.
+    `Result`. `write` is a statement: its result (a character count in
+    CPython) has no form. The backend reads at most 1 MiB and strict UTF-8
+    (CPython has no cap, and its `UnicodeDecodeError` is the backend's read
+    error). A file object has no other form, so any other use or mode is
+    `PY-OUT-OF-SUBSET`. A `def open` of the program is its own function.
+  - A keyword argument to a mapped function names the Python parameter and is
+    accepted, including for the functions CPython takes positionally only
+    (`math.sqrt(x=1.0)` is a `TypeError` there).
+  - `html`: `escape(s)` (-> `std/html`, with `'` as `&#x27;` like CPython).
+    `escape(s, quote=False)` is `PY-KWARG-UNKNOWN`. `html.unescape` is
+    unmapped until it can match CPython's decoding.
   - `urllib.parse`: `quote`, `quote_plus` (-> `std/uri`, spelled like
     CPython: `~` stays, `*` is escaped, `quote` keeps `/`) and `unquote`,
     `unquote_plus`, which return a catchable `Result` (CPython keeps a
@@ -263,7 +278,8 @@ plain types only.
   - `time`: `time()` (seconds as a `float`), `monotonic()` and `sleep(secs)`
     (-> `Time` and `Task.sleep`, in whole milliseconds).
   - `random`: `random()` (-> `Random.float`) and `randint(a, b)` (->
-    `Random.int`).
+    `Random.int`; `a > b` halts the run, where CPython raises a catchable
+    `ValueError`).
   - Not mapped, each member `PY-IMPORT-UNKNOWN` with "no member ... is mapped
     yet": `json`, `re`, `toml`, `datetime`, `http.client`, `mimetypes`,
     `cookies`, `argparse`, `logging`, `hashlib` and `pathlib`. Their Python

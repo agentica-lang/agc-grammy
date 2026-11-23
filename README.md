@@ -258,12 +258,13 @@ make check       # agentica check src examples tests
 make fmt         # agentica fmt, in place
 make fmt-check   # fails when a file is not formatted
 make lint        # style suggestions
-make test        # agentica test --max-steps 5000000 tests agc-py/tests
+make test        # agentica test --max-steps 2600000 tests agc-py/tests
 make ci          # check + fmt-check + lint + test
 ```
 
 `agentica test` with no path only looks in `test/` and `specs/`, so the tests
-live in `tests/` and are run as `agentica test tests`.
+live in `tests/` and `agc-py/tests/`, and `make test` runs them as
+`agentica test --max-steps 2600000 tests agc-py/tests`.
 
 CI runs the same targets: `.github/workflows/ci.yml` installs Agentica 0.36.0 and
 runs `make check`, `fmt-check`, `lint`, `test` and `example` on every pull request

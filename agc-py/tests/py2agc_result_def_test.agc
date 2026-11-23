@@ -9,7 +9,7 @@
 ## Sources stay a few lines each: the grammar load costs about 1.8 million
 ## steps and a translate roughly 0.2 million per source line (as of Agentica
 ## 0.36.0), and each test has the budget `make test` gives it (`--max-steps`,
-## 5 million), so a long source would not fit.
+## 2.6 million), so a long source would not fit.
 
 import EmitAssign from "../src/emit_assign"
 import EmitCtx from "../src/emit_ctx"

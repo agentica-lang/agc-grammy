@@ -15,7 +15,7 @@
 make check       # agentica check src examples tests
 make fmt         # format in place (CI runs fmt --check)
 make lint        # style suggestions, must stay clean
-make test        # agentica test --max-steps 5000000 tests agc-py/tests
+make test        # agentica test --max-steps 2600000 tests agc-py/tests
 make ci          # all of the above
 make example     # run the Python subset on examples/python/sample.py
 ```
