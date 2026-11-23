@@ -1,4 +1,5 @@
 AGENTICA ?= agentica
+export AGC_PY_AGENTICA = $(AGENTICA)
 
 .PHONY: check fmt fmt-check lint test ci example
 

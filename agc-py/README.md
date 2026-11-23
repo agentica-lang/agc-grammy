@@ -13,12 +13,27 @@ A Python 3.12 subset with mandatory typing, compiled to Agentica bytecode
 annotations, every name needs a declared type, and anything untyped is a
 frontend error before anything is emitted. See `roadmap.md` for the phases.
 
+## Command line
+
+```bash
+agentica agc-py/src/main.agc FILE.py            # the .agc text on standard output
+agentica agc-py/src/main.agc FILE.py -o OUT.agc # or into a file
+```
+
+The whole text is built first; `-o` writes a temporary file and renames it into
+place, so a failure leaves no partial output and keeps an older one. A refusal
+prints its diagnostics to standard error and exits 1; a bad command line
+exits 2. The command translates one file: local imports wait for issue #26.
+A kill (SIGKILL, SIGINT) can leave `OUT.PID.tmp` behind as a file; the command
+does not handle signals.
+
 ## Layout
 
 ```text
 agc-py/README.md        this file: goal, pipeline and subset sketch
 agc-py/roadmap.md      the work in phases, with exit criteria
-agc-py/src/py2agc.agc  the translator: `.py` in, typed `.agc` out (CLI is phase 4)
+agc-py/src/py2agc.agc  the translator: `.py` in, typed `.agc` out
+agc-py/src/main.agc    the command line (see below)
 agc-py/src/modules.agc  local module resolution: entry folder, search path, cycles
 agc-py/tests/          Agentica unit tests (run from the repo root)
 ```
