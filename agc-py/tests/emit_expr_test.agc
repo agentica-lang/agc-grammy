@@ -85,11 +85,11 @@ def cased_pre(
   )
 end
 
-# One refusal fixture: emitting `expr` must fail with `code`.
 def result_sig(name: String, ret: String) -> EmitCtx.Sig
   EmitCtx.Sig(name: name, params: ["x"], types: ["Int"], defaults: [none], ret: ret)
 end
 
+# One refusal fixture: emitting `expr` must fail with `code`.
 def errcased(expr: String, scope: Map[String, String], code: String) -> ErrCase
   ErrCase(expr: expr, scope: scope, code: code)
 end

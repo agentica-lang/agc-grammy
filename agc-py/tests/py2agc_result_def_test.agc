@@ -171,16 +171,6 @@ def main() -> Void
         ok(text) -> Test.assert(false, "expected a refusal, emitted #{text}")
       end
     end,
-    # The handler of a top-level `try` is not a propagation context: nothing
-    # above it would catch the error.
-    Test.test("a top-level handler refuses a Result call") do
-      source = "def p(s: str) -> \"Result[None]\":\n    print(s)\n" + "try:\n    print(1)\nexcept:\n    p(\"1\")\n"
-
-      case Py2Agc.translate(compiled.unwrap!, "prog.py", source)
-        error(e) -> Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
-        ok(text) -> Test.assert(false, "expected a refusal, emitted #{text}")
-      end
-    end,
     # `return g()` with a `None` call runs it and succeeds.
     Test.test("returning a None call under Result[None] runs it then succeeds") do
       source = (

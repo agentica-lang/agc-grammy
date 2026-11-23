@@ -161,13 +161,8 @@ def emit_for(
       elem = elem_type(out.type)
       case elem
         none ->
-          code = "PY-OPERATOR"
-          if EmitExpr.result_inner(out.type).some?
-            code = "PY-TYPE-MISMATCH"
-          end
-
           EmitCtx.refuse_at(
-            code,
+            not_iterable_code(out.type),
             "for needs a List, Range or String iterable, found #{out.type}",
             some("use a list, a range, or a string"),
             iterable.start,
@@ -225,6 +220,15 @@ def emit_next(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
   end
 
   EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["next"], scope: ctx.scope, next_temp: ctx.next_temp))
+end
+
+## The refusal code of a `for` over a type with no loop form: an uncaught
+## `Result` is a type mismatch (nothing unwraps it), anything else an
+## operator problem. Shared with the coordinator spine.
+def not_iterable_code(found: String) -> String
+  return "PY-TYPE-MISMATCH" if EmitExpr.result_inner(found).some?
+
+  "PY-OPERATOR"
 end
 
 ## The element type a `for` binds, or none when the iterable has no loop
