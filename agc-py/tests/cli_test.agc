@@ -3,6 +3,10 @@
 ## test works in a folder of its own that it creates and removes.
 
 GOOD = "def add(x: int, y: int) -> int:\n    return x + y\nprint(add(1, 2))\n"
+# The frontend does not check the range of an int literal yet, so only
+# `agentica compile` refuses this one (CHECK-INT-RANGE). When the translator
+# learns to refuse it, pick another program that the frontend lets through.
+HUGE = "x: int = 99999999999999999999999\nprint(x)\n"
 BAD = "def f(x) -> int:\n    return x\n"
 
 struct Ran
@@ -11,7 +15,8 @@ struct Ran
   stderr: String
 end
 
-# The binary under test: `$AGC_PY_AGENTICA` (the Makefile sets it) or `agentica`.
+# The binary under test: `$AGC_PY_AGENTICA` (the Makefile sets it) or
+# `agentica`.
 def agentica() -> String
   case System.env("AGC_PY_AGENTICA")
     ok(path) if !path.empty?() -> path
@@ -25,6 +30,8 @@ def capture(command: String, args: List[String], folder: String = ".") -> Result
   code = try Process.wait(proc, 60000)
   ok(Ran(code: code, stdout: out.stdout, stderr: out.stderr))
 end
+
+def run_bytecode(path: String) -> Result[Ran] = capture(agentica(), ["run", "--", path])
 
 def cli(args: List[String]) -> Result[Ran] = capture(agentica(), ["agc-py/src/main.agc"] + args)
 
@@ -92,6 +99,44 @@ def main() -> Void
         bare = try capture(agentica(), ["main.agc", "#{dir}/good.py", "-o", "#{dir}/bare.agc"], "agc-py/src")
         try Test.eq(bare.code, 0)
         Test.eq(try File.read_text("#{dir}/bare.agc"), try File.read_text("#{dir}/out.agc"))
+      end
+    end,
+    Test.test("--agcb compiles to bytecode that runs, and the same input gives the same bytes anywhere") do
+      in_folder(7) do |dir|
+        try Dir.mkdir("#{dir}/a")
+        try Dir.mkdir("#{dir}/b")
+        try File.write_text("#{dir}/good.py", GOOD)
+        first = try cli(["#{dir}/good.py", "--agcb", "-o", "#{dir}/a/first.agcb"])
+        second = try cli(["#{dir}/good.py", "--agcb", "-o", "#{dir}/b/other.agcb"])
+        try Test.eq(first.code, 0)
+        try Test.eq(second.code, 0)
+        try Test.eq(try File.sha256("#{dir}/a/first.agcb"), try File.sha256("#{dir}/b/other.agcb"))
+        try Test.eq(try Dir.list("#{dir}/a"), ["first.agcb"])
+        ran = try run_bytecode("#{dir}/a/first.agcb")
+        try Test.eq(ran.code, 0)
+        Test.eq(ran.stdout, "3\n")
+      end
+    end,
+    Test.test("a compile failure shows the diagnostic, exits 1 and leaves nothing behind") do
+      in_folder(8) do |dir|
+        try File.write_text("#{dir}/huge.py", HUGE)
+        ran = try cli(["#{dir}/huge.py", "--agcb", "-o", "#{dir}/huge.agcb"])
+        try Test.eq(ran.code, 1)
+        try Test.assert(ran.stderr.include?("error[CHECK-INT-RANGE]"), ran.stderr)
+        try Test.assert(ran.stderr.include?("huge.agc:"), ran.stderr)
+        try Test.assert(ran.stderr.include?("run without --agcb"), ran.stderr)
+        Test.eq(try Dir.list(dir), ["huge.py"])
+      end
+    end,
+    Test.test("a refusal before compiling writes nothing, and --agcb without -o exits 2") do
+      in_folder(9) do |dir|
+        try File.write_text("#{dir}/bad.py", BAD)
+        refused = try cli(["#{dir}/bad.py", "--agcb", "-o", "#{dir}/bad.agcb"])
+        try Test.eq(refused.code, 1)
+        try Test.assert(refused.stderr.include?("error[PY-UNTYPED-DEF]"), refused.stderr)
+        try Test.eq(try Dir.list(dir), ["bad.py"])
+        usage = try cli(["#{dir}/bad.py", "--agcb"])
+        Test.eq(usage.code, 2)
       end
     end,
     Test.test("a missing file exits 1 and a bad command line exits 2") do

@@ -18,14 +18,24 @@ frontend error before anything is emitted. See `roadmap.md` for the phases.
 ```bash
 agentica agc-py/src/main.agc FILE.py            # the .agc text on standard output
 agentica agc-py/src/main.agc FILE.py -o OUT.agc # or into a file
+agentica agc-py/src/main.agc FILE.py --agcb -o OUT.agcb # bytecode
 ```
 
 The whole text is built first; `-o` writes a temporary file and renames it into
 place, so a failure leaves no partial output and keeps an older one. A refusal
 prints its diagnostics to standard error and exits 1; a bad command line
-exits 2. The command translates one file: local imports wait for issue #26.
-A kill (SIGKILL, SIGINT) can leave `OUT.PID.tmp` behind as a file; the command
-does not handle signals.
+exits 2. The command translates one file: local imports wait for issue #26,
+and so does an import search path (`-I`), since nothing reads one yet.
+
+`--agcb` needs `-o`. It runs `agentica compile` (`$AGC_PY_AGENTICA`, else
+`agentica` from `PATH`) on the emitted program inside a private folder beside
+the output, and a compile failure prints that diagnostic (the program is named
+after the input, `prog.py` is `prog.agc`) and exits 1. The bytecode records the
+program's name, so the same input name and text give the same bytes wherever
+the output goes.
+
+A kill (SIGKILL, SIGINT) can leave `OUT.PID.tmp` behind: a file with `-o`, a
+folder with `--agcb`. The command does not handle signals.
 
 ## Layout
 
