@@ -149,10 +149,15 @@ def emit_for(
   body_code: List[String],
   assigned: Bool,
 ) -> EmitCtx.StmtRes
-  made = EmitExpr.emit_with(iterable, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  made = EmitExpr.emit_with(iterable, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
   case made
     error(e) -> refusal_from_emit(e.message, iterable)
-    ok(out) ->
+    ok(emitted) ->
+      out = emitted
+      if EmitCtx.propagates?(ctx)
+        out = EmitExpr.unwrap_whole(emitted)
+      end
+
       elem = elem_type(out.type)
       case elem
         none ->
@@ -245,18 +250,21 @@ end
 
 # Emits one branch guard and insists on `Bool`, shifting every preamble
 # temp by the incoming supply. Failures are `CODE: message = help: hint`
-# strings; the caller renders them into spanned refusals. A condition's own
-# operands unwrap inline (`int(s) > 0` is `(try s.to_i) > 0`); a directly
-# `Result[Bool]` guard stays a refusal because this slice has no `Bool`
-# `Result` producer (`int`/`float` give `Result[Int]`/`Result[Float]`), so
-# the shape is unreachable, and the refusal names the inner type when there
-# is one.
+# strings; the caller renders them into spanned refusals. Where a `Result`
+# propagates (an outlined `try` body or a `def` returning `Result[T]`) the
+# operands unwrap inline (`int(s) > 0` is `(try s.to_i) > 0`) and a guard
+# that is itself a `Result[Bool]` unwraps whole, like a ternary guard; where
+# nothing catches the error a `Result` guard refuses, naming the inner type.
 def emit_cond(ctx: EmitCtx.EmitCtx, node: Tree.Node, owner: String) -> Result[CondOut]
-  out = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  out = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
+  if EmitCtx.propagates?(ctx)
+    out = EmitExpr.unwrap_whole(out)
+  end
+
   inner = EmitExpr.result_inner(out.type)
-  if inner.some? and inner.unwrap! != "Bool"
+  if inner.some?
     return error(
-      "PY-COND-NOT-BOOL: `#{owner}` condition must be bool, found #{inner.unwrap!} = help: compare or convert to a bool first",
+      "PY-COND-NOT-BOOL: `#{owner}` condition holds an uncaught #{out.type} = help: use it inside a `try` body or a def returning `Result[T]`",
     )
   end
 

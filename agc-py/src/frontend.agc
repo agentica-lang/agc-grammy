@@ -44,7 +44,7 @@
 ## so a body problem can surface before a later top-level one.
 ##
 ## Annotations are checked against the known-type set (`int`, `str`, `float`,
-## `bool`, `None`, `list`, `dict`, `Optional`) plus the type aliases the
+## `bool`, `None`, `list`, `dict`, `Optional`, `Result`) plus the type aliases the
 ## position already declared (`type Alias = T` at top level): an unknown bare
 ## or dotted-head name is `PY-ANNOTATION-UNKNOWN`, while a bare `Any` (or
 ## `object`) and a `typing.Any` head are `PY-ANY`. Quoted forward references
@@ -547,7 +547,7 @@ KNOWN_NAMES = Set.new([
 
 # Annotation names the subset accepts (`SUBSET.md` section 1): anything else
 # is `PY-ANNOTATION-UNKNOWN`, while `Any` (or `object`) is `PY-ANY`.
-KNOWN_TYPES = Set.new(["bool", "dict", "float", "int", "list", "None", "Optional", "str"])
+KNOWN_TYPES = Set.new(["bool", "dict", "float", "int", "list", "None", "Optional", "Result", "str"])
 
 # A scope under construction: the names bound so far and the problems found.
 struct ScopeState

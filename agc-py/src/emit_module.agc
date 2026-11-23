@@ -372,13 +372,14 @@ def emit_def(asm: Asm, program: Frontend.Program, func_def: Frontend.FuncDef, so
   end
 end
 
-# `-> None` maps to the backend's `Void` (a bare `return` checks there);
-# anything else maps like an annotation.
+# `-> None` maps to the backend's `Void` (a bare `return` checks there),
+# `-> Result[T]` to the backend's fallible signature; anything else maps like
+# an annotation.
 def mapped_return(func_def: Frontend.FuncDef, aliases: Map[String, String]) -> Result[String]
   if func_def.return_type == "None" or func_def.return_type == "none"
     ok("Void")
   else
-    EmitAssign.map_annotation(func_def.return_type, aliases)
+    EmitAssign.map_return(func_def.return_type, aliases)
   end
 end
 
@@ -407,7 +408,7 @@ def emit_def_body(
       case EmitStmt.emit_block(ctx, func_def.body)
         EmitStmt.BlockRes.No(ref) -> StepRes.No(ref)
         EmitStmt.BlockRes.Ok(out) ->
-          if ret != "Void" and !returns_everywhere?(func_def.body)
+          if ret != "Void" and ret != "Result[Void]" and !returns_everywhere?(func_def.body)
             return StepRes.No(
               EmitCtx.Refusal(
                 code: "PY-OUT-OF-SUBSET",
@@ -425,6 +426,10 @@ def emit_def_body(
           body = append_self_reads(body, self_only_names(walked))
           if body.empty?
             body = ["nil"]
+          end
+
+          if ret == "Result[Void]" and !ends_with_return?(func_def.body)
+            body = body.push("ok()")
           end
 
           header = "def #{func_def.name}(#{params_text(func_def.params, param_types)}) -> #{ret}"
@@ -702,7 +707,20 @@ def returns_everywhere?(body: List[Frontend.Stmt]) -> Bool
   last = List.first(body.drop(body.size - 1))
   case last
     Frontend.Stmt.ReturnStmt(some(_), _) -> true
+    Frontend.Stmt.RaiseStmt(_) -> true
     Frontend.Stmt.IfStmt(arms, else_body) -> every_arm_returns?(arms) and returns_everywhere?(else_body)
+    _ -> false
+  end
+end
+
+# Whether the last statement already leaves the def, so no closing `ok()`
+# follows it (a `Result[None]` def otherwise ends with its success).
+def ends_with_return?(body: List[Frontend.Stmt]) -> Bool
+  return false if body.empty?
+
+  case List.first(body.drop(body.size - 1))
+    Frontend.Stmt.ReturnStmt(_, _) -> true
+    Frontend.Stmt.RaiseStmt(_) -> true
     _ -> false
   end
 end
@@ -793,6 +811,10 @@ def rewrite_line(line: String, unused: List[String]) -> String
 
     return line
   end
+
+  # The read mark of a handler message the def never uses: its binding became
+  # `_`, so the mark would name a variable that no longer exists.
+  return "#{indent}nil" if rest.start_with?("_ = ") and unused.include?(rest.slice(4, rest.length - 4))
 
   eq = rest.index_of("=")
   case eq

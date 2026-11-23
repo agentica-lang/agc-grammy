@@ -22,6 +22,7 @@ parameter and its return.** An untyped `def`, an unannotated first binding and
 | `list[T]` | `List[T]` | fixed element type; bare `list` is refused (`PY-ANNOTATION-UNKNOWN`) |
 | `dict[K, V]` | `Map[K, V]` | `K` is `str` or `int`; bare `dict` is refused (`PY-ANNOTATION-UNKNOWN`) |
 | `X \| None`, `Optional[X]` | `Optional[X]` | both spellings accepted, same meaning |
+| `Result[T]`, `Result[None]` | `Result[T]`, `Result[Void]` | only as a `def` return annotation (§4); anywhere else is `PY-OUT-OF-SUBSET` |
 | `"Fwd"` | the named type | string forward references resolve like bare names |
 
 `tuple`, `set`, `bytes`, `complex`, `object`, `Any`, `Final`, `ClassVar`,
@@ -125,8 +126,20 @@ plain types only.
 - `return` (a value only under a non-`Void` return; bare `return` only under
   `-> None`; anything else is `PY-TYPE-MISMATCH`). `raise E("msg")`
   lowers to `return error("msg")` — message only, the class is not modeled —
-  so any function that can raise returns `Result[T]` and every caller
-  handles it; the ripple is explicit, not inferred.
+  so any function that can raise is annotated `-> Result[T]` (`Result[None]`
+  for no value) and every caller handles it; the ripple is explicit, not
+  inferred. In a `Result` def a plain value returns as `ok(value)`, a
+  `Result[T]` value (a conversion, a call) returns as written, a bare
+  `return` or `return None` is the `Result[None]` success and falling off
+  the end of a `Result[None]` def is too. A `Result` def calls like a
+  `try` body: a call to one unwraps with `try` wherever an expression fits,
+  as a statement, a binding, a loop header or an `if`/`while` guard, and its
+  error returns to the caller. Outside a `Result` def and a `try` body such a
+  call refuses (`PY-TYPE-MISMATCH` or `PY-COND-NOT-BOOL`, at the call).
+  CPython has no `Result` name, so such a file does not run there as
+  written; the differential tests prepend `from __future__ import
+  annotations` to the CPython run (the subset itself does not accept that
+  import).
 - `try`/`except` with exactly one handler (bare, `except E` or
   `except E as e`; the class is accepted syntactically but ignored, since
   classes are not modeled — `e`, when bound, is the message `String`).
@@ -148,7 +161,7 @@ plain types only.
   every earlier inline call in front of it, so the holes still run in order.
   The value of a `return` is emitted the same way, but a `return` inside the
   body is `PY-TRY-CONTROL` first.
-  Outside `try` nothing catches the error, so that value refuses
+  Outside `try` and a `Result` def nothing catches the error, so that value refuses
   (`PY-TYPE-MISMATCH`, at the operand or the interpolation) instead of
   reaching the output as `ok(...)`; a bare `Result` a statement lane can
   spell as `try` is the only shape that passes through.

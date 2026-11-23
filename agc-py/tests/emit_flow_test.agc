@@ -353,6 +353,54 @@ def main() -> Void
 
       ok()
     end,
+    Test.test("a Result guard unwraps whole under a Result def and refuses elsewhere") do
+      source = "while lim(s):\n  pass\n"
+      cond = try while_cond_of(compiled.unwrap!, source)
+      lim = EmitCtx.Sig(name: "lim", params: ["s"], types: ["String"], defaults: [none], ret: "Result[Bool]")
+      scope = {"s": "String", "lim": EmitCtx.def_marker()}
+      caller = EmitCtx.EmitCtx(
+        source: source,
+        file: "flow.py",
+        scope: scope,
+        func_ret: "Result[Void]",
+        in_try: false,
+        next_temp: 0,
+        sigs: {"lim": lim},
+      )
+
+      done = try assert_ok(EmitFlow.emit_while(caller, cond, ["puts(s)"]))
+      try assert_lines(done.code, ["while true", "  if !((try lim(s)))", "    break", "  end", "  puts(s)", "end"])
+      plain = caller.with(func_ret: "Void")
+      res = EmitFlow.emit_while(plain, cond, ["puts(s)"])
+      try assert_refusal(res, "PY-COND-NOT-BOOL")
+      case res
+        EmitCtx.StmtRes.No(refusal) ->
+          try Test.assert(refusal.message.include?("uncaught Result[Bool]"), refusal.message)
+        EmitCtx.StmtRes.Ok(_) -> try Test.assert(false, "expected a refusal")
+      end
+
+      ok()
+    end,
+    Test.test("a Result iterable unwraps whole under a Result def") do
+      source = "for x in get(s):\n  pass\n"
+      parts = try for_parts_of(compiled.unwrap!, source)
+      get = EmitCtx.Sig(name: "get", params: ["s"], types: ["String"], defaults: [none], ret: "Result[List[Int]]")
+      caller = EmitCtx.EmitCtx(
+        source: source,
+        file: "flow.py",
+        scope: {"s": "String", "get": EmitCtx.def_marker()},
+        func_ret: "Result[Void]",
+        in_try: false,
+        next_temp: 0,
+        sigs: {"get": get},
+      )
+
+      done = try assert_ok(EmitFlow.emit_for(caller, parts.target, parts.iterable, ["puts(x)"], false))
+      try assert_lines(done.code, ["for x in (try get(s))", "  puts(x)", "end"])
+      res = EmitFlow.emit_for(caller.with(func_ret: "Void"), parts.target, parts.iterable, ["puts(x)"], false)
+      try assert_refusal(res, "PY-OPERATOR")
+      ok()
+    end,
     Test.test("while emits its guard and body") do
       source = "while n > 0:\n  pass\n"
       cond = try while_cond_of(compiled.unwrap!, source)
