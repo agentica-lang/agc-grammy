@@ -594,7 +594,12 @@ def aug_star(xname: String, xtype: String, rcode: String, rtype: String) -> Resu
   return ok(["#{xname} * #{rhs}", "String"]) if xtype == "String" and rtype == "Int"
 
   if xtype == "Int" and rtype == "String"
-    return error("PY-OPERATOR: repeat as `s * n`, not `n * s` = help: write #{rhs} * #{xname}")
+    shown = rcode
+    if rcode.start_with?("try ")
+      shown = rcode.slice(4, rcode.length - 4)
+    end
+
+    return error("PY-OPERATOR: repeat as `s * n`, not `n * s` = help: write #{shown} * #{xname}")
   end
 
   if ann_base(xtype) == "List" and rtype == "Int"

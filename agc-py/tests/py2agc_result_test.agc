@@ -161,6 +161,17 @@ def main() -> Void
       got = try agree(compiled.unwrap!, source, "holeorder")
       Test.assert(got.strip() == "g\n20\n1true", got)
     end,
+    # Every earlier inline conversion hoists, in hole order, in front of the
+    # later hole's own temp line.
+    Test.test("f-string holes hoist earlier inline calls in order") do
+      source = "py_tmp = f\"#{interp("int(s)")}#{interp("int(s)")}#{interp("d['k']")}\"\n"
+      tree = try Engine.run(compiled.unwrap!, "program", source)
+      node = List.last(List.first(Tree.find_all(tree, "assign")).children)
+      scope = {"s": "String", "d": "Map[String, Int]"}
+      out = try EmitExpr.emit_with(node, source, scope, {}, true)
+      try Test.eq(out.pre, ["py_t1 = (try s.to_i)", "py_t2 = (try s.to_i)", "py_t0 = d[\"k\"]"])
+      Test.assert(!out.code.include?("("), out.code)
+    end,
     # Two holes in one f-string unwrap inline, in hole order, with no temp
     # line that could reorder them.
     Test.test("f-string holes unwrap inline in hole order") do
