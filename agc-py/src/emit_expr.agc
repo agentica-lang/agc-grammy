@@ -194,6 +194,16 @@ def helpers() -> String
   )
 end
 
+## An emitted whole expression that is itself a `Result[T]` read as a `T`:
+## `(try code)`. The statement lanes call it where a guard or an iterable
+## consumes the value directly and a handler or the caller catches the error.
+def unwrap_whole(out: Out) -> Out
+  inner = result_inner(out.type)
+  return out if inner.none?
+
+  Out(code: "(try #{out.code})", type: inner.unwrap!, pre: out.pre)
+end
+
 ## The `T` of `Result[T]`, or none when `found` is not a `Result`.
 def result_inner(found: String) -> Optional[String]
   return none if !is_result?(found)
@@ -3089,6 +3099,17 @@ def emit_map_filter(args: CallArgs, target: String, source: String) -> Result[Do
         return error(
           "PY-OPERATOR: `#{target}` takes a named function, `#{name}` holds a `#{found}` value = help: wrap the call in a def first",
         )
+      end
+
+      case args.cx.sigs.get(name)
+        some(sig) ->
+          if sig.ret.start_with?("Result[")
+            return error(
+              "PY-OPERATOR: `#{target}` takes a def that cannot fail, found a Result def `#{name}` = help: call it in a loop inside a def returning `Result[T]`",
+            )
+          end
+
+        none -> name = name
       end
 
       temp = "py_x#{args.cx.next_temp}"

@@ -97,6 +97,12 @@ def refuse_at(code: String, message: String, help: Optional[String], start: Int,
   StmtRes.No(refusal)
 end
 
+## Whether a fallible value unwraps inline here: inside an outlined `try`
+## helper (it returns `Result[Void]`) and inside a `def` annotated
+## `-> Result[T]`, where `try` propagates the error to the caller. Control
+## statements (`return`, `break`, `next`) still read `in_try` alone.
+def propagates?(ctx: EmitCtx) -> Bool = ctx.in_try or ctx.func_ret.start_with?("Result[")
+
 ## Renders a refusal exactly like a frontend diagnostic.
 def render_refusal(file: String, source: String, refusal: Refusal) -> String
   Frontend.render(

@@ -223,6 +223,16 @@ def main() -> Void
       try Test.eq(ref.start, 9)
       ok()
     end,
+    # The handler of a top-level `try` is not a propagation context: nothing
+    # above it would catch the error of a call there.
+    Test.test("a top-level handler refuses an uncaught Result") do
+      source = "try:\n  print(1)\nexcept:\n  int(s)\n"
+      stmts = try stmts_of(compiled.unwrap!, source)
+      res = EmitStmt.emit_block(stmt_ctx(source, {"s": "String"}, "", 0), stmts)
+      ref = try assert_no(res, "PY-TYPE-MISMATCH")
+      try Test.assert(ref.message.include?("uncaught Result[Int]"), ref.message)
+      ok()
+    end,
     Test.test("if bindings do not escape") do
       source = "if x > 0:\n  y: int = 1\n  print(y)\n"
       stmts = try stmts_of(compiled.unwrap!, source)

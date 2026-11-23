@@ -85,6 +85,10 @@ def cased_pre(
   )
 end
 
+def result_sig(name: String, ret: String) -> EmitCtx.Sig
+  EmitCtx.Sig(name: name, params: ["x"], types: ["Int"], defaults: [none], ret: ret)
+end
+
 # One refusal fixture: emitting `expr` must fail with `code`.
 def errcased(expr: String, scope: Map[String, String], code: String) -> ErrCase
   ErrCase(expr: expr, scope: scope, code: code)
@@ -992,6 +996,19 @@ def main() -> Void
           # A local holding a value is not a callable: only a `def` name
           # lowers to the block callback.
           errcased("map(n, xs)", {"n": "Int", "xs": "List[Int]"}, "PY-OPERATOR"),
+          # A Result def has no block form: the callback would yield Results.
+          errcased_sigs(
+            "map(parse, xs)",
+            {"parse": EmitCtx.def_marker(), "xs": "List[String]"},
+            "PY-OPERATOR",
+            {"parse": result_sig("parse", "Result[Int]")},
+          ),
+          errcased_sigs(
+            "filter(check, xs)",
+            {"check": EmitCtx.def_marker(), "xs": "List[Int]"},
+            "PY-OPERATOR",
+            {"check": result_sig("check", "Result[Bool]")},
+          ),
           errcased("reversed(s)", {"s": "String"}, "PY-TYPE-MISMATCH"),
           errcased("all(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),
           errcased("any(xs)", {"xs": "List[Int]"}, "PY-TYPE-MISMATCH"),

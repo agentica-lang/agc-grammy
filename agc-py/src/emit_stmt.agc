@@ -296,7 +296,7 @@ def for_elem(ctx: EmitCtx.EmitCtx, iterable: Tree.Node) -> Result[String]
   out = try emit_expr_type(ctx, iterable)
   case EmitFlow.elem_type(out)
     some(item) -> ok(item)
-    none -> error("PY-OPERATOR: for needs a List, Range or String iterable, found #{out}")
+    none -> error("#{EmitFlow.not_iterable_code(out)}: for needs a List, Range or String iterable, found #{out}")
   end
 end
 
@@ -319,9 +319,14 @@ end
 
 # The static type of `node`.
 def emit_expr_type(ctx: EmitCtx.EmitCtx, node: Tree.Node) -> Result[String]
-  case EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(e) -> error(e.message)
-    ok(out) -> ok(out.type)
+    ok(out) ->
+      if EmitCtx.propagates?(ctx)
+        ok(EmitExpr.unwrap_whole(out).type)
+      else
+        ok(out.type)
+      end
   end
 end
 

@@ -33,15 +33,14 @@ import Tree from "../../src/tree"
 ## error(...)` form needs a backend-valid `Result` context: the top level
 ## (`func_ret == ""`, where `main` cannot return) halts instead, a def
 ## returning `Result[T]` (including an outlined `try` helper, which returns
-## `Result[Void]`) returns the error, and anything else is refused spanned
-## — the explicit caller ripple of a raising def is issue #24, kept out of
-## 3d on purpose.
+## `Result[Void]`) returns the error, and anything else is refused spanned:
+## the ripple is explicit, so a def that raises is annotated `-> Result[T]`.
 def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   if !result_context?(ctx.func_ret)
     return EmitCtx.refuse_at(
       "PY-OUT-OF-SUBSET",
       "raise inside a def returning #{ctx.func_ret} has no backend form",
-      some("annotate the def with the Result type its callers handle; the ripple is issue #24"),
+      some("annotate the def `-> Result[T]` so its callers handle the error"),
       expr.start,
       expr.stop,
     )
@@ -50,7 +49,7 @@ def emit_raise(ctx: EmitCtx.EmitCtx, expr: Tree.Node) -> EmitCtx.StmtRes
   target = EmitTry.raise_target(expr)
   if target.rule == "call" and EmitTry.single_message_arg?(target)
     raw = List.first(target.children.drop(1))
-    case EmitExpr.emit_with(raw, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+    case EmitExpr.emit_with(raw, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
       error(err) -> EmitCtx.refusal_from_error(raw.start, raw.stop, err)
       ok(raw_out) ->
         out = raw_out
@@ -123,7 +122,7 @@ end
 ## handler. A message that is itself a `Result` is refused naming its inner
 ## type, like `raise`.
 def emit_assert(ctx: EmitCtx.EmitCtx, cond: Tree.Node, msg: Optional[Tree.Node]) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(cond, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(cond, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(err) -> EmitCtx.refusal_from_error(cond.start, cond.stop, err)
     ok(found) ->
       if found.type != "Bool"
@@ -174,7 +173,7 @@ def emit_assert_msg(
   advanced: Int,
   node: Tree.Node,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(err) -> EmitCtx.refusal_from_error(node.start, node.stop, err)
     ok(out) ->
       found = out.type

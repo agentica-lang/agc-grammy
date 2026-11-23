@@ -669,6 +669,54 @@ def main() -> Void
       try Test.eq(ref_text("return\n", ref3), "return")
       ok()
     end,
+    Test.test("a Result def returns plain values as ok and Results as written") do
+      ctx = func_ctx("", "Result[Int]", {"n": "Int", "s": "String"})
+      ran = try run_seq(compiled.unwrap!, ["return n + 1\n", "return int(s)\n", "return int(s) + 1\n"], ctx)
+      try Test.eq(ran.lines, ["return ok(n + 1)", "return s.to_i", "return ok((try s.to_i) + 1)"])
+      void = try run_seq(compiled.unwrap!, ["return\n", "return None\n"], func_ctx("", "Result[Void]", {}))
+      try Test.eq(void.lines, ["return ok()", "return ok()"])
+      wrong = try run_no(compiled.unwrap!, "return \"a\"\n", ctx)
+      try Test.eq(wrong.code, "PY-TYPE-MISMATCH")
+      bare = try run_no(compiled.unwrap!, "return\n", ctx)
+      try Test.eq(bare.code, "PY-TYPE-MISMATCH")
+      inside = try run_no(compiled.unwrap!, "return 1\n", try_ctx("", "Result[Void]", {}))
+      try Test.eq(inside.code, "PY-TRY-CONTROL")
+      ok()
+    end,
+    Test.test("a Result def unwraps statements and bindings that elsewhere refuse") do
+      src = "int(s)\nx: int = int(s)\n"
+      ran = try run_all(compiled.unwrap!, src, func_ctx(src, "Result[Int]", {"s": "String"}))
+      try Test.eq(ran.lines, ["try s.to_i", "x: Int = try s.to_i"])
+      stmt = "int(s)\n"
+      top = try run_no(compiled.unwrap!, stmt, func_ctx(stmt, "", {"s": "String"}))
+      try Test.eq(top.code, "PY-TYPE-MISMATCH")
+      plain = try run_no(compiled.unwrap!, stmt, func_ctx(stmt, "Int", {"s": "String"}))
+      try Test.eq(plain.code, "PY-TYPE-MISMATCH")
+      ok()
+    end,
+    Test.test("a plain def refuses a Result def call as a statement") do
+      src = "p(s)\n"
+      p_sig = EmitCtx.Sig(name: "p", params: ["s"], types: ["String"], defaults: [none], ret: "Result[Int]")
+      ctx = EmitCtx.EmitCtx(
+        source: src,
+        file: "assign_test",
+        scope: {"s": "String", "p": EmitCtx.def_marker()},
+        func_ret: "Int",
+        in_try: false,
+        next_temp: 0,
+        sigs: {"p": p_sig},
+      )
+
+      ref = try run_no(compiled.unwrap!, src, ctx)
+      try Test.eq(ref.code, "PY-TYPE-MISMATCH")
+      ok()
+    end,
+    Test.test("Result spells only as a def return annotation") do
+      src = "x: Result[int] = 1\n"
+      ref = try run_no(compiled.unwrap!, src, top_ctx(src))
+      try Test.eq(ref.code, "PY-OUT-OF-SUBSET")
+      ok()
+    end,
     Test.test("grouped and quoted shapes run") do
       ran = try run_seq(
         compiled.unwrap!,

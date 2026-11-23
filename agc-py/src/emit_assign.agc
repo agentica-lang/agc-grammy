@@ -132,15 +132,16 @@ end
 
 ## Emits an expression statement (`expr_stmt`, `call_stmt`, or a bare
 ## expression node): the value emits through `EmitExpr.emit` and its code
-## stands alone, discarded. Inside a `try` body (`in_try`) a directly
-## consumed `Result[T]` unwraps with `try` so the error reaches the
-## handler; outside `try` it stays a type error (no handler to catch it).
+## stands alone, discarded. Where a `Result` propagates (a `try` body or a
+## def returning `Result[T]`) a directly consumed `Result[T]` unwraps with
+## `try` so the error reaches the handler or the caller; elsewhere it refuses
+## as `PY-TYPE-MISMATCH` (nothing would catch the error).
 def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
-      if ctx.in_try
+      if EmitCtx.propagates?(ctx)
         inner = EmitExpr.result_inner(out.type)
         case inner
           some(_) ->
@@ -153,6 +154,16 @@ def emit_expr_stmt(ctx: EmitCtx.EmitCtx, expr: Tree.Node, source: String) -> Emi
             )
           none -> shifted = shifted
         end
+      end
+
+      if EmitExpr.result_inner(out.type).some?
+        return EmitCtx.refuse_at(
+          "PY-TYPE-MISMATCH",
+          "statement holds an uncaught #{out.type}",
+          some("use it inside a `try` body or a def returning `Result[T]` so the error is handled"),
+          expr.start,
+          expr.stop,
+        )
       end
 
       EmitCtx.StmtRes.Ok(
@@ -193,6 +204,8 @@ def emit_return(
     )
   end
 
+  return emit_result_return(ctx, value, span, source) if ctx.func_ret.start_with?("Result[")
+
   case value
     none -> emit_bare_return(ctx, span)
     some(expr) -> emit_value_return(ctx, expr, span, source)
@@ -203,6 +216,25 @@ end
 ## the lane-internal `map_ann_scoped` rules with the scope in hand, so a
 ## `def` header and the lane agree on aliases and built-in spellings.
 def map_annotation(text: String, scope: Map[String, String]) -> Result[String] = map_ann_scoped(text, scope)
+
+## Maps a `def` return annotation: `Result[T]` is the fallible signature
+## (`Result[None]` is `Result[Void]`), anything else maps like an annotation.
+## The quoted form `-> "Result[T]"` means the same and keeps the file valid in
+## CPython, which has no `Result` name. `Result` spells nowhere else, so a
+## parameter, a binding or a nested use refuses in `map_generic`.
+def map_return(text: String, scope: Map[String, String]) -> Result[String]
+  stripped = text.strip
+  if quoted?(stripped)
+    stripped = stripped.slice(1, stripped.length - 2).strip
+  end
+
+  return map_annotation(stripped, scope) if !stripped.start_with?("Result[") or !stripped.end_with?("]")
+
+  inner = stripped.slice(7, stripped.length - 8).strip
+  return ok("Result[Void]") if inner == "None" or inner == "none"
+
+  ok("Result[#{try map_annotation(inner, scope)}]")
+end
 
 private
 
@@ -244,7 +276,7 @@ def emit_augassigned_value(
   expr: Tree.Node,
   source: String,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -256,7 +288,7 @@ def emit_augassigned_value(
       # operand combination.
       rcode = shifted.code
       rtype = out.type
-      if ctx.in_try
+      if EmitCtx.propagates?(ctx)
         inner = EmitExpr.result_inner(out.type)
         if inner.some? and bind_fit(want, inner.unwrap!) == OptFit.Bare
           rcode = "try #{shifted.code}"
@@ -360,7 +392,7 @@ def emit_value_binding(
   source: String,
   decl: Bool,
 ) -> EmitCtx.StmtRes
-  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
+  case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
     error(e) -> refuse_split(expr.start, expr.stop, e)
     ok(out) ->
       shifted = shift_out(out, ctx.next_temp)
@@ -371,7 +403,7 @@ def emit_value_binding(
           # Inside a `try` body the value may unwrap to `Result[T]`:
           # `try value` when `T` keeps the declared type, `some(try value)`
           # when `T` lands in an `Optional[T]`.
-          if ctx.in_try
+          if EmitCtx.propagates?(ctx)
             inner = EmitExpr.result_inner(out.type)
             case inner
               some(found) ->
@@ -439,6 +471,90 @@ def bind_fit(want: String, got: String) -> OptFit
   OptFit.No
 end
 
+# `return` under `-> Result[T]`: a plain value of `T` returns as `ok(value)`,
+# a `Result[T]` value (a conversion or a call that already is one) returns as
+# written, so the error flows to the caller. Bare `return` and `return None`
+# are the `Result[None]` success.
+def emit_result_return(
+  ctx: EmitCtx.EmitCtx,
+  value: Optional[Tree.Node],
+  span: Frontend.Span,
+  source: String,
+) -> EmitCtx.StmtRes
+  want = ctx.func_ret.slice(7, ctx.func_ret.length - 8)
+  case value
+    none -> emit_result_success(ctx, want, span)
+    some(expr) ->
+      return emit_result_success(ctx, want, span) if is_none_expr(expr) and want == "Void"
+
+      case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, true)
+        error(e) -> refuse_split(expr.start, expr.stop, e)
+        ok(out) -> emit_result_value(ctx, expr, want, out)
+      end
+  end
+end
+
+def emit_result_success(ctx: EmitCtx.EmitCtx, want: String, span: Frontend.Span) -> EmitCtx.StmtRes
+  if want == "Void"
+    EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["return ok()"], scope: ctx.scope, next_temp: ctx.next_temp))
+  else
+    EmitCtx.refuse_at(
+      "PY-TYPE-MISMATCH",
+      "bare `return` under `-> #{ctx.func_ret}` returns nothing",
+      some("return a value of the declared type"),
+      span.start,
+      span.stop,
+    )
+  end
+end
+
+def emit_result_value(ctx: EmitCtx.EmitCtx, expr: Tree.Node, want: String, out: EmitExpr.Out) -> EmitCtx.StmtRes
+  shifted = shift_out(out, ctx.next_temp)
+  # `return g()` with `g` returning `None` runs the call, then succeeds.
+  if out.type == "Void" and want == "Void"
+    return EmitCtx.StmtRes.Ok(
+      EmitCtx.StmtOut(
+        code: shifted.pre + [shifted.code, "return ok()"],
+        scope: ctx.scope,
+        next_temp: ctx.next_temp + shifted.used,
+      ),
+    )
+  end
+
+  already = out.type == ctx.func_ret
+  fit = OptFit.Bare
+  if !already
+    fit = bind_fit(want, out.type)
+  end
+
+  if fit == OptFit.No
+    EmitCtx.refuse_at(
+      "PY-TYPE-MISMATCH",
+      "cannot return #{out.type} under `-> #{ctx.func_ret}`",
+      some("convert the value explicitly or fix the return annotation"),
+      expr.start,
+      expr.stop,
+    )
+  else
+    value = shifted.code
+    if fit == OptFit.Wrap
+      value = "some(#{value})"
+    end
+
+    if !already
+      value = "ok(#{value})"
+    end
+
+    EmitCtx.StmtRes.Ok(
+      EmitCtx.StmtOut(
+        code: shifted.pre + ["return #{value}"],
+        scope: ctx.scope,
+        next_temp: ctx.next_temp + shifted.used,
+      ),
+    )
+  end
+end
+
 # A bare `return` only checks under a `Void` return; anything else is
 # `PY-TYPE-MISMATCH`.
 def emit_bare_return(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
@@ -471,10 +587,11 @@ def emit_value_return(ctx: EmitCtx.EmitCtx, expr: Tree.Node, span: Frontend.Span
       case map_ann_scoped(ctx.func_ret, ctx.scope)
         error(e) -> refuse_split(span.start, span.stop, e)
         ok(want) ->
-          # `emit_return` already refused inside a `try` body, so this is
-          # false today; thread it anyway so the strict value expression
-          # keeps unwrapping if that control refusal ever moves.
-          case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, ctx.in_try)
+          # `emit_return` already refused inside a `try` body, and a def that
+          # returns `Result[T]` took `emit_result_return`, so nothing
+          # propagates here today; thread it anyway so the strict value
+          # expression keeps unwrapping if either route ever moves.
+          case EmitExpr.emit_with(expr, source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
             error(e) -> refuse_split(expr.start, expr.stop, e)
             ok(out) -> emit_return_line(ctx, expr, want, out)
           end
@@ -776,6 +893,12 @@ def map_generic(head: String, inner: String, scope: Map[String, String]) -> Resu
     key = try map_ann(List.first(args).strip, scope)
     value = try map_ann(List.first(args.drop(1)).strip, scope)
     return ok("Map[#{key}, #{value}]")
+  end
+
+  if head == "Result"
+    return error(
+      "PY-OUT-OF-SUBSET: `Result[...]` is only a `def` return annotation = help: annotate the def `-> Result[T]` and keep the values plain",
+    )
   end
 
   if head == "Optional"

@@ -149,15 +149,20 @@ def emit_for(
   body_code: List[String],
   assigned: Bool,
 ) -> EmitCtx.StmtRes
-  made = EmitExpr.emit_with(iterable, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  made = EmitExpr.emit_with(iterable, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
   case made
     error(e) -> refusal_from_emit(e.message, iterable)
-    ok(out) ->
+    ok(emitted) ->
+      out = emitted
+      if EmitCtx.propagates?(ctx)
+        out = EmitExpr.unwrap_whole(emitted)
+      end
+
       elem = elem_type(out.type)
       case elem
         none ->
           EmitCtx.refuse_at(
-            "PY-OPERATOR",
+            not_iterable_code(out.type),
             "for needs a List, Range or String iterable, found #{out.type}",
             some("use a list, a range, or a string"),
             iterable.start,
@@ -217,6 +222,15 @@ def emit_next(ctx: EmitCtx.EmitCtx, span: Frontend.Span) -> EmitCtx.StmtRes
   EmitCtx.StmtRes.Ok(EmitCtx.StmtOut(code: ["next"], scope: ctx.scope, next_temp: ctx.next_temp))
 end
 
+## The refusal code of a `for` over a type with no loop form: an uncaught
+## `Result` is a type mismatch (nothing unwraps it), anything else an
+## operator problem. Shared with the coordinator spine.
+def not_iterable_code(found: String) -> String
+  return "PY-TYPE-MISMATCH" if EmitExpr.result_inner(found).some?
+
+  "PY-OPERATOR"
+end
+
 ## The element type a `for` binds, or none when the iterable has no loop
 ## form. Shared with the coordinator spine, which seeds the body scope
 ## before handing the pre-emitted body over. `Unknown` stays verbal.
@@ -245,18 +259,21 @@ end
 
 # Emits one branch guard and insists on `Bool`, shifting every preamble
 # temp by the incoming supply. Failures are `CODE: message = help: hint`
-# strings; the caller renders them into spanned refusals. A condition's own
-# operands unwrap inline (`int(s) > 0` is `(try s.to_i) > 0`); a directly
-# `Result[Bool]` guard stays a refusal because this slice has no `Bool`
-# `Result` producer (`int`/`float` give `Result[Int]`/`Result[Float]`), so
-# the shape is unreachable, and the refusal names the inner type when there
-# is one.
+# strings; the caller renders them into spanned refusals. Where a `Result`
+# propagates (an outlined `try` body or a `def` returning `Result[T]`) the
+# operands unwrap inline (`int(s) > 0` is `(try s.to_i) > 0`) and a guard
+# that is itself a `Result[Bool]` unwraps whole, like a ternary guard; where
+# nothing catches the error a `Result` guard refuses, naming the inner type.
 def emit_cond(ctx: EmitCtx.EmitCtx, node: Tree.Node, owner: String) -> Result[CondOut]
-  out = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, ctx.in_try)
+  out = try EmitExpr.emit_with(node, ctx.source, ctx.scope, ctx.sigs, EmitCtx.propagates?(ctx))
+  if EmitCtx.propagates?(ctx)
+    out = EmitExpr.unwrap_whole(out)
+  end
+
   inner = EmitExpr.result_inner(out.type)
-  if inner.some? and inner.unwrap! != "Bool"
+  if inner.some?
     return error(
-      "PY-COND-NOT-BOOL: `#{owner}` condition must be bool, found #{inner.unwrap!} = help: compare or convert to a bool first",
+      "PY-COND-NOT-BOOL: `#{owner}` condition holds an uncaught #{out.type} = help: use it inside a `try` body or a def returning `Result[T]`",
     )
   end
 
