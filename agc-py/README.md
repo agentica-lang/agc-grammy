@@ -75,8 +75,8 @@ line. Only a `def` crosses a module (`SUBSET.md` section 5).
 `Py2Agc.translate` is still single-file and refuses imports.
 
 A standard-library import (`SUBSET.md` section 5) emits no import line: its
-members lower in place from the table in `agc-py/src/stdlib.agc` (`math`,
-`sys`, `os` and `open` so far); a member outside the table is
+members lower in place from the table in `agc-py/src/stdlib.agc` (`math`, `sys`,
+`os`, `open`, `html`, `urllib.parse`, `time` and `random`); a member outside the table is
 `PY-IMPORT-UNKNOWN` with what the module maps in the help.
 
 grammy stays the only parser: `agc-py` will import it by relative path,

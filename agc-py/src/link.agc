@@ -28,6 +28,7 @@ end
 struct Binds
   scope: Map[String, String]
   sigs: Map[String, EmitCtx.Sig]
+  needs: List[String]
 end
 
 ## What an importer can reach in a module: the signatures of its `def`s (no
@@ -120,13 +121,15 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
   sigs: Map[String, EmitCtx.Sig] = {}
   used = used_names(module.program)
   aliases: List[String] = []
+  needs: List[String] = []
   type_aliases = EmitModule.alias_names(module.program)
   for edge in module.imports
     case edge.source
       Modules.ModuleSource.Stdlib(std) ->
-        bound = try std_binds(module, edge.decl, std, Binds(scope: scope, sigs: sigs))
+        bound = try std_binds(module, edge.decl, std, used, Binds(scope: scope, sigs: sigs, needs: needs))
         scope = bound.scope
         sigs = bound.sigs
+        needs = bound.needs
         next
 
       Modules.ModuleSource.Local(_) -> nil
@@ -192,6 +195,27 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
     end
   end
 
+  for need in needs
+    alias = Stdlib.needs_alias(need)
+    case alias_clash(alias, aliases, type_aliases)
+      some(why) ->
+        return error(
+          refusal_text(
+            module,
+            "the standard-library import of `#{need}` becomes `#{alias}`, #{why}",
+            "rename the other import with `as`",
+            module.program.span,
+            "PY-OUT-OF-SUBSET",
+          ),
+        )
+
+      none -> nil
+    end
+
+    aliases = aliases.push(alias)
+    lines = lines.push("import #{alias} from \"#{need}\"")
+  end
+
   ok(EmitModule.Link(mode: mode, import_lines: lines, scope: scope, sigs: sigs))
 end
 
@@ -229,16 +253,33 @@ end
 # members as `m.name` signatures, and `m.` itself marks it as standard library
 # for the refusals) and `from m import a` binds each mapped member. Neither
 # emits an import line: the backend spelling is in the signature.
-def std_binds(module: Modules.Module, decl: Frontend.ImportDecl, std: String, binds: Binds) -> Result[Binds]
+def std_binds(
+  module: Modules.Module,
+  decl: Frontend.ImportDecl,
+  std: String,
+  used: List[String],
+  binds: Binds,
+) -> Result[Binds]
   table = Stdlib.members(std)
   scope = binds.scope
   sigs = binds.sigs
+  needs = binds.needs
   case decl
     Frontend.ImportDecl.ModuleImport(_, binding, _) ->
+      # `import urllib.parse` binds `urllib` and spells its members in full.
+      prefix = binding.bound
+      if std.include?(".") and binding.bound == List.first(std.split("."))
+        prefix = std
+      end
+
       scope = scope.put(binding.bound, EmitCtx.module_marker())
       sigs = sigs.put("#{binding.bound}.", EmitCtx.Sig(name: std, params: [], types: [], defaults: [], ret: ""))
       for member in table.keys()
-        sigs = sigs.put("#{binding.bound}.#{member}", table.get(member).unwrap!.with(name: "#{std}.#{member}"))
+        sig = table.get(member).unwrap!
+        sigs = sigs.put("#{prefix}.#{member}", sig.with(name: "#{std}.#{member}"))
+        if !sig.needs.empty? and used.include?(binding.bound)
+          needs = add_need(needs, sig.needs)
+        end
       end
 
     Frontend.ImportDecl.FromImport(_, names, _) ->
@@ -248,6 +289,9 @@ def std_binds(module: Modules.Module, decl: Frontend.ImportDecl, std: String, bi
           some(sig) ->
             scope = scope.put(name.bound, EmitCtx.def_marker())
             sigs = sigs.put(name.bound, sig.with(name: "#{std}.#{member}"))
+            if !sig.needs.empty? and used.include?(name.bound)
+              needs = add_need(needs, sig.needs)
+            end
 
           none ->
             return error(
@@ -263,7 +307,13 @@ def std_binds(module: Modules.Module, decl: Frontend.ImportDecl, std: String, bi
       end
   end
 
-  ok(Binds(scope: scope, sigs: sigs))
+  ok(Binds(scope: scope, sigs: sigs, needs: needs))
+end
+
+def add_need(needs: List[String], need: String) -> List[String]
+  return needs if needs.include?(need)
+
+  needs.push(need)
 end
 
 def std_help(std: String, table: Map[String, EmitCtx.Sig]) -> String

@@ -1313,12 +1313,10 @@ end
 # anything else is a function (needs its call) or unknown.
 def emit_module_attr(cx: Cx, parts: List[String], full: String) -> Result[Done]
   root = List.first(parts)
-  if parts.size == 2
-    case cx.sigs.get(full)
-      some(sig) if sig.value -> return const_done(cx, sig, full)
-      some(_) -> return error("PY-OUT-OF-SUBSET: `#{full}` is not a value = help: call it, for example `#{full}(...)`")
-      none -> nil
-    end
+  case cx.sigs.get(full)
+    some(sig) if sig.value -> return const_done(cx, sig, full)
+    some(_) -> return error("PY-OUT-OF-SUBSET: `#{full}` is not a value = help: call it, for example `#{full}(...)`")
+    none -> nil
   end
 
   error(unknown_module_member(cx, root, parts))
@@ -1328,7 +1326,7 @@ end
 # module is closed (`PY-IMPORT-UNKNOWN`), a local one has the names it defines.
 def unknown_module_member(cx: Cx, root: String, parts: List[String]) -> String
   full = parts.join(".")
-  if parts.size != 2
+  if parts.size != 2 and !cx.sigs.has_key?("#{root}.")
     return "PY-OUT-OF-SUBSET: nested path `#{full}` through module `#{root}` = help: call one function of it"
   end
 

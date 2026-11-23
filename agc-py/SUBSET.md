@@ -253,17 +253,27 @@ plain types only.
     `open(p, "a").write(s)` (-> `File.append_text`), each a catchable
     `Result`; a file object has no other form, so any other use or mode is
     `PY-OUT-OF-SUBSET`.
-  - `json` (-> `JSON.parse`/`JSON.encode`), `re` (-> `std/regex`, RE2 subset),
-    `toml` (-> `std/toml`), `datetime` (-> `std/utc`, partial:
-    instants/formatting only, no arithmetic/`timedelta`/`strptime`),
-    `urllib.parse` (->
-    `std/uri`), `http.client` (-> `std/http`), `html` escaping (-> `std/html`),
-    `mimetypes` (-> `std/mime`), `cookies` (-> `std/cookie`), `argparse` (->
-    `std/option_parser`), `logging` (-> `std/logger`), `time` (-> `Time`),
-    `random` (-> `Random`; secrets need `OpenSSL.Random`, excluded v0),
-    `hashlib` (-> `OpenSSL.Digest`, partial), `pathlib` (-> `File`
-    operations, partial), `string` methods: `strip`, `split`, `join`,
-    `replace`, `upcase`, `downcase`, `start_with?`, `end_with?`, `include?`.
+  - `html`: `escape(s)` (-> `std/html`, with `'` as `&#x27;` like CPython) and
+    `unescape(s)`.
+  - `urllib.parse`: `quote`, `quote_plus` (-> `std/uri`, spelled like
+    CPython: `~` stays, `*` is escaped, `quote` keeps `/`) and `unquote`,
+    `unquote_plus`, which return a catchable `Result` (CPython keeps a
+    malformed escape, the backend refuses it). One argument each: no `safe`,
+    `encoding` or `errors`.
+  - `time`: `time()` (seconds as a `float`), `monotonic()` and `sleep(secs)`
+    (-> `Time` and `Task.sleep`, in whole milliseconds).
+  - `random`: `random()` (-> `Random.float`) and `randint(a, b)` (->
+    `Random.int`).
+  - Not mapped, each member `PY-IMPORT-UNKNOWN` with "no member ... is mapped
+    yet": `json`, `re`, `toml`, `datetime`, `http.client`, `mimetypes`,
+    `cookies`, `argparse`, `logging`, `hashlib` and `pathlib`. Their Python
+    API returns objects (a `Match`, a `datetime`, a `Path`, a logger, a
+    tuple, a dynamic `json` value) that the class-free, tuple-free subset
+    cannot type; each needs a decision on its object-free spelling first.
+  - `string` methods: `strip`, `split`, `join`, `replace`, `upcase`,
+    `downcase`, `start_with?`, `end_with?`, `include?` (the Python spellings
+    `strip`, `split`, `join`, `replace`, `lower`, `upper`, `startswith`,
+    `endswith` map as in section 3).
   - A mapped member lowers in place: a standard-library import emits no
     import line. A member the table does not hold is `PY-IMPORT-UNKNOWN`,
     with the members the module does map in the help.

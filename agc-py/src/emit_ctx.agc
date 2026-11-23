@@ -37,7 +37,7 @@ end
 ## a function of another local module (defaults do not cross). A standard
 ## library member (`stdlib.agc`) is a `Sig` with `code`, the backend spelling
 ## with `$1`, `$2` for the arguments, and `value` when it is a constant (no
-## call).
+## call). `needs` is the `std/` module its spelling imports (`std/html`).
 struct Sig
   name: String
   params: List[String]
@@ -47,6 +47,7 @@ struct Sig
   imported: Bool = false
   code: String = ""
   value: Bool = false
+  needs: String = ""
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.

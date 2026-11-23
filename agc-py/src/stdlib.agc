@@ -31,7 +31,74 @@ def members(module: String) -> Map[String, EmitCtx.Sig]
         "getcwd": fn("getcwd", [], [], "Result[String]", "Path.cwd()"),
         "environ": const_value("environ", "Environ", "@environ"),
       }
+    "html" ->
+      {
+        "escape": std_fn(
+          "escape",
+          ["s"],
+          ["String"],
+          "String",
+          "Html.escape($1).replace(\"&#39;\", \"&#x27;\")",
+          "std/html",
+        ),
+        "unescape": std_fn("unescape", ["s"], ["String"], "String", "Html.unescape($1)", "std/html"),
+      }
+    "urllib.parse" ->
+      {
+        "quote": std_fn(
+          "quote",
+          ["string"],
+          ["String"],
+          "String",
+          quote_code("encode_uri_component") + ".replace(\"%2F\", \"/\")",
+          "std/uri",
+        ),
+        "quote_plus": std_fn(
+          "quote_plus",
+          ["string"],
+          ["String"],
+          "String",
+          quote_code("encode_www_form_component"),
+          "std/uri",
+        ),
+        "unquote": std_fn(
+          "unquote",
+          ["string"],
+          ["String"],
+          "Result[String]",
+          "Uri.decode_uri_component($1)",
+          "std/uri",
+        ),
+        "unquote_plus": std_fn(
+          "unquote_plus",
+          ["string"],
+          ["String"],
+          "Result[String]",
+          "Uri.decode_www_form_component($1)",
+          "std/uri",
+        ),
+      }
+    "time" ->
+      {
+        "time": fn("time", [], [], "Float", "(Time.now().to_us.to_f / 1000000.0)"),
+        "monotonic": fn("monotonic", [], [], "Float", "(Time.monotonic_ms.to_f / 1000.0)"),
+        "sleep": fn("sleep", ["secs"], ["Float"], "Void", "Task.sleep((($1) * 1000.0).round)"),
+      }
+    "random" ->
+      {
+        "random": fn("random", [], [], "Float", "Random.float()"),
+        "randint": fn("randint", ["a", "b"], ["Int", "Int"], "Int", "Random.int($1, $2)"),
+      }
     _ -> {}
+  end
+end
+
+## The alias the spelling of a member uses for the `std/` module it needs.
+def needs_alias(path: String) -> String
+  case path
+    "std/html" -> "Html"
+    "std/uri" -> "Uri"
+    _ -> "Std"
   end
 end
 
@@ -58,6 +125,21 @@ private
 
 def fn(name: String, params: List[String], types: List[String], ret: String, code: String) -> EmitCtx.Sig
   EmitCtx.Sig(name: name, params: params, types: types, defaults: params.map { |_| none }, ret: ret, code: code)
+end
+
+# `quote` family: Python leaves `~` alone and escapes `*`, which the
+# backend's encoders do the other way round.
+def quote_code(encoder: String) -> String = "Uri.#{encoder}($1).replace(\"%7E\", \"~\").replace(\"*\", \"%2A\")"
+
+def std_fn(
+  name: String,
+  params: List[String],
+  types: List[String],
+  ret: String,
+  code: String,
+  needs: String,
+) -> EmitCtx.Sig
+  fn(name, params, types, ret, code).with(needs: needs)
 end
 
 def const_float(name: String, code: String) -> EmitCtx.Sig = const_value(name, "Float", code)
