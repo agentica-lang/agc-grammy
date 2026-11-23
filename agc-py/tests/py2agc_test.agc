@@ -8,6 +8,7 @@
 
 import Grammar from "../../src/grammar"
 import Py2Agc from "../src/py2agc"
+import EmitExpr from "../src/emit_expr"
 
 # Checks the emitted text with the real backend, then runs it and answers
 # the process output.
@@ -139,6 +140,22 @@ def main() -> Void
           Test.assert(e.message.include?("1:5"), e.message)
         ok(_) -> Test.assert(false, "expected an error")
       end
+    end,
+    Test.test("every helper the emitter can add is a reserved name") do
+      names = EmitExpr.helpers()
+        .split("\n")
+        .select { |line| line.start_with?("def py_") }
+        .map { |line| line.slice(4, line.length - 4).split("(")[0].split("[")[0] }
+
+      try Test.assert(names.include?("py_getenv") and names.include?("py_read_text"), names.join(","))
+      for name in names
+        case Py2Agc.translate(compiled.unwrap!, "prog.py", "#{name}: int = 1\nprint(#{name})\n")
+          error(e) -> try Test.assert(e.message.include?("reserved"), e.message)
+          ok(_) -> try Test.assert(false, "#{name} is not reserved")
+        end
+      end
+
+      ok()
     end,
     # The call ABI lowers a defaulted parameter at every call site, so the
     # old refusal is now a working default.

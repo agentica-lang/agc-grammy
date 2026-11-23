@@ -135,6 +135,24 @@ def main() -> Void
         ["error[PY-CALL-ARITY]", "`os.getenv` takes 1 argument, 2 given"],
       )
     end,
+    Test.test("an Optional has no text form, and compares with a plain value like CPython") do
+      sources = [
+        "import os\nprint(os.getenv(\"HOME\"))\n", "import os\nprint(f\"{os.getenv('X')}\")\n",
+        "import os\nprint(str(os.getenv(\"X\")))\n", "d: dict[str, int] = {\"a\": 1}\nprint(d.get(\"a\"))\n",
+      ]
+
+      index = 28
+      for source in sources
+        try refuses(compiled.unwrap!, index, source, ["error[PY-TYPE-MISMATCH]", "test it with `is None` first"])
+        index += 1
+      end
+
+      source = "import os\nd: dict[str, int] = {\"a\": 1}\nu: str = \"AGC_PY_UNSET_VARIABLE\"\n"
+      source = source + "if os.getenv(u) == \"a\":\n    print(\"1\")\nif \"a\" != os.getenv(u):\n    print(\"2\")\n"
+      source = source + "if d.get(\"a\") == 1:\n    print(\"3\")\nif 1 == d.get(\"b\"):\n    print(\"4\")\n"
+      source = source + "if os.getenv(\"HOME\") == os.getenv(\"HOME\"):\n    print(\"5\")\n"
+      agrees(compiled.unwrap!, 32, source) do |got| Test.eq(got, "2\n3\n5\n") end
+    end,
     Test.test("open: read, write and append whole files run like CPython") do
       path = "/tmp/agc_std_open_#{System.pid()}.txt"
       source = "try:\n    open(\"#{path}\", \"w\").write(\"one\")\n    open(\"#{path}\", \"a\").write(\" two\")\n"
@@ -164,6 +182,14 @@ def main() -> Void
         compiled.unwrap!,
         23,
         "print(open(\"/tmp/agc_never\", \"w\").write(\"x\"))\n",
+        ["error[PY-OUT-OF-SUBSET]", "the result of `write`"],
+      )
+    end,
+    Test.test("write is a statement only when the statement is the call itself") do
+      refuses(
+        compiled.unwrap!,
+        33,
+        "try:\n    open(\"/tmp/agc_never\", \"w\").write(\"x\") == 1\nexcept OSError:\n    print(\"bad\")\n",
         ["error[PY-OUT-OF-SUBSET]", "the result of `write`"],
       )
     end,
