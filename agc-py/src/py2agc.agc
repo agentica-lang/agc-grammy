@@ -1,7 +1,7 @@
 ## The Python-to-`.agc` translator: `.py` in, one standalone `.agc` program
 ## out. The pipeline stays `.py` → `.agc` → `.agcb`: this package never
 ## emits bytecode, `agentica compile` does that from the emitted `.agc`.
-## Phase 4 (issue #28) owns the CLI around this entry point.
+## The command line around this entry point is `main.agc`.
 ##
 ## Local imports resolve in a separate library stage (`Modules`,
 ## `src/modules.agc`) that answers the module graph #26 feeds to emission;
