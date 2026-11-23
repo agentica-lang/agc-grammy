@@ -103,15 +103,15 @@ end
 
 ## What a call to the backend spelling `template` becomes with `args`, in one
 ## pass over the `$1`..`$9` marks; an argument that is a receiver (`$1.floor`)
-## and has an operator in it (or a sign) is parenthesized.
+## and is more than one atom is parenthesized.
 def spell(template: String, args: List[String]) -> String
   pieces = template.split("$")
   out = List.first(pieces)
   for piece in pieces.drop(1)
     arg = args[piece.slice(0, 1).to_i! - 1]
     rest = piece.slice(1, piece.length - 1)
-    if rest.start_with?(".") and (arg.include?(" ") or arg.start_with?("-"))
-      arg = "(#{arg})"
+    if rest.start_with?(".")
+      arg = EmitCtx.recv_code(arg)
     end
 
     out = out + arg + rest

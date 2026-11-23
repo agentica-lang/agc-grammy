@@ -1,4 +1,6 @@
-## Parse corpus for SUBSET.md sections 2–5 and layout in section 8.
+## Parse-only corpus for SUBSET.md sections 2–5 and layout in section 8:
+## syntax alone, nothing is translated or run. The runnable programs are in
+## `corpus_run_test.agc`.
 
 import Engine from "../../src/engine"
 import Grammar from "../../src/grammar"
