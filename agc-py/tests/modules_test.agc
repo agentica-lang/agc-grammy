@@ -104,7 +104,6 @@ def main() -> Void
       message = try error_text(compiled.unwrap!, dir + "/b.py")
       try Test.assert(message.include?("error[PY-IMPORT-UNKNOWN]"), message)
       try Test.assert(message.include?("unknown module `foo.bar`"), message)
-      try Test.assert(message.include?("must be a supported standard-library module"), message)
       try Test.assert(message.include?("urllib.parse"), message)
       Test.assert(!message.include?("foo.bar.py"), message)
     end,

@@ -34,6 +34,10 @@ def checks_ctx(source: String, scope: Map[String, String], func_ret: String, nex
   )
 end
 
+# Spells `#{code}` without writing it in a literal (the compiler reads `"#{"`
+# as the start of an interpolation).
+def interp(code: String) -> String = "#" + "{" + code + "}"
+
 def try_ctx(source: String, scope: Map[String, String]) -> EmitCtx.EmitCtx
   EmitCtx.EmitCtx(
     source: source,
@@ -320,7 +324,7 @@ def main() -> Void
       done = try assert_ok(res)
       try assert_lines(
         done.code,
-        ["if !(x > 0)", "  IO.warn(\"" + "#" + "{(try s.to_i)}\")", "  System.exit(1)", "end"],
+        ["if !(x > 0)", "  IO.warn(\"" + interp("(try s.to_i)") + "\")", "  System.exit(1)", "end"],
       )
 
       ok()
@@ -332,6 +336,9 @@ def main() -> Void
       ref = try assert_no(EmitChecks.emit_assert(ctx, parts.cond, parts.msg), "PY-TYPE-MISMATCH")
       try Test.assert(ref.message.include?("found Int"), ref.message)
       try Test.eq(ref.start, parts.msg.unwrap!.start)
+      outside = checks_ctx(source, {"x": "Int", "s": "String"}, "Void", 0)
+      ref_outside = try assert_no(EmitChecks.emit_assert(outside, parts.cond, parts.msg), "PY-TYPE-MISMATCH")
+      try Test.assert(ref_outside.message.include?("found Int"), ref_outside.message)
       ok()
     end,
     Test.test("assert hoists a chained guard once") do

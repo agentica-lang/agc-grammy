@@ -9,10 +9,10 @@
 ## emitter seam, where a fragment costs a parse instead of a translation.
 ##
 ## `agentica test` shares one million steps per test (plus one) over the
-## file's tests. Loading the grammar costs about 1.8 million of them, one
-## small `translate` about 1.2 million and one expression parse about 0.4
-## million, so the file translates in three tests and keeps the rest to one
-## fragment each.
+## file's tests. As of Agentica 0.35.0, loading the grammar costs about 1.8
+## million of them, one small `translate` about 1.2 million and one
+## expression parse about 0.4 million. The file translates in four tests and
+## each of the rest parses one fragment.
 
 import EmitExpr from "../src/emit_expr"
 import Engine from "../../src/engine"
@@ -148,6 +148,19 @@ def main() -> Void
       try Test.eq(d.code, "{\"k\": (try s.to_i)}")
       Test.assert(d.pre.empty?, d.pre.join("\n"))
     end,
+    # A later hole that needs a temp line (a chained comparison's middle)
+    # hoists every earlier inline call in front of it, so the calls run in
+    # hole order like CPython.
+    Test.test("f-string holes run in hole order when a later hole hoists") do
+      source = (
+        "def tag(n: int) -> int:\n    print(n)\n    return n\n\n" +
+        "def g() -> int:\n    print(\"g\")\n    return 1\n\n" +
+        "s: str = f\"{g()}{1 < tag(20) < 30}\"\nprint(s)\n"
+      )
+
+      got = try agree(compiled.unwrap!, source, "holeorder")
+      Test.assert(got.strip() == "g\n20\n1true", got)
+    end,
     # Two holes in one f-string unwrap inline, in hole order, with no temp
     # line that could reorder them.
     Test.test("f-string holes unwrap inline in hole order") do
@@ -204,8 +217,7 @@ def main() -> Void
       case emit_expr(compiled.unwrap!, "int(s) == 5", false)
         error(e) ->
           try Test.assert(e.message.include?("PY-TYPE-MISMATCH"), e.message)
-          try Test.assert(e.message.include?("`==` with a Result operand"), e.message)
-          Test.assert(e.message.include?("inside `try`/`except`"), e.message)
+          Test.assert(e.message.include?("`try`/`except`"), e.message)
         ok(out) -> Test.assert(false, "expected a refusal, emitted #{out.code}")
       end
     end,

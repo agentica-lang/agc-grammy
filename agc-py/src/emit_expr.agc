@@ -1314,9 +1314,12 @@ def emit_f_string(
   parts: List[String] = []
   current = cx
   cursor = 0
+  pending_at: List[Int] = []
+  pending_code: List[String] = []
   for hole in holes
     gap = inner.slice(cursor, hole.start - inner_start - cursor)
     parts = parts.push(encode_cooked(try decode_f_gap(gap)))
+    before_pre = current.pre.size
     raw_hole = try emit_only_child(current, hole, source)
     # Outside the outlined `try` there is no handler for a hole that answers a
     # `Result`, and interpolating it would print `ok(...)`/`error(...)`.
@@ -1328,12 +1331,45 @@ def emit_f_string(
 
     hole_done = try maybe_unwrap(raw_hole)
     current = hole_done.cx
-    if hole_done.code.include?("\"")
-      temp = "py_t#{current.next_temp}"
-      current = current.with(next_temp: current.next_temp + 1, pre: current.pre.push("#{temp} = #{hole_done.code}"))
-      parts = parts.push("#" + "{" + temp + "}")
+    quoted = hole_done.code.include?("\"")
+    quoted_temp = "py_t#{current.next_temp}"
+    if quoted
+      current = current.with(
+        next_temp: current.next_temp + 1,
+        pre: current.pre.push("#{quoted_temp} = #{hole_done.code}"),
+      )
+    end
+
+    # A later hole's preamble runs before every inline hole, so an earlier
+    # inline call hoists in front of it and keeps Python's order (the same
+    # rule as call arguments).
+    if current.pre.size > before_pre and !pending_at.empty?
+      hoisted: List[String] = []
+      next_temp = current.next_temp
+      for k in 0...pending_at.size
+        temp = "py_t#{next_temp}"
+        next_temp += 1
+        hoisted = hoisted.push("#{temp} = #{List.first(pending_code.drop(k))}")
+        parts = replace_at(parts, List.first(pending_at.drop(k)), "#" + "{" + temp + "}")
+      end
+
+      current = current.with(
+        next_temp: next_temp,
+        pre: current.pre.take(before_pre) + hoisted + current.pre.drop(before_pre),
+      )
+
+      pending_at = []
+      pending_code = []
+    end
+
+    if quoted
+      parts = parts.push("#" + "{" + quoted_temp + "}")
     else
       parts = parts.push("#" + "{" + hole_done.code + "}")
+      if inline_effectful?(hole_done.code)
+        pending_at = pending_at.push(parts.size - 1)
+        pending_code = pending_code.push(hole_done.code)
+      end
     end
 
     cursor = hole.stop - inner_start
@@ -1342,6 +1378,19 @@ def emit_f_string(
   tail = inner.slice(cursor, inner.length - cursor)
   parts = parts.push(encode_cooked(try decode_f_gap(tail)))
   ok(Done(code: "\"#{parts.join("")}\"", type: "String", cx: current))
+end
+
+def replace_at(items: List[String], index: Int, value: String) -> List[String]
+  out: List[String] = []
+  for i in 0...items.size
+    if i == index
+      out = out.push(value)
+    else
+      out = out.push(List.first(items.drop(i)))
+    end
+  end
+
+  out
 end
 
 def decode_f_gap(gap: String) -> Result[String]
