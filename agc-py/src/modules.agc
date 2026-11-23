@@ -16,7 +16,7 @@
 ## local modules it imports; the entry module is last) with each module's
 ## `path`, resolved `program` and `imports`. Each `ImportEdge` carries the
 ## frontend declaration and where it points (`Local` module or `Stdlib`), so
-## linked-module emission (issue #26) can walk the same tree without
+## linked-module emission (`link.agc`) can walk the same tree without
 ## re-resolving it. Stdlib members stay unresolved: issue #27 owns them, and
 ## resolution only checks that the module family is in the closed table.
 ##
@@ -29,8 +29,7 @@
 ## - `PY-IMPORT-CYCLE` at every import statement of the first cycle found
 ##   (one diagnostic per import span, so the full cycle is reported).
 ##
-## The resolver is a library stage: `Py2Agc.translate` stays single-file
-## until issue #26 emits the linked modules.
+## The resolver is a library stage: `link.agc` emits the graph it answers.
 
 import Frontend from "frontend"
 import Grammar from "../../src/grammar"
@@ -49,11 +48,13 @@ struct ImportEdge
   source: ModuleSource
 end
 
-## One loaded module: its name (the file stem), the file it came from, its
+## One loaded module: its name (the file stem), the file it came from, the
+## source of that file (a refusal inside the module renders against it), its
 ## validated program and its resolved imports in source order.
 struct Module
   name: String
   path: String
+  source: String
   program: Frontend.Program
   imports: List[ImportEdge]
 end
@@ -106,8 +107,7 @@ end
 ## graph, or every refusal rendered in source order (`file:line:col
 ## error[PY-*]`, one block per problem, separated by blank lines). The
 ## `error` is that text and nothing else: spans live only inside it, so a
-## caller prints it and cannot inspect a refusal. That stays the contract
-## until issue #26 has a consumer that needs the diagnostics as data. A
+## caller prints it and cannot inspect a refusal. A
 ## refusal inside an imported module is reported with that module's own file
 ## and source; a parse failure the engine words without a position and a file
 ## that cannot be read start with the path of the file at fault.
@@ -181,7 +181,8 @@ def load(loader: Loader, grammar: Grammar.Grammar, frame: Frame, folder: String,
     error(e) -> finish(pushed, none, with_file(frame.path, e.message))
     ok(program) ->
       run = load_imports(pushed, grammar, imports_of(program), folder, search_path)
-      module = Module(name: frame.name, path: frame.path, program: program, imports: run.edges)
+      module = Module(name: frame.name, path: frame.path, source: frame.source, program: program, imports: run.edges)
+
       finish(run.loader, some(module), "")
   end
 end

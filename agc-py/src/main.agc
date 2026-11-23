@@ -1,12 +1,17 @@
 ## The `agc-py` command line: translates one typed `.py` file to `.agc`.
 ##
-##   agentica agc-py/src/main.agc FILE.py [-o OUT.agc]
-##   agentica agc-py/src/main.agc FILE.py --agcb -o OUT.agcb
+##   agentica agc-py/src/main.agc FILE.py [-I DIR]... [-o OUT.agc]
+##   agentica agc-py/src/main.agc FILE.py [-I DIR]... --agcb -o OUT.agcb
 ##
 ## Without `-o` the `.agc` text goes to standard output. The whole text is
-## built before anything is written, and `-o` writes a temporary file beside
-## the output and renames it into place, so a failure leaves no partial file
-## and keeps an older output as it was.
+## built before anything is written, and `-o` writes temporary files beside
+## the outputs and renames them into place, so a failure leaves no partial
+## file and keeps an older output as it was.
+##
+## The local modules `FILE.py` imports are found in its folder, then in each
+## `-I DIR` in order. A program with imports is one `.agc` file per module,
+## so it needs `-o`: the entry module goes to OUT.agc and every imported
+## module to `NAME.agc` in the folder of OUT.agc.
 ##
 ## `--agcb` compiles the emitted program with `agentica compile`
 ## (`$AGC_PY_AGENTICA`, else `agentica` on `PATH`) in a private folder beside
@@ -20,6 +25,7 @@
 import Grammar from "../../src/grammar"
 import OP from "std/option_parser"
 import {Arg, Opt, Kind} from "std/option_parser"
+import Link from "link"
 import Py2Agc from "py2agc"
 
 GRAMMAR = "grammars/py312.grammar"
@@ -27,19 +33,38 @@ GRAMMAR = "grammars/py312.grammar"
 struct Options
   file: String
   output: Optional[String]
+  includes: List[String]
   agcb: Bool
 end
 
+# One file to write: its path and its text.
+struct Out
+  path: String
+  text: String
+end
+
+# The `-I DIR` pairs of the command line and the words left for the parser.
+struct Split
+  rest: List[String]
+  includes: List[String]
+end
+
 def main() -> Void
-  args = System.args()
+  split = split_includes(System.args())
   parsed = (
     parser()
-    |> OP.parse(args)
+    |> OP.parse(split.rest)
     |> OP.run!()
   )
 
   file = OP.string(parsed, "file")
-  options = Options(file: file, output: OP.optional_string(parsed, "output"), agcb: OP.flag(parsed, "agcb"))
+  options = Options(
+    file: file,
+    output: OP.optional_string(parsed, "output"),
+    includes: split.includes,
+    agcb: OP.flag(parsed, "agcb"),
+  )
+
   if options.agcb and options.output == none
     IO.warn("agc-py: --agcb needs -o OUT.agcb\nTry 'agc-py --help' for more information")
     System.exit(2)
@@ -59,7 +84,7 @@ private
 def parser() -> OP.Parser
   OP.new(
     "agc-py",
-    "Translates a typed Python file to Agentica.",
+    "Translates a typed Python file to Agentica. Imported modules are found beside FILE.py, then in each -I DIR (repeatable).",
     [Arg(name: "file", metavar: "FILE.py", help: "the Python file to translate")],
     [
       Opt(name: "output", short: "o", metavar: "OUT", help: "write the result here instead of standard output"),
@@ -68,26 +93,74 @@ def parser() -> OP.Parser
   )
 end
 
+# `-I DIR` and `-IDIR` are taken out before the parser sees the words (it
+# keeps one value per option, and `-I` repeats); `--` ends them.
+def split_includes(args: List[String]) -> Split
+  rest: List[String] = []
+  includes: List[String] = []
+  index = 0
+  while index < args.size
+    word = args[index]
+    if word == "--"
+      rest = rest + args.drop(index)
+      break
+    end
+
+    if word == "-I" and index + 1 < args.size
+      includes = includes.push(args[index + 1])
+      index += 2
+    elsif word.start_with?("-I") and word.length > 2
+      includes = includes.push(word.slice(2, word.length - 2))
+      index += 1
+    else
+      rest = rest.push(word)
+      index += 1
+    end
+  end
+
+  Split(rest: rest, includes: includes)
+end
+
 def run(options: Options) -> Result[Void]
   try check_distinct(options.file, options.output)
   grammar = try Grammar.load(try grammar_path())
-  source = try read_source(options.file)
-  text = try Py2Agc.translate(grammar, options.file, source)
+  units = try Py2Agc.translate_modules(grammar, options.file, options.includes)
   case options.output
     none ->
-      print(text)
+      if units.size > 1
+        return error("agc-py: #{options.file} imports local modules, which need one file each: pass -o OUT.agc")
+      end
+
+      print(List.first(units).text)
       ok()
 
-    some(path) if options.agcb -> compile_atomic(path, program_name(options.file), text)
-    some(path) -> write_atomic(path, text)
+    some(path) if options.agcb -> compile_atomic(path, units)
+    some(path) -> write_all(try outputs(path, units))
   end
 end
 
-def read_source(file: String) -> Result[String]
-  case File.read_text(file)
-    ok(source) -> ok(source)
-    error(e) -> error("agc-py: cannot read #{file}: #{e.message}")
+# The entry module goes to `path` and every imported module to its own name
+# beside it; an imported module may not land on `path` itself.
+def outputs(path: String, units: List[Link.Unit]) -> Result[List[Out]]
+  folder = folder_of(path)
+  target = try Path.resolve(path)
+  files: List[Out] = []
+  for unit in units.take(units.size - 1)
+    beside = "#{folder}/#{unit.name}"
+    return error("agc-py: the output #{path} is the file of module #{unit.name}") if try Path.resolve(beside) == target
+
+    files = files.push(Out(path: beside, text: unit.text))
   end
+
+  ok(files.push(Out(path: path, text: List.last(units).text)))
+end
+
+def folder_of(path: String) -> String
+  parts = path.split("/")
+  return "." if parts.size <= 1
+  return "/" if parts.size == 2 and parts[0].empty?
+
+  parts.take(parts.size - 1).join("/")
 end
 
 # The grammar lives beside this file, so the command works from any folder and
@@ -109,53 +182,65 @@ def check_distinct(file: String, output: Optional[String]) -> Result[Void]
   end
 end
 
-def write_atomic(path: String, text: String) -> Result[Void]
-  temp = "#{path}.#{System.pid()}.tmp"
-  case File.write_text(temp, text)
-    error(e) ->
-      _ = Path.remove(temp)
-      return error("agc-py: cannot write #{path}: #{e.message}")
+# Every file goes to a temporary beside it first and is renamed into place
+# only when all of them were written, so a failed write leaves the outputs as
+# they were.
+def write_all(files: List[Out]) -> Result[Void]
+  for file in files
+    case File.write_text(temp_name(file.path), file.text)
+      ok(_) -> nil
 
-    ok(_) -> nil
+      error(e) ->
+        remove_temps(files)
+        return error("agc-py: cannot write #{file.path}: #{e.message}")
+    end
   end
 
-  case Path.replace(temp, path)
-    ok(_) -> ok()
+  for file in files
+    case Path.replace(temp_name(file.path), file.path)
+      ok(_) -> nil
 
-    error(e) ->
-      _ = Path.remove(temp)
-      error("agc-py: cannot write #{path}: #{e.message}")
+      error(e) ->
+        remove_temps(files)
+        return error("agc-py: cannot write #{file.path}: #{e.message}")
+    end
+  end
+
+  ok()
+end
+
+def temp_name(path: String) -> String = "#{path}.#{System.pid()}.tmp"
+
+def remove_temps(files: List[Out]) -> Void
+  for file in files
+    _ = Path.remove(temp_name(file.path))
   end
 end
 
-# The emitted program is named after the input, as `agentica` names it in the bytecode.
-def program_name(file: String) -> String
-  parts = file.split("/")
-  base = parts[parts.size - 1]
-  return "#{base.slice(0, base.length - 3)}.agc" if base.end_with?(".py")
-
-  "#{base}.agc"
-end
-
-def compile_atomic(path: String, name: String, text: String) -> Result[Void]
+def compile_atomic(path: String, units: List[Link.Unit]) -> Result[Void]
   folder = "#{path}.#{System.pid()}.tmp"
   case Dir.mkdir_private(folder)
     error(e) -> return error("agc-py: cannot write #{path}: #{e.message}")
     ok(_) -> nil
   end
 
-  result = compile_in(folder, name, text, path)
+  result = compile_in(folder, units, path)
   _ = Path.remove(folder)
   result
 end
 
-def compile_in(folder: String, name: String, text: String, path: String) -> Result[Void]
+# Every module is written to the private folder; the entry module (the last
+# unit) is the program `agentica compile` starts from.
+def compile_in(folder: String, units: List[Link.Unit], path: String) -> Result[Void]
   built = "#{folder}/out.agcb"
-  case File.write_text("#{folder}/#{name}", text)
-    error(e) -> return error("agc-py: cannot write #{path}: #{e.message}")
-    ok(_) -> nil
+  for unit in units
+    case File.write_text("#{folder}/#{unit.name}", unit.text)
+      error(e) -> return error("agc-py: cannot write #{path}: #{e.message}")
+      ok(_) -> nil
+    end
   end
 
+  name = List.last(units).name
   try agentica_compile(folder, name, built)
   case Path.replace(built, path)
     ok(_) -> ok()
