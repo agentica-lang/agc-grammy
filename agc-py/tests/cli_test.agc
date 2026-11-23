@@ -14,6 +14,21 @@ PROGRAM = (
 # learns to refuse it, pick another program that the frontend lets through.
 HUGE = "x: int = 99999999999999999999999\nprint(x)\n"
 BAD = "def f(x) -> int:\n    return x\n"
+# A syntax error and an excluded form: the command refuses each one, whatever
+# the diagnostic code says.
+SYNTAX = "def f(x: int) -> int\n    return x\n"
+EXCLUDED = "class A:\n    pass\n"
+# A program that exits with a code of its own, and one that dies on an index.
+EXITS = "import math\nimport sys\n\nprint(math.sqrt(16.0))\nsys.exit(3)\n"
+DIES = "xs: list[int] = [1]\nprint(xs[5])\n"
+
+# A program with the exit code and standard output python3 gives it.
+struct Prog
+  name: String
+  text: String
+  code: Int
+  stdout: String
+end
 
 struct Ran
   code: Int
@@ -164,6 +179,98 @@ def main() -> Void
         try Test.eq(from_agc.code, expected.code)
         try Test.eq(from_agcb.stdout, expected.stdout)
         Test.eq(from_agcb.code, expected.code)
+      end
+    end,
+    Test.test("a program refused before emission exits 1 and writes nothing, for each kind of refusal") do
+      in_folder(11) do |dir|
+        try File.write_text("#{dir}/a.py", "import b\n")
+        try File.write_text("#{dir}/b.py", "import a\n")
+        try File.write_text("#{dir}/lost.py", "import nothere\n")
+        try File.write_text("#{dir}/syntax.py", SYNTAX)
+        try File.write_text("#{dir}/excluded.py", EXCLUDED)
+        names = ["a.py", "b.py", "excluded.py", "lost.py", "syntax.py"]
+        cases = [
+          ["lost", "error[PY-IMPORT-UNKNOWN]"],
+          ["a", "error[PY-IMPORT-CYCLE]"],
+          ["syntax", "syntax.py"],
+          ["excluded", "excluded.py"],
+        ]
+
+        for pair in cases
+          for flags in [["-o", "#{dir}/out.agc"], ["--agcb", "-o", "#{dir}/out.agcb"]]
+            ran = try cli(["#{dir}/#{pair[0]}.py"] + flags)
+            try Test.eq(ran.code, 1)
+            try Test.eq(ran.stdout, "")
+            try Test.assert(ran.stderr.include?(pair[1]), ran.stderr)
+            try Test.eq(try Dir.list(dir), names)
+          end
+        end
+
+        ok()
+      end
+    end,
+    Test.test("the exit code of the program is python3's on both routes: sys.exit(3) and an uncaught error") do
+      in_folder(12) do |dir|
+        progs = [
+          Prog(name: "exits", text: EXITS, code: 3, stdout: "4.0\n"),
+          Prog(name: "dies", text: DIES, code: 1, stdout: ""),
+        ]
+
+        for prog in progs
+          base = "#{dir}/#{prog.name}"
+          try File.write_text("#{base}.py", prog.text)
+          expected = try python("#{base}.py")
+          try Test.eq(expected.code, prog.code)
+          agc = try cli(["#{base}.py", "-o", "#{base}.agc"])
+          agcb = try cli(["#{base}.py", "--agcb", "-o", "#{base}.agcb"])
+          try Test.eq(agc.code, 0)
+          try Test.eq(agcb.code, 0)
+          from_agc = try run_agc("#{base}.agc")
+          from_agcb = try run_bytecode("#{base}.agcb")
+          try Test.eq(from_agc.code, prog.code)
+          try Test.eq(from_agcb.code, prog.code)
+          try Test.eq(from_agc.stdout, prog.stdout)
+          try Test.eq(from_agcb.stdout, prog.stdout)
+        end
+
+        ok()
+      end
+    end,
+    Test.test(
+      "the output may be a relative path in another folder, replaces an earlier output, and a missing folder fails cleanly",
+    ) do
+      in_folder(13) do |dir|
+        try Dir.mkdir("#{dir}/sub")
+        try File.write_text("#{dir}/good.py", GOOD)
+        try File.write_text("#{dir}/sub/out.agc", "old\n")
+        main = try Path.resolve("agc-py/src/main.agc")
+        ran = try capture(agentica(), [main, "good.py", "-o", "sub/out.agc"], dir)
+        try Test.eq(ran.code, 0)
+        printed = try cli(["#{dir}/good.py"])
+        try Test.eq(try File.read_text("#{dir}/sub/out.agc"), printed.stdout)
+        for flags in [["-o", "#{dir}/none/out.agc"], ["--agcb", "-o", "#{dir}/none/out.agcb"]]
+          failed = try cli(["#{dir}/good.py"] + flags)
+          try Test.eq(failed.code, 1)
+          try Test.assert(failed.stderr.include?("cannot write #{dir}/none/"), failed.stderr)
+        end
+
+        Test.eq(try Dir.list(dir), ["good.py", "sub"])
+      end
+    end,
+    Test.test("--help exits 0 and a bad command line exits 2 without output") do
+      in_folder(14) do |dir|
+        try File.write_text("#{dir}/good.py", GOOD)
+        help = try cli(["--help"])
+        try Test.eq(help.code, 0)
+        try Test.assert(help.stdout.include?("--agcb"), help.stdout)
+        for args in [["--bogus"], ["#{dir}/good.py", "#{dir}/good.py"], ["#{dir}/good.py", "-o"]]
+          ran = try cli(args)
+          try Test.eq(ran.code, 2)
+          try Test.eq(ran.stdout, "")
+          try Test.assert(ran.stderr.include?("--help"), ran.stderr)
+        end
+
+        Test.eq(try Dir.list(dir), ["good.py"])
       end
     end,
     Test.test("a missing file exits 1 and a bad command line exits 2") do
