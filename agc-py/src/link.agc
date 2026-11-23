@@ -196,7 +196,7 @@ def wire(module: Modules.Module, mode: EmitModule.FileMode, exports: Map[String,
   end
 
   for need in needs
-    alias = Stdlib.needs_alias(need)
+    alias = try Stdlib.needs_alias(need)
     case alias_clash(alias, aliases, type_aliases)
       some(why) ->
         return error(

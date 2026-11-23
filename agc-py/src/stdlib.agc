@@ -93,11 +93,11 @@ def members(module: String) -> Map[String, EmitCtx.Sig]
 end
 
 ## The alias the spelling of a member uses for the `std/` module it needs.
-def needs_alias(path: String) -> String
+def needs_alias(path: String) -> Result[String]
   case path
-    "std/html" -> "Html"
-    "std/uri" -> "Uri"
-    _ -> "Std"
+    "std/html" -> ok("Html")
+    "std/uri" -> ok("Uri")
+    _ -> error("agc-py: no import alias is defined for `#{path}`")
   end
 end
 
