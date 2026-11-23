@@ -392,10 +392,14 @@ def emit_reuse_for(
 end
 
 # The `for` header line for iterator `name` over emitted iterable code of
-# static type `found` (a `String` iterable desugars through `split("")`).
+# static type `found` (a `String` iterable desugars through `split("")`; a
+# block call goes in parentheses, since the header would read its `{` as the
+# loop body).
 def for_header(name: String, found: String, code: String) -> String
   if base_of(found) == "String"
     "for #{name} in (#{code}).split(\"\")"
+  elsif code.include?(" { |")
+    "for #{name} in (#{code})"
   else
     "for #{name} in #{code}"
   end

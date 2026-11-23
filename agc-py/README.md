@@ -59,6 +59,7 @@ agc-py/src/main.agc    the command line (see below)
 agc-py/src/modules.agc  local module resolution: entry folder, search path, cycles
 agc-py/src/link.agc    linked emission: one `.agc` file per module
 agc-py/tests/          Agentica unit tests (run from the repo root)
+agc-py/tests/corpus/   whole programs that run like python3 (`corpus_run_test.agc`)
 ```
 
 Import resolution (`agc-py/src/modules.agc`) is a library stage of its own:

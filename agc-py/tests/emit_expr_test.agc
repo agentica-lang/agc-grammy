@@ -871,6 +871,24 @@ def main() -> Void
         [errcased("len(x)", {"x": "Int"}, "PY-TYPE-MISMATCH")],
       )
     end,
+    Test.test("a compound argument becomes a parenthesized receiver") do
+      scope = {"xs": "List[Int]", "ys": "List[Int]", "a": "Int", "b": "Int", "x": "Float"}
+      decls = ["xs: List[Int] = [3]", "ys: List[Int] = [1]", "a: Int = 1", "b: Int = 2", "x: Float = 1.5"]
+      check_all(
+        compiled.unwrap!,
+        "recv",
+        [
+          cased("len(xs + ys)", scope, decls, "Int", "(xs + ys).size"),
+          cased("abs(a - b)", scope, decls, "Int", "(a - b).abs"),
+          cased("abs(-a)", scope, decls, "Int", "(-a).abs"),
+          cased("round(x * 2.0)", scope, decls, "Int", "(x * 2.0).round"),
+          cased("sorted(xs + ys)", scope, decls, "List[Int]", "(xs + ys).sort"),
+          cased("float(a + b)", scope, decls, "Float", "(a + b).to_f"),
+          cased("a in xs + ys", scope, decls, "Bool", "(xs + ys).include?(a)"),
+        ],
+        [],
+      )
+    end,
     Test.test("range maps to backend ranges") do
       check_all(
         compiled.unwrap!,
@@ -898,7 +916,7 @@ def main() -> Void
           cased("int(s)", scope, decls, "Result[Int]", "s.to_i"),
           cased("int(f)", scope, decls, "Result[Int]", "f.to_i"),
           cased("float(s)", scope, decls, "Result[Float]", "s.to_f"),
-          cased("float(x)", scope, decls, "Result[Float]", "x.to_f"),
+          cased("float(x)", scope, decls, "Float", "x.to_f"),
         ],
         [
           errcased("int(x)", {"x": "Int"}, "PY-TYPE-MISMATCH"),

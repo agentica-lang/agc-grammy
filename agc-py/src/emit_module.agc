@@ -924,11 +924,34 @@ end
 # (Python still runs the expression) while the variable itself disappears.
 def rewrite_unused(lines: List[String], unused: List[String]) -> List[String]
   out: List[String] = []
+  index = 0
   for line in lines
-    out = out.push(rewrite_line(line, unused))
+    rewritten = rewrite_line(line, unused)
+    out = out.push(rewrite_idle_loop(rewritten, lines.drop(index + 1)))
+    index += 1
   end
 
   out
+end
+
+# A loop target that its own loop never reads becomes `for _`, even when the
+# name is read in another loop of the same def.
+def rewrite_idle_loop(line: String, after: List[String]) -> String
+  indent = indent_of(line)
+  rest = line.slice(indent.length, line.length - indent.length)
+  return line if !rest.start_with?("for ")
+
+  name = word_after(rest, 4)
+  return line if name == "" or name == "_"
+
+  for next_line in after
+    next_indent = indent_of(next_line)
+    break if next_line.strip != "" and next_indent.length <= indent.length
+
+    return line if EmitStmt.code_words(next_line).include?(name)
+  end
+
+  "#{indent}for _#{rest.slice(4 + name.length, rest.length - 4 - name.length)}"
 end
 
 def rewrite_line(line: String, unused: List[String]) -> String

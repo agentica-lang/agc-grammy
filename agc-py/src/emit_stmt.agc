@@ -88,6 +88,10 @@ def emit_block(ctx: EmitCtx.EmitCtx, body: List[Stmt]) -> BlockRes
   BlockRes.Ok(BlockOut(code: code, helpers: helpers, scope: current.scope, next_temp: current.next_temp))
 end
 
+# The identifier words of emitted code outside string literals; `#{...}` holes
+# count as code.
+def code_words(text: String) -> List[String] = words_in(strip_strings(text))
+
 private
 
 # Emits one statement as a block fragment (helpers empty except for `try`).
