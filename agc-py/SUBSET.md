@@ -189,8 +189,8 @@ plain types only.
   after the first non-import statement is `PY-IMPORT-POSITION`. One file is
   one module; the module name is the file stem, which must be a valid
   identifier (else `PY-IMPORT-UNKNOWN`).
-- Search path: the entry file's folder first, then an explicit list (CLI
-  flag in phase 4). The model is one flat module directory: a module is
+- Search path: the entry file's folder first, then an explicit list (`-I DIR`,
+  repeatable). The model is one flat module directory: a module is
   found by name, not beside its importer, and a local file shadows a
   supported stdlib module of the same path. Circular imports are
   `PY-IMPORT-CYCLE`, carrying every import span of the cycle. Relative
@@ -204,6 +204,23 @@ plain types only.
   own path, a parse failure the engine words without a position starts with
   the path of its file (the root file's included), and a file that cannot be
   read names the file and one line of the reason.
+- Emission is one `.agc` file per module, named `<module>.agc`, each importing
+  its siblings by name: `import x [as y]` is `import Y from "x"` (aliases are
+  capitalized) and `from x import a [as b]` is `import {a as b} from "x"`. An
+  `import` the file never uses emits no line, and an alias that Agentica
+  reserves (`time` becomes `Time`), that repeats another alias or that names a
+  `type` alias of the file is `PY-OUT-OF-SUBSET` at the import (rename it with
+  `as`); a renamed function (`as g`) must start with a lowercase letter. Only
+  a `def` of a local module can be imported: a type alias or a name the module
+  itself imports is `PY-OUT-OF-SUBSET` or `PY-NAME-UNKNOWN` at the imported
+  name, and an imported module may hold only `def`s, `type` aliases and a
+  docstring (`PY-OUT-OF-SUBSET` at its first other statement, in its own
+  file; the entry module's statements run in `main`). A call through an import is checked like
+  a local call (arity, keywords, types) except that a default is not lowered
+  (its value lives in the other file), so the call passes every parameter. A
+  module is only an attribute root: `x.f(...)` is the one form (`x`, `x.f` and
+  a deeper path are not values). A standard-library import is
+  `PY-OUT-OF-SUBSET` until its members are mapped.
 - Stdlib surface (closed, each mapped in phase 3). Covered with what the
   backend and its std give today, nothing else:
   - builtins: `print` (-> `puts`, space-joined), `len` (-> `size`/`length`),

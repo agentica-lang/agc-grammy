@@ -40,6 +40,7 @@ struct Sig
   types: List[String]
   defaults: List[Optional[Tree.Node]]
   ret: String
+  imported: Bool = false
 end
 
 ## One emitted statement: code lines plus the scope and temp supply after it.
@@ -84,6 +85,18 @@ end
 ## marker entries, so calling a def inside a try body never invents a
 ## `name: Function` helper parameter.
 def def_marker() -> String = "Function"
+
+## The scope spelling recorded for `import m`: a module is only an attribute
+## root (`m.f(...)`), never a value.
+def module_marker() -> String = "Module"
+
+## The Agentica import alias of a Python module binding: aliases are
+## capitalized (`m` is `M`, `_m` is `M_m`).
+def module_alias(bound: String) -> String
+  return "M#{bound}" if bound.start_with?("_")
+
+  bound.slice(0, 1).upcase + bound.slice(1, bound.length - 1)
+end
 
 ## Refuses with the span of `node`.
 def refuse(code: String, message: String, help: Optional[String], node: Tree.Node) -> StmtRes

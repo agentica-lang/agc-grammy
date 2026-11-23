@@ -1150,6 +1150,12 @@ def emit_name(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
     return error("PY-OUT-OF-SUBSET: function `#{name}` is not a value = help: call it, for example `#{name}(...)`")
   end
 
+  if found == EmitCtx.module_marker()
+    return error(
+      "PY-OUT-OF-SUBSET: module `#{name}` is not a value = help: name one of its functions, for example `#{name}.f(...)`",
+    )
+  end
+
   ok(Done(code: name, type: found, cx: cx))
 end
 
@@ -1163,6 +1169,10 @@ def emit_attr(cx: Cx, node: Tree.Node, source: String) -> Result[Done]
 
   method = List.last(parts)
   root = List.first(parts)
+  if cx.scope.get(root, "") == EmitCtx.module_marker()
+    return error("PY-OUT-OF-SUBSET: `#{full}` is not a value = help: call it, for example `#{full}(...)`")
+  end
+
   if (
     parts.size == 2 and
     (known_method?(method) or MUTATORS.include?(method) or method == "sort" or method == "reverse")
@@ -1736,6 +1746,7 @@ end
 # emitting its arguments first, and a `Function` marker resolves through the
 # ABI signatures. A name bound to a value keeps the value-call spelling.
 def call_sig(cx: Cx, head: Tree.Node, source: String) -> Result[Optional[EmitCtx.Sig]]
+  return module_call_sig(cx, head, source) if head.rule == "attr"
   return ok(none) if head.rule != "name"
 
   name = Tree.text(head, source)
@@ -1751,6 +1762,25 @@ def call_sig(cx: Cx, head: Tree.Node, source: String) -> Result[Optional[EmitCtx
   case cx.sigs.get(name)
     some(sig) -> ok(some(sig))
     none -> error("agc-py: no typed signature for `#{name}`")
+  end
+end
+
+# The signature of `m.f(...)` through an `import m` binding: the linker
+# registered every function of the module under its dotted Python spelling.
+# Any other attribute head is a method call.
+def module_call_sig(cx: Cx, head: Tree.Node, source: String) -> Result[Optional[EmitCtx.Sig]]
+  full = Tree.text(head, source)
+  parts = full.split(".")
+  root = List.first(parts)
+  return ok(none) if cx.scope.get(root, "") != EmitCtx.module_marker()
+
+  if parts.size != 2
+    return error("PY-OUT-OF-SUBSET: nested path `#{full}` through module `#{root}` = help: call one function of it")
+  end
+
+  case cx.sigs.get(full)
+    some(sig) -> ok(some(sig))
+    none -> error("PY-NAME-UNKNOWN: module `#{root}` does not define a function `#{List.last(parts)}`")
   end
 end
 
@@ -1822,6 +1852,12 @@ def validate_call_shape(args: List[Tree.Node], sig: EmitCtx.Sig, source: String)
   count_word = "#{missing.size} required arguments"
   if missing.size == 1
     count_word = "1 required argument"
+  end
+
+  if sig.imported
+    return error(
+      "PY-CALL-ARITY: `#{sig.name}` is missing #{count_word} (#{listed}) = help: pass every parameter of `#{sig.name}`: defaults do not cross modules (SUBSET section 5)",
+    )
   end
 
   error(
@@ -1945,6 +1981,17 @@ end
 def open_interp() -> String = "#" + "{"
 
 def emit_head_call(cx: Cx, head: Tree.Node, args: CallArgs, source: String) -> Result[Done]
+  if head.rule == "attr" and args.sig.some?
+    parts = Tree.text(head, source).split(".")
+    return emit_abi_call(
+      cx,
+      "#{EmitCtx.module_alias(List.first(parts))}.#{List.last(parts)}",
+      args.sig.unwrap!,
+      args,
+      source,
+    )
+  end
+
   return emit_attr_call(cx, head, args, source) if head.rule == "attr"
 
   return error("agc-py: cannot call #{head.rule}") if head.rule != "name"

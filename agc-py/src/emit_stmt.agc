@@ -550,7 +550,8 @@ def try_captures(code: List[String], outer: Map[String, String]) -> List[String]
   words = words_in(strip_strings(code.join("\n")))
   caps: List[String] = []
   for name in outer.keys()
-    if words.include?(name) and outer.get(name, "") != EmitCtx.def_marker()
+    kind = outer.get(name, "")
+    if words.include?(name) and kind != EmitCtx.def_marker() and kind != EmitCtx.module_marker()
       caps = caps.push(name)
     end
   end

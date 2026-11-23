@@ -21,8 +21,14 @@
 ## for module state: a `def` body that reads a top-level binding refuses
 ## spanned (the value lives in `main`; passing it as a parameter is the
 ## spelling). Everything else the backend cannot place refuses spanned too:
-## imports (issue #26) and a def that can fall through without
-## returning (the backend demands a value on every path).
+## an import the single-file pipeline cannot link, and a def that can fall
+## through without returning (the backend demands a value on every path).
+##
+## Linked emission (issue #26) emits one file per module: the entry module
+## runs its top-level statements in `main`, an imported module is only
+## declarations (Agentica's top level holds no statement and an imported
+## `main` never runs). The linker hands each file its `import` lines and the
+## names those imports bind (`Link`).
 ##
 ## The call ABI (issue #23) threads one `Sig` per `def` through every
 ## emission context: parameters, backend types, default-value nodes and the
@@ -55,6 +61,27 @@ import Tree from "../../src/tree"
 ## One assembled module: the full single-file program, one line per entry.
 struct ModuleOut
   code: List[String]
+end
+
+## What one file is: a standalone program (`Single`, whose imports refuse),
+## the entry module of a linked program (`Entry`), or an imported module
+## (`Imported`, declarations only).
+enum FileMode
+  Single
+  Entry
+  Imported
+end
+
+## What the linker hands one file: the `import` lines it spelled for the
+## Python imports, and the names they bind: `scope` marks a from-imported
+## function as callable and a module as an attribute root, `sigs` holds the
+## call ABI signature of each imported function (`name` for
+## `from m import name`, `m.name` for `import m`).
+struct Link
+  mode: FileMode
+  import_lines: List[String]
+  scope: Map[String, String]
+  sigs: Map[String, EmitCtx.Sig]
 end
 
 ## A module answer: the assembled program or the first spanned refusal.
@@ -94,46 +121,81 @@ end
 ## the four text buckets.
 struct Asm
   scope: Map[String, String]
+  imports: Map[String, String]
   walk: WalkState
   top_values: Map[String, String]
   aliases: Map[String, String]
   sigs: Map[String, EmitCtx.Sig]
   defs_done: Int
   next_temp: Int
+  import_lines: List[String]
   alias_lines: List[String]
   def_lines: List[String]
   helper_lines: List[String]
   main_lines: List[String]
 end
 
+## The call signatures of the `def`s of a module, without their defaults: an
+## importer cannot lower a default (its value lives in the other file), so a
+## cross-module call passes every parameter.
+def exported_sigs(program: Frontend.Program) -> Map[String, EmitCtx.Sig]
+  out: Map[String, EmitCtx.Sig] = {}
+  sigs = sig_table(program)
+  for name in sigs.keys()
+    sig = sigs.get(name).unwrap!
+    out = out.put(name, sig.with(defaults: sig.defaults.map { |_| none }, imported: true))
+  end
+
+  out
+end
+
+## The names of the `type` aliases of a module, which cannot cross a module.
+def alias_names(program: Frontend.Program) -> List[String] = all_aliases(program).keys()
+
+## The single-file path stays for `Py2Agc.translate`, which has a source text
+## and no module graph; it is `emit_linked` with imports refused.
+##
 ## Emits a resolved `Program` as one standalone `.agc` file: `type` aliases
 ## hoist above every `def`, each `def` keeps its source order with a fully
 ## typed signature, outlined `try` helpers hoist next to the `def`s, and the
 ## top-level statements run in `main` in source order. The first refusal
 ## wins, so a program that emits at all answers a single `ModuleOut`.
 def emit_program(program: Frontend.Program, source: String, file: String) -> ModuleRes
+  emit_linked(program, source, file, Link(mode: FileMode.Single, import_lines: [], scope: {}, sigs: {}))
+end
+
+## Emits one file of a linked program: the same assembly with the linker's
+## import lines first and its import bindings visible in `main` and in every
+## `def` body.
+def emit_linked(program: Frontend.Program, source: String, file: String, link: Link) -> ModuleRes
   case reserved_refusal(program)
     some(ref) -> ModuleRes.No(ref)
     none ->
       sigs = sig_table(program)
-      case walk_top(asm_start(sigs), program.top, program, source, file)
+      for name in link.sigs.keys()
+        sigs = sigs.put(name, link.sigs.get(name).unwrap!)
+      end
+
+      case walk_top(asm_start(sigs, link), program.top, program, source, file, link)
         StepRes.No(ref) -> ModuleRes.No(ref)
-        StepRes.Ok(done) -> ModuleRes.Ok(ModuleOut(code: assemble(done)))
+        StepRes.Ok(done) -> ModuleRes.Ok(ModuleOut(code: assemble(done, link)))
       end
   end
 end
 
 private
 
-def asm_start(sigs: Map[String, EmitCtx.Sig]) -> Asm
+def asm_start(sigs: Map[String, EmitCtx.Sig], link: Link) -> Asm
   Asm(
-    scope: {},
+    scope: link.scope,
+    imports: link.scope,
     walk: WalkState(bound: {}, bound_names: [], read_names: [], real_names: []),
     top_values: {},
     aliases: {},
     sigs: sigs,
     defs_done: 0,
     next_temp: 0,
+    import_lines: link.import_lines,
     alias_lines: [],
     def_lines: [],
     helper_lines: [],
@@ -219,6 +281,7 @@ def walk_top(
   program: Frontend.Program,
   source: String,
   file: String,
+  link: Link,
 ) -> StepRes
   current = asm
   for item in items
@@ -230,7 +293,7 @@ def walk_top(
       end
     end
 
-    case step_item(current, item, program, source, file)
+    case step_item(current, item, program, source, file, link)
       StepRes.No(ref) -> return StepRes.No(ref)
       StepRes.Ok(next) -> current = next
     end
@@ -255,21 +318,87 @@ def flush_defs(asm: Asm, program: Frontend.Program, at: Optional[Int], source: S
   StepRes.Ok(current)
 end
 
-def step_item(asm: Asm, item: Frontend.TopItem, program: Frontend.Program, source: String, file: String) -> StepRes
+def step_item(
+  asm: Asm,
+  item: Frontend.TopItem,
+  program: Frontend.Program,
+  source: String,
+  file: String,
+  link: Link,
+) -> StepRes
   case item
-    Frontend.TopItem.ImportItem(decls) ->
+    Frontend.TopItem.ImportItem(decls) -> step_import(asm, decls, program, link)
+    Frontend.TopItem.StmtItem(stmt, names) -> step_stmt(asm, item, stmt, names, source, file, link)
+  end
+end
+
+# The linker has already spelled every import of a linked file, so the item
+# itself emits nothing; a standalone program has no linker behind it.
+def step_import(asm: Asm, decls: List[Frontend.ImportDecl], program: Frontend.Program, link: Link) -> StepRes
+  case link.mode
+    FileMode.Single ->
       span = import_span(decls, program)
       StepRes.No(
         EmitCtx.Refusal(
           code: "PY-OUT-OF-SUBSET",
-          message: "imports need linked-module emission; issue #26 owns it",
-          help: some("inline the values you need for now"),
+          message: "imports need the module graph of the agc-py command",
+          help: some("translate the file with `Py2Agc.translate_modules`, or inline the values you need"),
           start: span.start,
           stop: span.stop,
         ),
       )
-    Frontend.TopItem.StmtItem(stmt, names) -> step_stmt_item(asm, stmt, names, source, file)
+    _ -> StepRes.Ok(asm)
   end
+end
+
+# An imported module is declarations only: a `def` or a `type` alias. Any
+# other top-level statement would run in `main`, which an import never runs.
+def step_stmt(
+  asm: Asm,
+  item: Frontend.TopItem,
+  stmt: Stmt,
+  names: List[Frontend.NameOcc],
+  source: String,
+  file: String,
+  link: Link,
+) -> StepRes
+  case link.mode
+    FileMode.Imported ->
+      case stmt
+        Stmt.AliasDef(_, _) -> step_stmt_item(asm, stmt, names, source, file)
+        Stmt.ExprStmt(expr) if docstring?(expr, source) -> StepRes.Ok(asm)
+        _ -> imported_statement_refusal(item)
+      end
+
+    _ -> step_stmt_item(asm, stmt, names, source, file)
+  end
+end
+
+# A plain string statement (a module docstring) does nothing in Python, so an
+# imported module may hold it; it emits nothing.
+def docstring?(expr: Tree.Node, source: String) -> Bool
+  node = expr
+  while node.rule != "text" and node.children.size == 1
+    node = List.first(node.children)
+  end
+
+  return false if node.rule != "text"
+
+  first = Tree.text(node, source).slice(0, 1)
+  first == "\"" or first == "'"
+end
+
+def imported_statement_refusal(item: Frontend.TopItem) -> StepRes
+  at = Frontend.top_start(item).unwrap_or(0)
+  StepRes.No(
+    EmitCtx.Refusal(
+      code: "PY-OUT-OF-SUBSET",
+      message: "an imported module may only declare `def`s and type aliases",
+      help: some("move the top-level code into a function the entry module calls"),
+      start: at,
+      stop: at + 1,
+    ),
+  )
 end
 
 def import_span(decls: List[Frontend.ImportDecl], program: Frontend.Program) -> Frontend.Span
@@ -451,7 +580,7 @@ def def_scope(
   func_def: Frontend.FuncDef,
   param_types: List[String],
 ) -> Map[String, String]
-  scope: Map[String, String] = {}
+  scope: Map[String, String] = asm.imports
   for other in program.funcs
     scope = scope.put(other.name, EmitCtx.def_marker())
   end
@@ -1004,7 +1133,7 @@ end
 # The final program: aliases, the expression helpers, the defs, the outlined
 # try helpers, then `main` over the top-level statements with the rewrite
 # passes applied.
-def assemble(asm: Asm) -> List[String]
+def assemble(asm: Asm, link: Link) -> List[String]
   main_body = rewrite_unused(asm.main_lines, unused_names(asm.walk))
   main_body = append_self_reads(main_body, self_only_names(asm.walk))
   if main_body.empty?
@@ -1012,6 +1141,11 @@ def assemble(asm: Asm) -> List[String]
   end
 
   out: List[String] = []
+  if !asm.import_lines.empty?
+    out = out + asm.import_lines
+    out = out.push("")
+  end
+
   if !asm.alias_lines.empty?
     out = out + asm.alias_lines
     out = out.push("")
@@ -1029,7 +1163,10 @@ def assemble(asm: Asm) -> List[String]
     out = out.push("")
   end
 
-  style_ends(out + ["def main() -> Void"] + EmitCtx.indented(main_body, 1) + ["end"])
+  case link.mode
+    FileMode.Imported -> style_ends(out.take(out.size - 1))
+    _ -> style_ends(out + ["def main() -> Void"] + EmitCtx.indented(main_body, 1) + ["end"])
+  end
 end
 
 # `agentica.toml` sets `blank_line_after_end = true`, so the emitted file

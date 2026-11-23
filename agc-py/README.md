@@ -19,13 +19,25 @@ frontend error before anything is emitted. See `roadmap.md` for the phases.
 agentica agc-py/src/main.agc FILE.py            # the .agc text on standard output
 agentica agc-py/src/main.agc FILE.py -o OUT.agc # or into a file
 agentica agc-py/src/main.agc FILE.py --agcb -o OUT.agcb # bytecode
+agentica agc-py/src/main.agc FILE.py -I DIR -o OUT.agc  # with imported modules
 ```
 
 The whole text is built first; `-o` writes a temporary file and renames it into
-place, so a failure leaves no partial output and keeps an older one. A refusal
+place: a refusal or a failed write phase leaves the outputs as they were. A refusal
 prints its diagnostics to standard error and exits 1; a bad command line
-exits 2. The command translates one file: local imports wait for issue #26,
-and so does an import search path (`-I`), since nothing reads one yet.
+exits 2.
+
+The local modules `FILE.py` imports are found in its folder, then in each
+`-I DIR` (repeatable) in order. A program with imports is one `.agc` file per
+module, so it needs `-o`: the entry module goes to `OUT.agc` and each imported
+module to `NAME.agc` beside it (an output that is a module's file is refused).
+All the files are written to temporaries first and renamed together (a rename
+that fails midway can leave some renamed). An existing `NAME.agc` is
+overwritten, and files from an earlier run that the program no longer needs
+stay. With `--agcb` the modules are compiled in the private folder and only
+the bytecode is kept. A call across modules must pass every parameter:
+defaults do not cross modules (`SUBSET.md` section 5). An `-I` without a
+directory exits 2.
 
 `--agcb` needs `-o`. It runs `agentica compile` (`$AGC_PY_AGENTICA`, else
 `agentica` from `PATH`) on the emitted program inside a private folder beside
@@ -45,6 +57,7 @@ agc-py/roadmap.md      the work in phases, with exit criteria
 agc-py/src/py2agc.agc  the translator: `.py` in, typed `.agc` out
 agc-py/src/main.agc    the command line (see below)
 agc-py/src/modules.agc  local module resolution: entry folder, search path, cycles
+agc-py/src/link.agc    linked emission: one `.agc` file per module
 agc-py/tests/          Agentica unit tests (run from the repo root)
 ```
 
@@ -54,8 +67,12 @@ scope-resolves every reachable local module, validates imported names, and
 answers the modules in dependency order with their resolved import edges.
 Unknown modules refuse as `PY-IMPORT-UNKNOWN`, unknown imported names as
 `PY-NAME-UNKNOWN`, and the first cycle as `PY-IMPORT-CYCLE` at every import
-span on the cycle. Linked-module emission stays issue #26;
-`Py2Agc.translate` is still single-file.
+span on the cycle. Linked emission (`agc-py/src/link.agc`,
+`Py2Agc.translate_modules`) walks that graph in dependency order and emits one
+file per module: `import m [as y]` is `import Y from "m"`, `from m import f
+[as g]` is `import {f as g} from "m"`, and an `import` nothing uses emits no
+line. Only a `def` crosses a module (`SUBSET.md` section 5).
+`Py2Agc.translate` is still single-file and refuses imports.
 
 grammy stays the only parser: `agc-py` will import it by relative path,
 exactly as `tests/` and `examples/python/` do. No workspace split yet by
