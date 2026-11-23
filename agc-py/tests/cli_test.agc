@@ -15,9 +15,10 @@ struct Ran
   stderr: String
 end
 
-# The binary under test: `$AGENTICA` (the Makefile sets it) or `agentica`.
+# The binary under test: `$AGC_PY_AGENTICA` (the Makefile sets it) or
+# `agentica`.
 def agentica() -> String
-  case System.env("AGENTICA")
+  case System.env("AGC_PY_AGENTICA")
     ok(path) if !path.empty?() -> path
     _ -> "agentica"
   end
@@ -39,7 +40,7 @@ def cli(args: List[String]) -> Result[Ran] = capture(agentica(), ["agc-py/src/ma
 def in_folder(n: Int, body: Fn[String, Result[Void]]) -> Result[Void]
   folder = "/tmp/agc_cli_#{System.pid()}_#{n}"
   try Path.remove(folder)
-  try Dir.mkdir(folder)
+  try Dir.mkdir_private(folder)
   result = body.call(folder)
   _ = Path.remove(folder)
   result
