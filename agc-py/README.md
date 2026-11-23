@@ -24,6 +24,8 @@ The whole text is built first; `-o` writes a temporary file and renames it into
 place, so a failure leaves no partial output and keeps an older one. A refusal
 prints its diagnostics to standard error and exits 1; a bad command line
 exits 2. The command translates one file: local imports wait for issue #26.
+A kill (SIGKILL, SIGINT) can leave `OUT.PID.tmp` behind as a file; the command
+does not handle signals.
 
 ## Layout
 
