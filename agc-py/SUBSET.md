@@ -267,17 +267,29 @@ plain types only.
   - A keyword argument to a mapped function names the Python parameter and is
     accepted, including for the functions CPython takes positionally only
     (`math.sqrt(x=1.0)` is a `TypeError` there).
-  - `json` (-> `JSON.parse`/`JSON.encode`), `re` (-> `std/regex`, RE2 subset),
-    `toml` (-> `std/toml`), `datetime` (-> `std/utc`, partial:
-    instants/formatting only, no arithmetic/`timedelta`/`strptime`),
-    `urllib.parse` (->
-    `std/uri`), `http.client` (-> `std/http`), `html` escaping (-> `std/html`),
-    `mimetypes` (-> `std/mime`), `cookies` (-> `std/cookie`), `argparse` (->
-    `std/option_parser`), `logging` (-> `std/logger`), `time` (-> `Time`),
-    `random` (-> `Random`; secrets need `OpenSSL.Random`, excluded v0),
-    `hashlib` (-> `OpenSSL.Digest`, partial), `pathlib` (-> `File`
-    operations, partial), `string` methods: `strip`, `split`, `join`,
-    `replace`, `upcase`, `downcase`, `start_with?`, `end_with?`, `include?`.
+  - `html`: `escape(s)` (-> `std/html`, with `'` as `&#x27;` like CPython).
+    `escape(s, quote=False)` is `PY-KWARG-UNKNOWN`. `html.unescape` is
+    unmapped until it can match CPython's decoding.
+  - `urllib.parse`: `quote`, `quote_plus` (-> `std/uri`, spelled like
+    CPython: `~` stays, `*` is escaped, `quote` keeps `/`) and `unquote`,
+    `unquote_plus`, which return a catchable `Result` (CPython keeps a
+    malformed escape, the backend refuses it). One argument each: no `safe`,
+    `encoding` or `errors`.
+  - `time`: `time()` (seconds as a `float`), `monotonic()` and `sleep(secs)`
+    (-> `Time` and `Task.sleep`, in whole milliseconds).
+  - `random`: `random()` (-> `Random.float`) and `randint(a, b)` (->
+    `Random.int`; `a > b` halts the run, where CPython raises a catchable
+    `ValueError`).
+  - Not mapped, each member `PY-IMPORT-UNKNOWN` with "no member ... is mapped
+    yet": `json`, `re`, `toml`, `datetime`, `http.client`, `mimetypes`,
+    `cookies`, `argparse`, `logging`, `hashlib` and `pathlib`. Their Python
+    API returns objects (a `Match`, a `datetime`, a `Path`, a logger, a
+    tuple, a dynamic `json` value) that the class-free, tuple-free subset
+    cannot type; each needs a decision on its object-free spelling first.
+  - `string` methods: `strip`, `split`, `join`, `replace`, `upcase`,
+    `downcase`, `start_with?`, `end_with?`, `include?` (the Python spellings
+    `strip`, `split`, `join`, `replace`, `lower`, `upper`, `startswith`,
+    `endswith` map as in section 3).
   - A mapped member lowers in place: a standard-library import emits no
     import line. A member the table does not hold is `PY-IMPORT-UNKNOWN`,
     with the members the module does map in the help.

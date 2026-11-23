@@ -198,6 +198,97 @@ def main() -> Void
         Test.eq(got, "7\n")
       end
     end,
+    Test.test("html and urllib.parse encode and decode like CPython, by module, alias and name") do
+      source = "import html\nimport urllib.parse\nfrom urllib.parse import quote_plus as qp, unquote\n"
+      source = source + "s: str = \"<a href=\\\"x\\\">'&</a> é~*/ +\"\nprint(html.escape(s))\n"
+      source = source + "print(urllib.parse.quote(s), qp(s), urllib.parse.quote(\"a b/c\"))\n"
+      source = source + "for t in [\"%7E\", \"%2F\", \"%\", \"a%2Fb%7E~/%25\"]:\n"
+      source = source + "    print(urllib.parse.quote(t), qp(t))\n"
+      source = (
+        source +
+        "try:\n    print(unquote(\"a%2Fb+c\"), urllib.parse.unquote_plus(\"a+b%26\"))\nexcept ValueError:\n    print(\"bad\")\n"
+      )
+
+      agrees(compiled.unwrap!, 14, source) do |got|
+        Test.assert(got.include?("&#x27;") and got.include?("%257E") and got.include?("a/b+c a b&"), got)
+      end
+    end,
+    Test.test("unquote of a malformed escape is a catchable error where CPython keeps the text") do
+      source = (
+        "from urllib.parse import unquote\ntry:\n    print(unquote(\"100%\"))\nexcept ValueError:\n    print(\"bad\")\n"
+      )
+
+      try refuses(
+        compiled.unwrap!,
+        25,
+        "import html\nprint(html.escape(\"a\", quote=False))\n",
+        ["error[PY-KWARG-UNKNOWN]", "use one of (s)"],
+      )
+
+      in_dir(26) do |dir|
+        text = try translate(compiled.unwrap!, dir, source)
+        try File.write_text("#{dir}/prog.agc", text)
+        got = try run_process(agentica(), ["#{dir}/prog.agc"])
+        Test.eq(got.stdout, "bad\n")
+      end
+    end,
+    Test.test("html.unescape is unmapped") do
+      refuses(
+        compiled.unwrap!,
+        27,
+        "import html\nprint(html.unescape(\"&amp;\"))\n",
+        ["error[PY-IMPORT-UNKNOWN]", "`html.unescape`", "`html` maps escape"],
+      )
+    end,
+    Test.test("time and random answer in range, and sleep waits") do
+      source = (
+        "import time\nimport random\nfrom random import randint\nt0: float = time.time()\nm0: float = time.monotonic()\n"
+      )
+
+      source = (
+        source +
+        "time.sleep(0.2)\nif time.time() - t0 >= 0.19 and time.monotonic() - m0 >= 0.19 and t0 > 1000000000.0:\n    print(\"clock\")\n"
+      )
+
+      source = source + "r: int = randint(3, 3)\nif random.random() < 1.0:\n    print(r)\n"
+      agrees(compiled.unwrap!, 15, source) do |got| Test.eq(got, "clock\n3\n") end
+    end,
+    Test.test("a standard-library import whose std alias is taken refuses") do
+      dir = "/tmp/agc_std_#{System.pid()}_16"
+      try Path.remove(dir)
+      try Dir.mkdir_private(dir)
+      try File.write_text("#{dir}/uri.py", "def f(x: int) -> int:\n    return x\n")
+      try File.write_text(
+        "#{dir}/prog.py",
+        "import uri\nfrom urllib.parse import quote\nprint(uri.f(1), quote(\"a\"))\n",
+      )
+
+      case Py2Agc.translate_modules(compiled.unwrap!, "#{dir}/prog.py", [])
+        ok(_) -> error("expected a refusal")
+        error(e) ->
+          _ = Path.remove(dir)
+          try Test.assert(e.message.include?("error[PY-OUT-OF-SUBSET]"), e.message)
+          Test.assert(e.message.include?("`std/uri` becomes `Uri`"), e.message)
+      end
+    end,
+    Test.test("a mapped module with an unmapped member and an unmapped module refuse precisely") do
+      try refuses(
+        compiled.unwrap!,
+        17,
+        "from urllib.parse import urlencode\n",
+        [
+          "prog.py:1:26 error[PY-IMPORT-UNKNOWN]", "`urllib.parse.urlencode`",
+          "`urllib.parse` maps quote, quote_plus, unquote, unquote_plus",
+        ],
+      )
+
+      refuses(
+        compiled.unwrap!,
+        18,
+        "import json\nprint(json.dumps(1))\n",
+        ["error[PY-IMPORT-UNKNOWN]", "`json.dumps`", "no member of `json` is mapped yet"],
+      )
+    end,
     Test.test("a member outside the table refuses with what the module maps") do
       try refuses(
         compiled.unwrap!,
